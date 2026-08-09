@@ -1,0 +1,3173 @@
+import { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
+import { ArrowLeft, Plus, Trash2, Download, UserPlus, Pencil, Settings, ChevronUp, ChevronDown, MessageCircle, Check, Loader, Truck, Printer } from 'lucide-react';
+import { jsPDF } from 'jspdf';
+import html2canvas from 'html2canvas';
+import { saveBill, getNextInvoiceNumber, getTermsTemplates, getAllClients, saveClient, getProfile, getAllProducts, saveProduct, getInvoiceDisplayOptions, saveInvoiceDisplayOptions, getAllProfiles, getRegionMode, saveRecurring, getAllBills } from '../store';
+import { INVOICE_TYPES, generateEWayBillJSON, formatCurrency, getCountryConfig, getStatesForCountry, getAllUnits, addCustomUnit, removeCustomUnit, calculateRoundOff, getCountriesForRegion, TDS_SECTIONS, TCS_SECTIONS, TERMS_PRESETS, getActiveAccounts, getDefaultAccount, getAccountById, getDefaultUnitForMode, filterUnitsByMode, PAPER_SIZES, getPaperSize, computeInvoiceTotals } from '../utils';
+import { getPrintSettings, savePrintSettings } from '../utils/printSettings';
+import { openWhatsAppShare } from '../utils/share';
+import { confirmAction, promptAction } from './ConfirmModal';
+import PrintPreviewModal from './PrintPreviewModal';
+import { ensureToken, findOrCreateFolder, uploadPDF } from '../services/googleDrive';
+import DOMPurify from 'dompurify';
+import InvoicePreview from './InvoicePreview';
+import { suggestGstRate } from '../utils/hsnRates';
+import HelpButton from './HelpButton';
+import { getClientCredit, planCreditApplication } from '../utils/clientCredit';
+import ClientModal from './ClientModal';
+import { toast } from './Toast';
+
+function RichEditor({ value, onChange, placeholder, toolbar = false }) {
+  const ref = useRef(null);
+  const isInitialized = useRef(false);
+
+  useEffect(() => {
+    if (ref.current && !isInitialized.current) {
+      ref.current.innerHTML = DOMPurify.sanitize(value || '');
+      isInitialized.current = true;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (ref.current && isInitialized.current && ref.current.innerHTML !== value) {
+      ref.current.innerHTML = DOMPurify.sanitize(value || '');
+    }
+  }, [value]);
+
+  const handleInput = useCallback(() => {
+    if (ref.current) {
+      onChange(ref.current.innerHTML);
+    }
+  }, [onChange]);
+
+  const applyFormat = (cmd, val) => {
+    if (ref.current) ref.current.focus();
+    document.execCommand(cmd, false, val);
+    if (ref.current) onChange(ref.current.innerHTML);
+  };
+  const btnStyle = { padding: '0.2rem 0.5rem', fontSize: '0.78rem', borderRadius: '4px', border: '1px solid var(--border-color)', background: 'var(--bg-secondary)', cursor: 'pointer', minWidth: '28px' };
+
+  return (
+    <>
+      {toolbar && (
+        <div style={{ display: 'flex', gap: '0.25rem', flexWrap: 'wrap', marginBottom: '0.4rem' }}>
+          <button type="button" onClick={() => applyFormat('bold')}        title="Bold (Ctrl+B)"      style={{ ...btnStyle, fontWeight: 700 }}>B</button>
+          <button type="button" onClick={() => applyFormat('italic')}      title="Italic (Ctrl+I)"    style={{ ...btnStyle, fontStyle: 'italic' }}>I</button>
+          <button type="button" onClick={() => applyFormat('underline')}   title="Underline (Ctrl+U)" style={{ ...btnStyle, textDecoration: 'underline' }}>U</button>
+          <span style={{ width: 1, background: 'var(--border-color)', margin: '0 0.2rem' }} />
+          <button type="button" onClick={() => applyFormat('insertUnorderedList')} title="Bullet list"  style={btnStyle}>•&nbsp;List</button>
+          <button type="button" onClick={() => applyFormat('insertOrderedList')}   title="Numbered list" style={btnStyle}>1.&nbsp;List</button>
+          <span style={{ width: 1, background: 'var(--border-color)', margin: '0 0.2rem' }} />
+          <button type="button" onClick={() => applyFormat('formatBlock', '<h4>')}  title="Heading"   style={{ ...btnStyle, fontWeight: 700, fontSize: '0.85rem' }}>H</button>
+          <button type="button" onClick={() => applyFormat('formatBlock', '<p>')}   title="Paragraph" style={btnStyle}>¶</button>
+          <button type="button" onClick={async () => {
+            const url = await promptAction({
+              title: 'Insert link',
+              message: 'Paste the URL to link to. Selected text will become the link.',
+              placeholder: 'https://example.com',
+              confirmLabel: 'Insert',
+            });
+            if (url) applyFormat('createLink', url);
+          }} title="Insert link" style={btnStyle}>🔗</button>
+          <span style={{ width: 1, background: 'var(--border-color)', margin: '0 0.2rem' }} />
+          <button type="button" onClick={() => applyFormat('removeFormat')} title="Clear formatting" style={btnStyle}>✕</button>
+        </div>
+      )}
+      <div ref={ref} contentEditable suppressContentEditableWarning
+        className="form-input rich-editor"
+        onInput={handleInput}
+        style={{ minHeight: '100px', whiteSpace: 'pre-wrap' }}
+        data-placeholder={placeholder} />
+    </>
+  );
+}
+
+function loadDraft() {
+  try {
+    const saved = sessionStorage.getItem('gst_invoiceDraft');
+    return saved ? JSON.parse(saved) : null;
+  } catch { return null; }
+}
+
+const DEFAULT_OPTIONS = {
+  showGST: true,
+  showState: true,
+  showGSTIN: true,
+  showPlaceOfSupply: true,
+  showHSN: true,
+  showDiscount: true,
+  showBankDetails: true,
+  showUPI: true,
+  showLogo: true,
+  showSignature: true,
+  showTerms: true,
+  showNotes: true,
+  showAmountWords: true,
+  showDueDate: true,
+  showItemQty: true,
+  showRoundOff: false,
+  invoiceMode: 'goods',
+  paperSize: 'a4',
+  thermalFontSize: 'medium',
+  thermalCompact: false,
+  thermalCutMark: true,
+  recurring: null,
+  showCess: false,
+  reverseCharge: false,
+  showTDS: false,
+  tdsSection: '194Q',
+  tdsRate: 0.1,
+  tdsCumulativeThisYear: 0,
+  showTCS: false,
+  tcsSection: '206C(1H)',
+  tcsRate: 0.1,
+  tcsCumulativeThisYear: 0,
+  customTitle: '',
+  currency: 'INR',
+  exchangeRate: '',
+  selectedAccountId: null,
+  showAccountLabel: false,
+  accentColor: '',
+  pdfStyle: 'classic',
+  invoiceDiscountValue: 0,
+  invoiceDiscountType: 'fixed',
+  autoApplyClientCredit: false,
+};
+
+const ACCENT_PRESETS = [
+  { color: '#1e40af', label: 'Blue' },
+  { color: '#7c3aed', label: 'Purple' },
+  { color: '#0f766e', label: 'Teal' },
+  { color: '#be123c', label: 'Red' },
+  { color: '#c2410c', label: 'Orange' },
+  { color: '#15803d', label: 'Green' },
+  { color: '#0369a1', label: 'Sky' },
+  { color: '#1e293b', label: 'Dark' },
+];
+
+const PDF_STYLES = [
+  { id: 'classic', label: 'Classic', desc: 'Clean with top accent bar' },
+  { id: 'modern', label: 'Modern', desc: 'Bold header with color block' },
+  { id: 'minimal', label: 'Minimal', desc: 'Simple, borderless layout' },
+];
+
+function SuggestingInput({ item, suggestions, onFieldChange, onSelectProduct, onSetProductSearch, currency }) {
+  const [activeIdx, setActiveIdx] = useState(-1);
+  useEffect(() => { setActiveIdx(-1); }, [item.name, suggestions.length]);
+  const commit = (idx) => {
+    const pick = suggestions[idx] ?? suggestions[0];
+    if (pick) onSelectProduct(item.id, pick);
+  };
+  const handleKey = (e) => {
+    if (!suggestions.length) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setActiveIdx(i => (i + 1) % suggestions.length);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setActiveIdx(i => (i <= 0 ? suggestions.length - 1 : i - 1));
+    } else if (e.key === 'Enter') {
+      if (activeIdx >= 0) {
+        e.preventDefault();
+        e.stopPropagation();
+        commit(activeIdx);
+      }
+    } else if (e.key === 'Escape') {
+      onSetProductSearch({ itemId: null, query: '' });
+    }
+  };
+  return (
+    <>
+      <input type="text" className="form-input" value={item.name}
+        onChange={(e) => onFieldChange(item.id, 'name', e.target.value)}
+        onBlur={() => setTimeout(() => onSetProductSearch({ itemId: null, query: '' }), 200)}
+        onKeyDown={handleKey}
+        autoComplete="off" />
+      {suggestions.length > 0 && (
+        <div className="product-suggestions" role="listbox">
+          {suggestions.map((p, i) => (
+            <div key={p.id} className="product-suggestion-item"
+              role="option"
+              aria-selected={i === activeIdx}
+              onMouseEnter={() => setActiveIdx(i)}
+              onMouseDown={() => onSelectProduct(item.id, p)}
+              style={i === activeIdx ? { background: 'var(--primary-light, rgba(30,64,175,0.12))' } : undefined}>
+              <span className="product-suggestion-name">{p.name}</span>
+              <span className="product-suggestion-meta">
+                {p.hsn && `HSN: ${p.hsn}`}{p.hsn && p.rate ? ' · ' : ''}{p.rate ? formatCurrency(p.rate, currency || 'INR') : ''}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+const LineItem = memo(function LineItem({
+  item, invoiceOptions, taxInclusive, showGST, taxLabel,
+  units, countryTaxRates, filterUnitsByMode, invoiceMode,
+  currency, profileCountry, suggestions,
+  onFieldChange, onSelectProduct, onSetProductSearch,
+  onAddCustomUnit, onRemoveCustomUnit, onRemove, clampNonNeg,
+  isLastRow, onAddRow,
+}) {
+  const handleRowKeyDown = (e) => {
+    if (e.key !== 'Enter' || e.shiftKey || !isLastRow) return;
+    const hasContent = (item.name && item.name.trim()) || Number(item.rate) > 0 || Number(item.quantity) > 0;
+    if (!hasContent) return;
+    e.preventDefault();
+    onAddRow?.();
+  };
+  return (
+    <div className="line-item-row" data-item-id={item.id} onKeyDown={handleRowKeyDown}>
+      <div className="line-item-field" style={{ flex: 2.5, position: 'relative' }}>
+        <label className="form-label">Description</label>
+        <SuggestingInput
+          item={item}
+          suggestions={suggestions}
+          onFieldChange={onFieldChange}
+          onSelectProduct={onSelectProduct}
+          onSetProductSearch={onSetProductSearch}
+          currency={currency}
+        />
+      </div>
+
+      <div className="line-item-field" style={{ flex: 1.2 }}>
+        <label className="form-label">Batch No.</label>
+        <input type="text" className="form-input" value={item.batch || ''}
+          onChange={(e) => onFieldChange(item.id, 'batch', e.target.value)} />
+      </div>
+      <div className="line-item-field" style={{ flex: 0.8 }}>
+        <label className="form-label">Exp (MM/YY)</label>
+        <input type="text" className="form-input" value={item.expiry || ''}
+          onChange={(e) => onFieldChange(item.id, 'expiry', e.target.value)} />
+      </div>
+      <div className="line-item-field" style={{ flex: 1 }}>
+        <label className="form-label">OMRP</label>
+        <input type="number" min="0" step="any" className="form-input" value={item.omrp || ''}
+          onChange={(e) => onFieldChange(item.id, 'omrp', clampNonNeg(e.target.value))} />
+      </div>
+      <div className="line-item-field" style={{ flex: 1 }}>
+        <label className="form-label">MRP</label>
+        <input type="number" min="0" step="any" className="form-input" value={item.mrp || ''}
+          onChange={(e) => onFieldChange(item.id, 'mrp', clampNonNeg(e.target.value))} />
+      </div>
+
+      {invoiceOptions.showHSN && (
+        <div className="line-item-field" style={{ flex: 1, position: 'relative' }}>
+          <label className="form-label">HSN/SAC</label>
+          <input type="text" className="form-input" value={item.hsn}
+            onChange={(e) => {
+              const val = e.target.value;
+              onFieldChange(item.id, 'hsn', val);
+              const suggested = suggestGstRate(val);
+              if (suggested && (item.taxPercent === undefined || item.taxPercent === 18 || item.taxPercent === 0)) {
+                onFieldChange(item.id, 'taxPercent', suggested.rate);
+              }
+            }} />
+          {(() => {
+            const s = suggestGstRate(item.hsn);
+            if (!s || !item.hsn || String(item.hsn).length < 4) return null;
+            return (
+              <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, marginTop: 2, padding: '3px 6px', fontSize: '0.68rem', color: '#059669', background: '#ecfdf5', border: '1px solid #a7f3d0', borderRadius: 4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', zIndex: 1 }}
+                title={`${s.label} — suggested ${s.rate}% GST`}>
+                → {s.rate}% · {s.label}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+      <div className="line-item-field" style={{ flex: 0.7 }}>
+        <label className="form-label">Qty</label>
+        <input type="number" min="0" step="any" className="form-input" value={item.quantity}
+          onChange={(e) => onFieldChange(item.id, 'quantity', clampNonNeg(e.target.value))} />
+      </div>
+      <div className="line-item-field" style={{ flex: 0.9 }}>
+        <label className="form-label">Unit</label>
+        <select className="form-input" value={item.unit || 'Nos'}
+          onChange={(e) => {
+            if (e.target.value === '__custom__') { onAddCustomUnit(item.id); return; }
+            if (e.target.value.startsWith('__remove__::')) {
+              const label = e.target.value.replace('__remove__::', '');
+              onRemoveCustomUnit(label);
+              return;
+            }
+            onFieldChange(item.id, 'unit', e.target.value);
+          }}>
+          {(() => {
+            const visible = filterUnitsByMode(units, invoiceMode);
+            const showCurrentExtra = item.unit && !visible.some(u => u.label === item.unit);
+            return (
+              <>
+                {showCurrentExtra && <option value={item.unit}>{item.unit}</option>}
+                {visible.map(u => (
+                  <option key={u.label} value={u.label}>{u.label}{u.custom ? ' ★' : ''}</option>
+                ))}
+              </>
+            );
+          })()}
+          <option value="__custom__">＋ Add custom…</option>
+          {units.some(u => u.custom) && units.filter(u => u.custom).map(u => (
+            <option key={`rm-${u.label}`} value={`__remove__::${u.label}`}>− Remove "{u.label}"</option>
+          ))}
+        </select>
+      </div>
+      <div className="line-item-field" style={{ flex: 1.2 }}>
+        <label className="form-label">Rate</label>
+        <input type="number" min="0" step="any" className="form-input" value={item.rate}
+          onChange={(e) => onFieldChange(item.id, 'rate', clampNonNeg(e.target.value))} />
+      </div>
+      {invoiceOptions.showDiscount && (
+        <div className="line-item-field" style={{ flex: 1.8, minWidth: 200 }}>
+          <label className="form-label">Discount</label>
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            <input type="number" min="0" step="any" className="form-input" value={item.discount}
+              onChange={(e) => onFieldChange(item.id, 'discount', clampNonNeg(e.target.value))}
+              style={{ flex: 1, minWidth: 55 }} />
+            <select className="form-input"
+              value={item.discountType === 'percent' ? 'percent' : 'fixed'}
+              onChange={(e) => onFieldChange(item.id, 'discountType', e.target.value)}
+              style={{ width: 52, padding: '0.4rem 0.3rem', fontSize: '0.82rem' }}
+              title="Discount mode: fixed amount or percent of line">
+              <option value="fixed">₹</option>
+              <option value="percent">%</option>
+            </select>
+            {item.discountType !== 'percent' && (
+              <select className="form-input"
+                value={item.discountBase || 'net'}
+                onChange={(e) => onFieldChange(item.id, 'discountBase', e.target.value)}
+                style={{ width: 78, padding: '0.4rem 0.3rem', fontSize: '0.75rem' }}
+                title="What the ₹ discount applies to. Net = qty×rate (default). Unit = ₹X off each unit. WithTax = ₹X off tax-inclusive total.">
+                <option value="net">Net</option>
+                <option value="unit">Unit</option>
+                <option value="with-tax">W/Tax</option>
+              </select>
+            )}
+          </div>
+        </div>
+      )}
+      {showGST && (
+        <div className="line-item-field" style={{ flex: 1 }}>
+          <label className="form-label">{taxLabel} %</label>
+          <select className="form-input"
+            value={countryTaxRates.includes(Number(item.taxPercent)) ? String(item.taxPercent) : '__custom__'}
+            onChange={async (e) => {
+              if (e.target.value === '__custom__') {
+                const raw = await promptAction({
+                  title: `Custom ${taxLabel} rate`,
+                  message: `Enter a ${taxLabel} rate between 0% and 100% (up to 2 decimals).`,
+                  defaultValue: String(item.taxPercent || 0),
+                  placeholder: 'e.g. 7.5',
+                  inputType: 'number',
+                  confirmLabel: 'Apply rate',
+                });
+                if (raw === null) return;
+                const n = parseFloat(raw);
+                if (!isFinite(n) || n < 0 || n > 100) { toast('Tax rate must be between 0 and 100', 'warning'); return; }
+                onFieldChange(item.id, 'taxPercent', n);
+              } else {
+                onFieldChange(item.id, 'taxPercent', parseFloat(e.target.value) || 0);
+              }
+            }}>
+            {countryTaxRates.map(r => (
+              <option key={r} value={String(r)}>{r}%</option>
+            ))}
+            <option value="__custom__">{countryTaxRates.includes(Number(item.taxPercent)) ? 'Custom…' : `${item.taxPercent}% (custom)`}</option>
+          </select>
+        </div>
+      )}
+      {showGST && invoiceOptions.showCess && (profileCountry || 'India') === 'India' && (
+        <div className="line-item-field" style={{ flex: 0.8 }}>
+          <label className="form-label" title="GST Compensation Cess">Cess %</label>
+          <input type="number" min="0" max="500" step="any" className="form-input"
+            value={item.cessPercent || 0}
+            onChange={(e) => onFieldChange(item.id, 'cessPercent', clampNonNeg(e.target.value))} />
+        </div>
+      )}
+      <div className="line-item-field line-item-delete">
+        <button className="icon-btn icon-btn-red" onClick={() => onRemove(item.id)} title="Remove"><Trash2 size={16} /></button>
+      </div>
+      <div className="line-item-description-row" style={{ flexBasis: '100%', marginTop: 4 }}>
+        {item.description || item._descOpen ? (
+          <textarea
+            className="form-input"
+            rows={2}
+            placeholder="Description (optional, shown under this line in the PDF)"
+            value={item.description || ''}
+            onChange={(e) => onFieldChange(item.id, 'description', e.target.value)}
+            style={{ fontSize: '0.82rem', resize: 'vertical', minHeight: 40 }} />
+        ) : (
+          <button type="button" className="btn btn-secondary"
+            onClick={() => onFieldChange(item.id, '_descOpen', true)}
+            style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem', color: 'var(--text-muted)' }}
+            title="Add a description that will show under this line in the PDF">
+            + Add description
+          </button>
+        )}
+      </div>
+    </div>
+  );
+});
+
+export default function InvoiceGenerator({ onBack, profile: profileProp, editingBill }) {
+  const draft = loadDraft();
+  const [allProfiles, setAllProfiles] = useState([]);
+  const [activeProfile, setActiveProfile] = useState(profileProp);
+  const profile = activeProfile || profileProp;
+  const [invoiceType, setInvoiceType] = useState(draft?.invoiceType || 'tax-invoice');
+  const [client, setClient] = useState(draft?.client || { name: '', address: '', city: '', pin: '', state: '', gstin: '', country: '', email: '', phone: '', isSEZ: false, licence: '' });
+  
+  // ROBUST STATE TRACKER FOR INVENTORY
+  const previouslyDeductedItems = useRef(
+    editingBill && !editingBill._isDuplicate && !editingBill._convertToType 
+      ? JSON.parse(JSON.stringify(editingBill.data?.items || [])) 
+      : []
+  );
+  const lastEditingBillId = useRef(null);
+  useEffect(() => {
+    const currentId = editingBill?.id || null;
+    if (lastEditingBillId.current !== currentId) {
+      lastEditingBillId.current = currentId;
+      previouslyDeductedItems.current =
+        editingBill && !editingBill._isDuplicate && !editingBill._convertToType
+          ? JSON.parse(JSON.stringify(editingBill.data?.items || []))
+          : [];
+    }
+  }, [editingBill]);
+
+  const previewPaneRef = useRef(null);
+  const [previewZoom, setPreviewZoom] = useState(() => {
+    try { return Number(getPrintSettings().previewZoom) || 100; } catch { return 100; }
+  });
+  useEffect(() => {
+    try {
+      const s = getPrintSettings();
+      if (Number(s.previewZoom) !== previewZoom) {
+        savePrintSettings({ ...s, previewZoom });
+      }
+    } catch {}
+  }, [previewZoom]);
+
+  const handleFitToWidth = useCallback(() => {
+    if (!previewPaneRef.current) { setPreviewZoom(100); return; }
+    const pane = previewPaneRef.current;
+    const scaler = pane.querySelector('.preview-scaler');
+    const preview = scaler?.querySelector('.invoice-preview-container');
+    const paneWidth = pane.clientWidth - 16;
+    const naturalWidth = preview?.offsetWidth || 794;
+    if (!(paneWidth > 0 && naturalWidth > 0)) { setPreviewZoom(100); return; }
+    const ratio = paneWidth / naturalWidth;
+    const nextZoom = Math.max(50, Math.min(200, Math.round(ratio * 100)));
+    setPreviewZoom(nextZoom);
+  }, []);
+
+  const [previewCollapsed, setPreviewCollapsed] = useState(() => {
+    try { return localStorage.getItem('fgsb_previewCollapsed') === '1'; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('fgsb_previewCollapsed', previewCollapsed ? '1' : '0'); } catch {}
+  }, [previewCollapsed]);
+
+  const [details, setDetails] = useState(draft?.details || {
+    invoiceNumber: '',
+    poNumber: '',
+    invoiceDate: new Date().toISOString().split('T')[0],
+    dueDate: '',
+    placeOfSupply: '',
+    originalInvoiceRef: '',
+    shipToSameAsBilling: true,
+    shippingAddress: '',
+    shippingCity: '',
+    shippingPin: '',
+    shippingState: '',
+    sellerLicence: '',
+  });
+
+  const [items, setItems] = useState(draft?.items || [
+    { id: Date.now().toString(), name: '', hsn: '', quantity: 1, unit: 'Nos', rate: 0, discount: 0, taxPercent: 18, cessPercent: 0, batch: '', expiry: '', omrp: 0, mrp: 0 }
+  ]);
+
+  const [allBillsForCredit, setAllBillsForCredit] = useState([]);
+  const [creditToApply, setCreditToApply] = useState(0);
+  const [units, setUnits] = useState(getAllUnits());
+  const [taxInclusive, setTaxInclusive] = useState(draft?.taxInclusive || false);
+  const [saving, setSaving] = useState(false);
+  const [termsTemplates, setTermsTemplates] = useState([]);
+  const [selectedTermsId, setSelectedTermsId] = useState(draft?.selectedTermsId || '');
+  const [customTerms, setCustomTerms] = useState(draft?.customTerms || '');
+  const [customNotes, setCustomNotes] = useState(draft?.customNotes || '');
+  const [internalNote, setInternalNote] = useState(draft?.internalNote || '');
+  const [extraSections, setExtraSections] = useState(draft?.extraSections || []);
+  const [savedClients, setSavedClients] = useState([]);
+  const [showClientSuggestions, setShowClientSuggestions] = useState(false);
+  const [clientPickerIdx, setClientPickerIdx] = useState(-1);
+  const [selectedClientId, setSelectedClientId] = useState(null);
+  const [showClientModal, setShowClientModal] = useState(false);
+  const [modalClient, setModalClient] = useState(null);
+  const [isEditingClient, setIsEditingClient] = useState(false);
+  const clientNameRef = useRef(null);
+  const clientSuggestionsRef = useRef(null);
+  const [products, setProducts] = useState([]);
+  const [productSearch, setProductSearch] = useState({ itemId: null, query: '' });
+  const [invoiceOptions, setInvoiceOptions] = useState(() => {
+    try {
+      const saved = localStorage.getItem('freegstbill_invoiceOptions');
+      const persisted = saved ? JSON.parse(saved) : {};
+      delete persisted.paymentAccountSnapshot;
+      return { ...DEFAULT_OPTIONS, ...persisted, ...(draft?.invoiceOptions || {}) };
+    } catch { return draft?.invoiceOptions || { ...DEFAULT_OPTIONS }; }
+  });
+  const [showOptions, setShowOptions] = useState(false);
+  const [showPrintPreview, setShowPrintPreview] = useState(false);
+  const printRef = useRef(null);
+  const draftInitialized = useRef(!!draft);
+  const [autoSaveStatus, setAutoSaveStatus] = useState('idle');
+  const autoSaveTimer = useRef(null);
+  const isDirty = useRef(false);
+  const hasInitialized = useRef(false);
+  const numberReserved = useRef(!!editingBill);
+  const hasBeenSaved = useRef(!!editingBill);
+
+  const typeConfig = INVOICE_TYPES[invoiceType];
+  const showGST = invoiceOptions.showGST;
+  const sellerCountryConfig = getCountryConfig(profile?.country);
+  const _psPrintForRates = getPrintSettings();
+  const customRates = Array.isArray(_psPrintForRates.customTaxRates)
+    ? _psPrintForRates.customTaxRates.map(Number).filter(n => isFinite(n) && n >= 0 && n <= 100)
+    : [];
+  const baseCountryRates = sellerCountryConfig.taxRates && sellerCountryConfig.taxRates.length
+    ? sellerCountryConfig.taxRates
+    : [0, 5, 12, 18, 28];
+  const countryTaxRates = useMemo(
+    () => [...new Set([...baseCountryRates, ...customRates])].sort((a, b) => a - b),
+    [baseCountryRates.join(','), customRates.join(',')]
+  );
+  const taxLabel = sellerCountryConfig.taxLabel || 'GST';
+
+  const clampNonNeg = useCallback((raw) => {
+    const n = parseFloat(raw);
+    if (!isFinite(n) || n < 0) return 0;
+    return n;
+  }, []);
+
+  const optionsPersistTimer = useRef(null);
+  useEffect(() => {
+    const { paymentAccountSnapshot: _snap, ...persistable } = invoiceOptions;
+    localStorage.setItem('freegstbill_invoiceOptions', JSON.stringify(persistable));
+    if (hasInitialized.current) {
+      clearTimeout(optionsPersistTimer.current);
+      optionsPersistTimer.current = setTimeout(() => {
+        saveInvoiceDisplayOptions(persistable).catch(() => {});
+      }, 800);
+    }
+    return () => clearTimeout(optionsPersistTimer.current);
+  }, [invoiceOptions]);
+
+  useEffect(() => {
+    getInvoiceDisplayOptions().then(serverOpts => {
+      if (serverOpts) {
+        delete serverOpts.paymentAccountSnapshot;
+        const merged = { ...DEFAULT_OPTIONS, ...serverOpts };
+        setInvoiceOptions(prev => {
+          const changed = Object.keys(merged).some(k => merged[k] !== prev[k]);
+          if (changed) {
+            const nextOpts = { ...merged, paymentAccountSnapshot: prev.paymentAccountSnapshot };
+            const { paymentAccountSnapshot: _skip, ...toPersist } = nextOpts;
+            localStorage.setItem('freegstbill_invoiceOptions', JSON.stringify(toPersist));
+            return nextOpts;
+          }
+          return prev;
+        });
+      }
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      const draftData = { invoiceType, client, details, items, customTerms, customNotes, internalNote, extraSections, selectedTermsId, invoiceOptions, taxInclusive };
+      try { sessionStorage.setItem('gst_invoiceDraft', JSON.stringify(draftData)); } catch {}
+    }, 400);
+    return () => clearTimeout(t);
+  }, [invoiceType, client, details, items, customTerms, customNotes, internalNote, extraSections, selectedTermsId, invoiceOptions, taxInclusive]);
+
+  useEffect(() => {
+    const t = setTimeout(() => { hasInitialized.current = true; }, 1500);
+    return () => clearTimeout(t);
+  }, []);
+
+  const isMeaningfulInvoice = useCallback(() => {
+    if (editingBill) return true;
+    if (!client?.name?.trim()) return false;
+    return items.some(item => (item.name || '').trim() && (item.quantity || 0) * (item.rate || 0) > 0);
+  }, [client?.name, items, editingBill]);
+
+  useEffect(() => {
+    if (!hasInitialized.current) return;
+    isDirty.current = true;
+    if (!details.invoiceNumber) return;
+    if (!isMeaningfulInvoice()) {
+      setAutoSaveStatus(s => s === 'saved' ? 'idle' : s);
+      return;
+    }
+    if (!editingBill && !hasBeenSaved.current) {
+      setAutoSaveStatus('saved');
+      setTimeout(() => setAutoSaveStatus(s => s === 'saved' ? 'idle' : s), 2000);
+      return;
+    }
+    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    autoSaveTimer.current = setTimeout(async () => {
+      try {
+        setAutoSaveStatus('saving');
+        await saveInvoiceToDB(true);
+        setAutoSaveStatus('saved');
+        isDirty.current = false;
+        setTimeout(() => setAutoSaveStatus(s => s === 'saved' ? 'idle' : s), 2000);
+      } catch (err) {
+        console.error('Auto-save failed:', err);
+        setAutoSaveStatus('idle');
+      }
+    }, 2000);
+    return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current); };
+  }, [invoiceType, client, details, items, customTerms, customNotes, internalNote, extraSections, invoiceOptions, isMeaningfulInvoice]);
+
+  const [leaveModal, setLeaveModal] = useState(false);
+  const handleBack = () => {
+    if (isMeaningfulInvoice() && isDirty.current) {
+      setLeaveModal(true);
+      return;
+    }
+    clearDraft();
+    onBack();
+  };
+
+  const leaveActions = {
+    saveAndExit: async () => {
+      try {
+        setAutoSaveStatus('saving');
+        await saveInvoiceToDB(false);
+        toast('Invoice saved', 'success');
+        clearDraft();
+        setLeaveModal(false);
+        onBack();
+      } catch {
+        toast('Save failed — staying on the page so you can retry', 'error');
+      }
+    },
+    discardAndExit: () => {
+      clearDraft();
+      setLeaveModal(false);
+      onBack();
+    },
+    cancel: () => setLeaveModal(false),
+  };
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (isMeaningfulInvoice() && isDirty.current) {
+        e.preventDefault();
+        e.returnValue = '';
+        return '';
+      }
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [isMeaningfulInvoice]);
+
+  const clearDraft = () => {
+    sessionStorage.removeItem('gst_invoiceDraft');
+  };
+
+  useEffect(() => {
+    const refetchProfiles = () => getAllProfiles().then(setAllProfiles).catch(() => {});
+    const onVisible = () => { if (document.visibilityState === 'visible') refetchProfiles(); };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', refetchProfiles);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', refetchProfiles);
+    };
+  }, []);
+
+  useEffect(() => {
+    getAllProfiles().then(p => { setAllProfiles(p); if (!activeProfile && p.length > 0) setActiveProfile(profileProp); }).catch(() => {});
+    getTermsTemplates().then(templates => {
+      setTermsTemplates(templates);
+      if (templates.length > 0 && !selectedTermsId && !draftInitialized.current) {
+        setSelectedTermsId(templates[0].id);
+        setCustomTerms(templates[0].content);
+      }
+    });
+    getAllClients().then(clients => {
+      setSavedClients(clients);
+      if (client.name.trim()) {
+        const match = clients.find(c => c.name.toLowerCase() === client.name.trim().toLowerCase());
+        if (match) setSelectedClientId(match.id);
+      }
+    });
+    getAllProducts().then(setProducts);
+    getAllBills().then(setAllBillsForCredit).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (draftInitialized.current) {
+      draftInitialized.current = false;
+      return;
+    }
+    if (editingBill?.data) {
+      const d = editingBill.data;
+      setClient(d.client);
+      setItems(d.items);
+      setInvoiceType(d.invoiceType || 'tax-invoice');
+      if (d.customTerms !== undefined) setCustomTerms(d.customTerms);
+      if (d.customNotes !== undefined) setCustomNotes(d.customNotes);
+      if (d.internalNote !== undefined) setInternalNote(d.internalNote);
+      if (d.extraSections) setExtraSections(d.extraSections);
+      if (d.taxInclusive !== undefined) setTaxInclusive(d.taxInclusive);
+      if (d.invoiceOptions) {
+        let mergedOpts = null;
+        try {
+          const saved = localStorage.getItem('freegstbill_invoiceOptions');
+          const persisted = saved ? JSON.parse(saved) : {};
+          delete persisted.paymentAccountSnapshot;
+          mergedOpts = { ...DEFAULT_OPTIONS, ...persisted, ...d.invoiceOptions };
+        } catch { mergedOpts = { ...DEFAULT_OPTIONS, ...d.invoiceOptions }; }
+        const billSnap = d.invoiceOptions.paymentAccountSnapshot;
+        const billSelId = d.invoiceOptions.selectedAccountId;
+        const snapshotIsStale = billSnap && billSelId && billSnap.id && billSnap.id !== billSelId;
+        if ((!billSnap || snapshotIsStale) && d.profile) {
+          const snap = getAccountById(d.profile, billSelId);
+          if (snap) mergedOpts.paymentAccountSnapshot = snap;
+        }
+        setInvoiceOptions(mergedOpts);
+      }
+
+      if (editingBill._isDuplicate) {
+        const convertType = editingBill._convertToType;
+        const type = convertType || d.invoiceType || 'tax-invoice';
+        if (convertType) {
+          setInvoiceType(convertType);
+          const config = INVOICE_TYPES[convertType];
+          if (config) setInvoiceOptions(prev => ({ ...prev, showGST: config.showGST, showPlaceOfSupply: config.showGST }));
+        }
+        const _psForPrefix = getPrintSettings();
+        const rawOverride = _psForPrefix.customPrefixes?.[type];
+        const overridePrefix = rawOverride && rawOverride.trim();
+        const prefix = overridePrefix || INVOICE_TYPES[type]?.prefix || 'INV';
+        getNextInvoiceNumber(prefix, { peek: true, explicitPrefix: !!overridePrefix }).then(num => {
+          setDetails({ ...d.details, invoiceNumber: num, invoiceDate: new Date().toISOString().split('T')[0] });
+          numberReserved.current = false;
+        });
+      } else {
+        setDetails(d.details);
+      }
+    } else if (!details.invoiceNumber) {
+      const _psForPrefix = getPrintSettings();
+      const rawOverride = _psForPrefix.customPrefixes?.[invoiceType];
+      const overridePrefix = rawOverride && rawOverride.trim();
+      const prefix = overridePrefix || INVOICE_TYPES[invoiceType]?.prefix || 'INV';
+      getNextInvoiceNumber(prefix, { peek: true, explicitPrefix: !!overridePrefix }).then(num => {
+        setDetails(prev => ({ ...prev, invoiceNumber: num }));
+        numberReserved.current = false;
+      });
+    }
+  }, [editingBill]);
+
+  useEffect(() => {
+    if (editingBill) return;
+    if (invoiceOptions.selectedAccountId) return;
+    if (!profile) return;
+    const lastUsedKey = `gst_lastUsedAccountId_${profile.id || profile.businessName || 'default'}`;
+    let candidate = null;
+    try { candidate = localStorage.getItem(lastUsedKey); } catch {}
+    const active = getActiveAccounts(profile);
+    const defaultId = getDefaultAccount(profile)?.id || null;
+    const candidateResolves = candidate && active.some(a => a.id === candidate);
+    const next = defaultId
+      || (candidateResolves ? candidate : null)
+      || active[0]?.id
+      || null;
+    if (next) setInvoiceOptions(prev => ({ ...prev, selectedAccountId: next }));
+  }, [profile?.id, profile?.businessName, editingBill]);
+
+  useEffect(() => {
+    if (!profile || !invoiceOptions.selectedAccountId) return;
+    const lastUsedKey = `gst_lastUsedAccountId_${profile.id || profile.businessName || 'default'}`;
+    try { localStorage.setItem(lastUsedKey, invoiceOptions.selectedAccountId); } catch {}
+  }, [profile?.id, profile?.businessName, invoiceOptions.selectedAccountId]);
+
+  useEffect(() => {
+    if (!editingBill?.data?.profile || allProfiles.length === 0) return;
+    const snap = editingBill.data.profile;
+    const liveMatch = allProfiles.find(p =>
+      (p.id && snap.id && p.id === snap.id) ||
+      (p.businessName && p.businessName === snap.businessName)
+    );
+    if (liveMatch && liveMatch !== activeProfile) setActiveProfile(liveMatch);
+  }, [editingBill, allProfiles, activeProfile]);
+
+  const handleTypeChange = async (type) => {
+    setInvoiceType(type);
+    const config = INVOICE_TYPES[type];
+    const _psForPrefix = getPrintSettings();
+    const rawOverride = _psForPrefix.customPrefixes?.[type];
+    const overridePrefix = rawOverride && rawOverride.trim();
+    const prefix = overridePrefix || config?.prefix || 'INV';
+    const num = await getNextInvoiceNumber(prefix, { peek: true, explicitPrefix: !!overridePrefix });
+    numberReserved.current = false;
+    setDetails(prev => ({ ...prev, invoiceNumber: num }));
+
+    if (type === 'bill-of-supply') {
+      setInvoiceOptions(prev => ({ ...prev, showGST: false, showPlaceOfSupply: false }));
+    } else {
+      setInvoiceOptions(prev => ({ ...prev, showGST: config.showGST, showPlaceOfSupply: config.showGST }));
+    }
+  };
+
+  const toggleOption = (key) => {
+    setInvoiceOptions(prev => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const totals = useMemo(() => computeInvoiceTotals({
+    items, profile, client, details, showGST, taxInclusive,
+    invoiceOptions,
+  }), [items, client.state, client?.isSEZ, profile?.state, profile?.country, showGST, taxInclusive, invoiceOptions.showRoundOff, invoiceOptions.showTDS, invoiceOptions.tdsRate, invoiceOptions.tdsCumulativeThisYear, invoiceOptions.showTCS, invoiceOptions.tcsRate, invoiceOptions.tcsCumulativeThisYear, invoiceOptions.reverseCharge, invoiceOptions.invoiceDiscountValue, invoiceOptions.invoiceDiscountType, details?.placeOfSupply]);
+
+  const clientCredit = useMemo(() => {
+    if (!client?.name?.trim()) return { available: 0, sources: [] };
+    const otherBills = editingBill
+      ? allBillsForCredit.filter(b => b.id !== editingBill.id)
+      : allBillsForCredit;
+    return getClientCredit(client.name, otherBills);
+  }, [client?.name, allBillsForCredit, editingBill]);
+
+  const lastAutoAppliedClient = useRef(null);
+  useEffect(() => {
+    if (editingBill) return;
+    if (!invoiceOptions.autoApplyClientCredit) {
+      lastAutoAppliedClient.current = null;
+      return;
+    }
+    const name = client?.name?.trim() || '';
+    if (!name || lastAutoAppliedClient.current === name) return;
+    lastAutoAppliedClient.current = name;
+    const cap = Math.min(clientCredit.available, Number(totals.total) || 0);
+    setCreditToApply(cap > 0.005 ? cap : 0);
+  }, [client?.name, clientCredit.available, invoiceOptions.autoApplyClientCredit, editingBill]);
+
+  useEffect(() => {
+    const isIndia = (profile?.country || 'India') === 'India';
+    if (!isIndia || !showGST) return;
+    if (!profile?.state && client?.state) {
+      const key = `gst_stateWarning_${profile?.businessName || 'profile'}`;
+      if (!sessionStorage.getItem(key)) {
+        toast('Set your business State in Settings — required for correct CGST/SGST vs IGST split.', 'warning');
+        sessionStorage.setItem(key, '1');
+      }
+    }
+  }, [profile?.state, profile?.country, profile?.businessName, client?.state, showGST]);
+
+  const handleItemChange = useCallback((id, field, value) => {
+    setItems(prev => prev.map(item => item.id === id ? { ...item, [field]: value } : item));
+    if (field === 'name') {
+      setProductSearch({ itemId: id, query: value });
+    }
+  }, []);
+
+  const selectProduct = useCallback((itemId, product) => {
+    const salePrice = product.sellingPrice ?? product.rate ?? 0;
+    setItems(prev => prev.map(item => item.id === itemId ? {
+      ...item,
+      name: product.name,
+      hsn: product.hsn || '',
+      rate: salePrice,
+      unit: product.unit || item.unit || 'Nos',
+      taxPercent: product.taxPercent ?? (countryTaxRates[countryTaxRates.length - 2] ?? 18),
+      productId: product.id,
+    } : item));
+    setProductSearch({ itemId: null, query: '' });
+  }, [countryTaxRates]);
+
+  const getProductSuggestions = useCallback((itemId) => {
+    if (productSearch.itemId !== itemId || !productSearch.query.trim()) return [];
+    const q = productSearch.query.toLowerCase();
+    return products.filter(p =>
+      p.name?.toLowerCase().includes(q) || p.hsn?.toLowerCase().includes(q)
+    ).slice(0, 5);
+  }, [productSearch.itemId, productSearch.query, products]);
+
+  const addItem = () => {
+    const defaultUnit = items.length > 0 && items[items.length - 1].unit
+      ? items[items.length - 1].unit
+      : getDefaultUnitForMode(invoiceOptions.invoiceMode);
+    const newId = Date.now().toString();
+    setItems(prev => [...prev, {
+      id: newId, name: '', hsn: '', quantity: 1, unit: defaultUnit, rate: 0, discount: 0,
+      taxPercent: showGST ? (countryTaxRates[countryTaxRates.length - 2] ?? 18) : 0,
+      cessPercent: 0, batch: '', expiry: '', omrp: 0, mrp: 0
+    }]);
+    requestAnimationFrame(() => {
+      const el = document.querySelector(`[data-item-id="${newId}"] input.form-input`);
+      if (el) el.focus();
+    });
+  };
+
+  const handleAddCustomUnit = useCallback(async (itemId) => {
+    const label = await promptAction({
+      title: 'Add custom unit',
+      message: 'Enter a short unit label. Saved for reuse across future invoices.',
+      placeholder: 'e.g. Carat, Bundle, Bushel',
+      confirmLabel: 'Add unit',
+    });
+    if (!label) return;
+    const trimmed = label.trim();
+    if (!trimmed) return;
+    if (trimmed.length > 20) { toast('Unit name must be 20 characters or fewer', 'warning'); return; }
+    const ok = addCustomUnit(trimmed);
+    setUnits(getAllUnits());
+    if (!ok) {
+      toast(`Unit "${trimmed}" already exists or is reserved`, 'info');
+    } else {
+      toast(`Unit "${trimmed}" added`, 'success');
+    }
+    handleItemChange(itemId, 'unit', trimmed);
+  }, [handleItemChange]);
+
+  const handleRemoveCustomUnit = useCallback(async (label) => {
+    if (!await confirmAction({
+      title: `Remove custom unit "${label}"?`,
+      message: 'Existing invoices keep this label unchanged. It just no longer appears in the unit dropdowns.',
+      confirmLabel: 'Remove unit',
+      tone: 'danger',
+    })) return;
+    removeCustomUnit(label);
+    setUnits(getAllUnits());
+    toast(`Removed custom unit "${label}"`, 'success');
+  }, []);
+
+  const removeItem = useCallback((id) => {
+    setItems(prev => prev.length > 1 ? prev.filter(item => item.id !== id) : prev);
+  }, []);
+
+  const handleTermsSelect = (templateId) => {
+    setSelectedTermsId(templateId);
+    const tpl = termsTemplates.find(t => t.id === templateId);
+    if (tpl) setCustomTerms(tpl.content);
+  };
+
+  const selectSavedClient = (cli) => {
+    setClient({
+      name: cli.name || '',
+      address: cli.address || '',
+      city: cli.city || '',
+      pin: cli.pin || '',
+      state: cli.state || '',
+      gstin: cli.gstin || '',
+      country: cli.country || '',
+      email: cli.email || '',
+      phone: cli.phone || '',
+      isSEZ: !!cli.isSEZ,
+      licence: cli.licence || '',
+    });
+    setSelectedClientId(cli.id);
+    setShowClientSuggestions(false);
+    if (!editingBill) {
+      setInvoiceOptions(prev => ({
+        ...prev,
+        paperSize: cli.preferredPaperSize || prev.paperSize || 'a4',
+        currency: cli.preferredCurrency || prev.currency || 'INR',
+        clientAutoPrint: !!cli.autoPrint,
+      }));
+    }
+    toast(`Loaded client: ${cli.name}`, 'info');
+  };
+
+  const openAddClientModal = () => {
+    setModalClient({ name: client.name || '', address: client.address || '', city: client.city || '', pin: client.pin || '', state: client.state || '', gstin: client.gstin || '', licence: client.licence || '' });
+    setIsEditingClient(false);
+    setShowClientModal(true);
+    setShowClientSuggestions(false);
+  };
+
+  const openEditClientModal = (cli) => {
+    setModalClient(cli);
+    setIsEditingClient(true);
+    setShowClientModal(true);
+  };
+
+  const handleClientModalSave = async (formData) => {
+    const data = { ...formData };
+    if (isEditingClient && modalClient?.id) data.id = modalClient.id;
+    await saveClient(data);
+    const updated = await getAllClients();
+    setSavedClients(updated);
+    setClient({
+      name: data.name || '',
+      address: data.address || '',
+      city: data.city || '',
+      pin: data.pin || '',
+      state: data.state || '',
+      gstin: data.gstin || '',
+      country: data.country || '',
+      email: data.email || '',
+      phone: data.phone || '',
+      isSEZ: !!data.isSEZ,
+      licence: data.licence || '',
+    });
+    if (isEditingClient && modalClient?.id) {
+      setSelectedClientId(modalClient.id);
+      toast(`Client "${data.name}" updated!`, 'success');
+    } else {
+      const found = updated.find(c => c.name === data.name.trim() && !savedClients.some(old => old.id === c.id));
+      if (found) setSelectedClientId(found.id);
+      toast(`Client "${data.name}" saved!`, 'success');
+    }
+    setShowClientModal(false);
+  };
+
+  const filteredClients = useMemo(() => {
+    const q = client.name.trim().toLowerCase();
+    if (!q) return savedClients;
+    return savedClients.filter(cli => cli.name.toLowerCase().includes(q));
+  }, [client.name, savedClients]);
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (clientSuggestionsRef.current && !clientSuggestionsRef.current.contains(e.target) &&
+          clientNameRef.current && !clientNameRef.current.contains(e.target)) {
+        setShowClientSuggestions(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const saveInvoiceToDB = async (skipStockDeduction = false, extraPatch = {}) => {
+    let finalInvoiceNumber = details.invoiceNumber;
+    if (!editingBill && !numberReserved.current) {
+      try {
+        const _psForPrefix = getPrintSettings();
+        const rawOverride = _psForPrefix.customPrefixes?.[invoiceType];
+        const overridePrefix = rawOverride && rawOverride.trim();
+        const prefix = overridePrefix || INVOICE_TYPES[invoiceType]?.prefix || 'INV';
+        finalInvoiceNumber = await getNextInvoiceNumber(prefix, { explicitPrefix: !!overridePrefix });
+        setDetails(prev => ({ ...prev, invoiceNumber: finalInvoiceNumber }));
+        numberReserved.current = true;
+      } catch {}
+    }
+
+    const priorSnapshot = invoiceOptions.paymentAccountSnapshot;
+    const priorMatchesSelection = priorSnapshot && priorSnapshot.id === invoiceOptions.selectedAccountId;
+    const snapAccount = priorMatchesSelection
+      ? priorSnapshot
+      : getAccountById(profile, invoiceOptions.selectedAccountId);
+    const invoiceOptionsWithSnapshot = { ...invoiceOptions, paymentAccountSnapshot: snapAccount || null };
+
+    const creditPlan = (!editingBill && creditToApply > 0.005)
+      ? planCreditApplication(client.name, allBillsForCredit, creditToApply, finalInvoiceNumber)
+      : null;
+
+    const seedPayments = editingBill?.payments ? [...editingBill.payments] : [];
+    if (editingBill?.id) {
+      try {
+        const serverBills = await getAllBills();
+        const fresh = serverBills.find(b => b.id === editingBill.id);
+        const freshPayments = Array.isArray(fresh?.payments) ? fresh.payments : [];
+        for (const fp of freshPayments) {
+          const dup = seedPayments.some(p =>
+            (fp.receiptNo && p.receiptNo === fp.receiptNo)
+            || (fp.id && p.id === fp.id)
+            || (Math.abs((Number(p.amount) || 0) - (Number(fp.amount) || 0)) < 0.005
+                && p.date === fp.date
+                && (p.mode || '') === (fp.mode || ''))
+          );
+          if (!dup) seedPayments.push(fp);
+        }
+      } catch {}
+    }
+    if (creditPlan?.targetEntry) seedPayments.push(creditPlan.targetEntry);
+    const seedPaidAmount = seedPayments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+    const billTotalForStatus = Number(totals.total) || 0;
+    const computedStatus = seedPaidAmount >= billTotalForStatus - 0.005 && billTotalForStatus > 0
+      ? 'paid'
+      : (seedPaidAmount > 0.005 ? 'partial' : 'unpaid');
+    const seedStatus = (computedStatus === 'unpaid' && editingBill?.status === 'overdue')
+      ? 'overdue'
+      : computedStatus;
+
+    const bill = {
+      id: finalInvoiceNumber,
+      clientName: client.name,
+      invoiceNumber: finalInvoiceNumber,
+      invoiceDate: details.invoiceDate,
+      invoiceType,
+      currency: invoiceOptions.currency || 'INR',
+      totalAmount: totals.total,
+      totalTaxAmount: totals.totalTaxAmount ?? (totals.cgst + totals.sgst + (totals.utgst || 0) + totals.igst + (totals.cess || 0)),
+      status: seedStatus,
+      paidAmount: seedPaidAmount,
+      payments: seedPayments,
+      printedCount: extraPatch.printedCount ?? editingBill?.printedCount ?? 0,
+      lastPrintedAt: extraPatch.lastPrintedAt ?? editingBill?.lastPrintedAt ?? null,
+      data: { profile, client, details: { ...details, invoiceNumber: finalInvoiceNumber }, items, totals, invoiceType, customTerms, customNotes, internalNote, extraSections, invoiceOptions: invoiceOptionsWithSnapshot, taxInclusive }
+    };
+    const shouldOverwrite = !!editingBill || hasBeenSaved.current;
+    try {
+      await saveBill(bill, { overwrite: shouldOverwrite });
+      if (creditPlan?.sourcePatches?.length) {
+        try {
+          for (const { updatedBill } of creditPlan.sourcePatches) {
+            await saveBill(updatedBill, { overwrite: true });
+          }
+          const applied = creditPlan.amountApplied;
+          const from = creditPlan.consumedFrom.map(c => c.invoiceNumber).join(', ');
+          toast(`${formatCurrency(applied, invoiceOptions.currency || 'INR')} credit applied from ${from}`, 'success');
+          getAllBills().then(setAllBillsForCredit).catch(() => {});
+          setCreditToApply(0);
+        } catch (creditErr) {
+          console.error('Source-bill credit patch failed:', creditErr);
+          toast('Credit applied on this bill, but source bill update failed. Please review Client ledger.', 'warning');
+        }
+      }
+      if (selectedClientId) {
+        const cli = savedClients.find(c => c.id === selectedClientId);
+        if (cli) {
+          const nextPaperSize = invoiceOptions.paperSize || 'a4';
+          const nextCurrency = invoiceOptions.currency || 'INR';
+          const changed = cli.preferredPaperSize !== nextPaperSize
+            || cli.preferredCurrency !== nextCurrency;
+          if (changed) {
+            const updatedClient = {
+              ...cli,
+              preferredPaperSize: nextPaperSize,
+              preferredCurrency: nextCurrency,
+            };
+            saveClient(updatedClient).then(() => {
+              setSavedClients(prev => prev.map(c => c.id === cli.id ? updatedClient : c));
+            }).catch(() => {});
+          }
+        }
+      }
+      hasBeenSaved.current = true;
+      isDirty.current = false;
+    } catch (err) {
+      if (err?.status === 409) {
+        if (!editingBill && !shouldOverwrite) {
+          const _psForPrefix = getPrintSettings();
+          const rawOverride = _psForPrefix.customPrefixes?.[invoiceType];
+          const overridePrefix = rawOverride && rawOverride.trim();
+          const prefix = overridePrefix || INVOICE_TYPES[invoiceType]?.prefix || 'INV';
+          let nextNum = bill.id;
+          let success = false;
+          for (let i = 0; i < 20; i++) {
+            try {
+              nextNum = await getNextInvoiceNumber(prefix, { explicitPrefix: !!overridePrefix });
+              const retryBill = { ...bill, id: nextNum, invoiceNumber: nextNum };
+              retryBill.data = { ...retryBill.data, details: { ...retryBill.data.details, invoiceNumber: nextNum } };
+              await saveBill(retryBill, { overwrite: false });
+              success = true;
+              setDetails(prev => ({ ...prev, invoiceNumber: nextNum }));
+              hasBeenSaved.current = true;
+              isDirty.current = false;
+              if (nextNum !== bill.id) {
+                toast(`Invoice number ${bill.id} was already used — saved as ${nextNum} instead.`, 'info');
+              }
+              break;
+            } catch (retryErr) {
+              if (retryErr?.status !== 409) throw retryErr;
+            }
+          }
+          if (!success) {
+            toast(`Could not find a free invoice number after 20 attempts. Please change the number manually.`, 'error');
+            return;
+          }
+        } else {
+          toast(`Invoice number ${bill.id} already exists. Change it before saving.`, 'error');
+          return;
+        }
+      } else {
+        throw err;
+      }
+    }
+
+    if (invoiceOptions.recurring?.enabled) {
+      try {
+        const rec = invoiceOptions.recurring;
+        const templateId = `tpl_${details.invoiceNumber}`;
+        await saveRecurring({
+          id: templateId,
+          sourceInvoiceId: details.invoiceNumber,
+          active: true,
+          frequency: rec.frequency || 'monthly',
+          interval: rec.interval || 1,
+          nextDate: rec.nextDate,
+          endMode: rec.endMode || 'never',
+          endDate: rec.endDate || '',
+          maxOccurrences: rec.maxOccurrences || null,
+          occurrencesCreated: 0,
+          createdAt: new Date().toISOString(),
+          lastGenerated: null,
+          clientName: client.name,
+          clientState: client.state,
+          clientGstin: client.gstin,
+          clientAddress: client.address,
+          clientCountry: client.country,
+          clientCity: client.city,
+          clientPin: client.pin,
+          clientEmail: client.email,
+          clientPhone: client.phone,
+          isSEZ: client.isSEZ,
+          invoiceType,
+          profileId: profile?.id || null,
+          profileBusinessName: profile?.businessName || null,
+          items: items.map(i => ({ ...i })),
+          customTerms,
+          customNotes,
+          extraSections,
+          taxInclusive,
+          invoiceOptions: { ...invoiceOptions, recurring: null },
+        });
+      } catch (err) {
+        console.error('Failed to save recurring template:', err);
+        toast('Invoice saved, but recurring template failed to save', 'warning');
+      }
+    }
+
+    // THE FORCED MATHEMATICAL LEDGER SYSTEM - PATCHED FOR GHOST DUPLICATES
+    if (!skipStockDeduction) {
+      try {
+        const currentProducts = await getAllProducts();
+        const byId = new Map(currentProducts.map(p => [p.id, p]));
+        const byName = new Map(currentProducts.map(p => [(p.name || '').trim().toLowerCase(), p]));
+        const modifiedProducts = new Map();
+        const lowStockWarnings = [];
+
+        const getWorkingProd = (prod) => {
+          if (!modifiedProducts.has(prod.id)) {
+            modifiedProducts.set(prod.id, JSON.parse(JSON.stringify(prod)));
+          }
+          return modifiedProducts.get(prod.id);
+        };
+
+        // SMART LOOKUP: If you type a name manually, this steals the exact hidden ID from the old invoice
+        const resolveProduct = (itemName, providedId) => {
+          if (providedId && byId.has(providedId)) return byId.get(providedId);
+          const searchName = (itemName || '').trim().toLowerCase();
+          const matchedOld = previouslyDeductedItems.current.find(o => (o.name || '').trim().toLowerCase() === searchName && o.productId);
+          if (matchedOld && byId.has(matchedOld.productId)) return byId.get(matchedOld.productId);
+          return byName.get(searchName);
+        };
+
+        // 1. REVERT: Add back items from the PREVIOUS save state
+        for (const oldItem of previouslyDeductedItems.current) {
+          const existing = resolveProduct(oldItem.name, oldItem.productId);
+          if (existing) {
+            let wProd = getWorkingProd(existing);
+            if (!Array.isArray(wProd.batches)) wProd.batches = [];
+            
+            const qty = Number(oldItem.quantity) || 0;
+            wProd.stock = (Number(wProd.stock) || 0) + qty; // Add back to stock
+
+            const targetBatch = String(oldItem.batch || '').trim();
+            if (targetBatch) {
+              const bIdx = wProd.batches.findIndex(b => String(b.batchNo || '').trim().toLowerCase() === targetBatch.toLowerCase());
+              if (bIdx >= 0) wProd.batches[bIdx].quantity = (Number(wProd.batches[bIdx].quantity) || 0) + qty;
+              else wProd.batches.push({ batchNo: targetBatch, expiry: oldItem.expiry || '', quantity: qty });
+            }
+          }
+        }
+
+        // 2. APPLY: Forcefully subtract items from the CURRENT screen
+        for (const it of items.filter(x => x.name)) {
+          const qty = Number(it.quantity) || 0;
+          const existing = resolveProduct(it.name, it.productId);
+
+          if (existing) {
+            let wProd = getWorkingProd(existing);
+            if (!Array.isArray(wProd.batches)) wProd.batches = [];
+
+            wProd.stock = (Number(wProd.stock) || 0) - qty; // Force subtract
+            if (wProd.stock <= 5) lowStockWarnings.push(`${wProd.name} total stock is running low!`);
+
+            const targetBatch = String(it.batch || '').trim();
+            if (targetBatch) {
+              const bIdx = wProd.batches.findIndex(b => String(b.batchNo || '').trim().toLowerCase() === targetBatch.toLowerCase());
+              if (bIdx >= 0) {
+                wProd.batches[bIdx].quantity = (Number(wProd.batches[bIdx].quantity) || 0) - qty;
+                if (wProd.batches[bIdx].quantity <= 5) lowStockWarnings.push(`${wProd.name} (Batch ${targetBatch}) is running low!`);
+              } else {
+                wProd.batches.push({ batchNo: targetBatch, expiry: it.expiry || '', quantity: -qty });
+              }
+            }
+          }
+        }
+
+        // 3. SAVE: Push the corrected math to the database
+        const upserts = [];
+        for (const prod of modifiedProducts.values()) {
+          if (Array.isArray(prod.batches)) {
+            prod.batches = prod.batches.filter(b => b.quantity !== 0);
+          }
+          upserts.push(saveProduct(prod));
+        }
+        await Promise.all(upserts);
+
+        // Lock in the new state so we don't double-process if you hit save again
+        previouslyDeductedItems.current = JSON.parse(JSON.stringify(items));
+        
+        const refreshed = await getAllProducts();
+        setProducts(refreshed);
+
+        // Show warnings
+        const uniqueWarnings = [...new Set(lowStockWarnings)];
+        for (const warning of uniqueWarnings) toast(warning, 'warning');
+
+      } catch (e) {
+        console.warn('Inventory deduction failed:', e);
+      }
+    }
+  };
+
+  const uploadToGoogleDrive = async (pdfBlob, fileName) => {
+    try {
+      const latestProfile = await getProfile();
+      const clientId = latestProfile.googleClientId;
+      const folderName = latestProfile.googleDriveFolder || 'GST Billing Invoices';
+      if (!clientId) return;
+
+      const hasToken = await ensureToken(clientId);
+      if (!hasToken) {
+        toast('Google Drive: Please reconnect in Settings', 'warning');
+        return;
+      }
+
+      const folderId = await findOrCreateFolder(folderName);
+      await uploadPDF(fileName, pdfBlob, folderId);
+      toast(`Saved to Google Drive → ${folderName}`, 'success');
+    } catch (err) {
+      console.error('Google Drive upload error:', err);
+      toast('Google Drive upload failed: ' + err.message, 'warning');
+    }
+  };
+
+  const buildPDF = async () => {
+    const printSettings = getPrintSettings();
+    const scalerEl = printRef.current.closest('.preview-scaler');
+    if (scalerEl) scalerEl.style.transform = 'none';
+    try {
+      return await __buildPDFInner(printSettings);
+    } finally {
+      if (scalerEl) scalerEl.style.transform = '';
+    }
+  };
+
+  const __buildPDFInner = async (printSettings) => {
+    const paperCfg = getPaperSize(invoiceOptions.paperSize, invoiceOptions);
+    let pdf = new jsPDF({
+      orientation: paperCfg.jsPdfOrientation || 'portrait',
+      unit: 'mm',
+      format: paperCfg.jsPdfFormat,
+      compress: true,
+    });
+    const pdfWidth = pdf.internal.pageSize.getWidth();
+    const pdfPageHeight = pdf.internal.pageSize.getHeight();
+    const extraPages = printRef.current.querySelectorAll('[data-pdf-page]');
+    const capScale = (n) => Math.min(6, Math.max(2, Math.round(n)));
+    const qualityCfg = {
+      draft:    { scale: 2, imgFormat: 'JPEG', quality: 0.85 },
+      standard: { scale: capScale(Math.max(3, (window.devicePixelRatio || 1) * 2)), imgFormat: 'JPEG', quality: 0.95 },
+      hd:       { scale: capScale(Math.max(4, (window.devicePixelRatio || 1) * 2.5)), imgFormat: 'PNG', quality: 1.0 },
+    };
+    const q = qualityCfg[printSettings.pdfQuality] || qualityCfg.standard;
+    const renderScale = q.scale;
+    const jpegQuality = q.quality;
+    const imgFormat = q.imgFormat;
+    if (document.fonts && document.fonts.ready) {
+      try { await document.fonts.ready; } catch {}
+    }
+
+    const captureOptions = (el) => ({
+      scale: renderScale,
+      useCORS: false,
+      logging: false,
+      letterRendering: true,
+      backgroundColor: '#ffffff',
+      imageTimeout: 15_000,
+      width: el.scrollWidth,
+      height: el.scrollHeight,
+    });
+
+    const collectRowBoundaries = (container) => {
+      const containerRect = container.getBoundingClientRect();
+      const nodes = container.querySelectorAll(
+        '.inv-table tbody tr, .inv-table thead tr, .inv-header, .inv-parties, ' +
+        '.inv-footer-block, .inv-totals, [data-pdf-page-boundary]'
+      );
+      const set = new Set([0]);
+      nodes.forEach(el => {
+        const r = el.getBoundingClientRect();
+        set.add(Math.max(0, r.bottom - containerRect.top));
+        set.add(Math.max(0, r.top - containerRect.top));
+      });
+      return [...set].sort((a, b) => a - b);
+    };
+    const domBoundariesPx = collectRowBoundaries(printRef.current);
+    const domContainerWidth = printRef.current.getBoundingClientRect().width;
+
+    extraPages.forEach(el => el.style.display = 'none');
+    const mainCanvas = await html2canvas(printRef.current, {
+      ...captureOptions(printRef.current),
+      onclone: (clonedDoc) => {
+        clonedDoc.querySelectorAll('*').forEach(n => { n.style.letterSpacing = '0px'; n.style.wordSpacing = '0px'; });
+        const inv = clonedDoc.getElementById('invoice-preview');
+        if (inv) {
+          inv.style.width = `${paperCfg.widthMm}mm`;
+          inv.style.overflow = 'visible'; inv.style.minHeight = 'unset';
+          inv.style.border = 'none'; inv.style.boxShadow = 'none'; inv.style.borderRadius = '0';
+          if (printSettings.pdfDarkenOnPrint !== false) {
+            inv.classList.add('printing-mode');
+          }
+        }
+        clonedDoc.querySelectorAll('[data-pdf-page]').forEach(el => el.style.display = 'none');
+      }
+    });
+    extraPages.forEach(el => el.style.display = '');
+
+    const mainImgHeight = (mainCanvas.height * pdfWidth) / mainCanvas.width;
+    const pageRecipes = [];
+
+    const mTop = Math.max(0, Number(printSettings.marginTop) || 0);
+    const mBottom = Math.max(0, Number(printSettings.marginBottom) || 0);
+    const mLeft = Math.max(0, Number(printSettings.marginLeft) || 0);
+    const mRight = Math.max(0, Number(printSettings.marginRight) || 0);
+
+    const rawScale = Number(printSettings.pdfFontScale);
+    const pdfScale = isFinite(rawScale) && rawScale > 0
+      ? Math.max(0.5, Math.min(1.4, rawScale))
+      : 1.0;
+    const availWidth = Math.max(20, pdfWidth - mLeft - mRight);
+    const availHeight = Math.max(20, pdfPageHeight - mTop - mBottom);
+    const contentWidth = availWidth * pdfScale;
+    const contentHeight = availHeight * pdfScale;
+    const contentXOffset = mLeft + (availWidth - contentWidth) / 2;
+    const contentYOffset = mTop;
+    const scaledImgHeight = (mainCanvas.height * contentWidth) / mainCanvas.width;
+
+    if (scaledImgHeight <= contentHeight + 2) {
+      const mainImg = mainCanvas.toDataURL(imgFormat === 'PNG' ? 'image/png' : 'image/jpeg', jpegQuality);
+      const finalH = Math.min(scaledImgHeight, contentHeight);
+      if (paperCfg.kind === 'thermal') {
+        const thermalHeightMm = Math.max(30, Math.ceil(finalH + mTop + mBottom + 2));
+        pdf = new jsPDF({
+          orientation: 'portrait',
+          unit: 'mm',
+          format: [paperCfg.widthMm, thermalHeightMm],
+          compress: true,
+        });
+      }
+      pdf.addImage(mainImg, imgFormat, contentXOffset, contentYOffset, contentWidth, finalH, undefined, 'MEDIUM');
+      pageRecipes.push({ img: mainImg, y: contentYOffset, h: finalH, x: contentXOffset, w: contentWidth });
+    } else {
+      const domToCanvasScale = mainCanvas.width / domContainerWidth;
+      const canvasBoundariesPx = domBoundariesPx.map(y => y * domToCanvasScale);
+      const totalCanvasHeightPx = mainCanvas.height;
+      if (!canvasBoundariesPx.includes(totalCanvasHeightPx)) {
+        canvasBoundariesPx.push(totalCanvasHeightPx);
+      }
+      canvasBoundariesPx.sort((a, b) => a - b);
+      const pdfPageHeightCanvasPx = contentHeight * (mainCanvas.width / contentWidth);
+      const pageSplits = [];
+      let pageStart = 0;
+      let safety = 0;
+      while (pageStart < totalCanvasHeightPx && safety++ < 100) {
+        const naiveEnd = pageStart + pdfPageHeightCanvasPx;
+        if (naiveEnd >= totalCanvasHeightPx) {
+          pageSplits.push({ start: pageStart, end: totalCanvasHeightPx });
+          break;
+        }
+        let safeEnd = null;
+        for (let i = canvasBoundariesPx.length - 1; i >= 0; i--) {
+          const b = canvasBoundariesPx[i];
+          if (b <= naiveEnd + 1 && b > pageStart + 20) {
+            safeEnd = b;
+            break;
+          }
+        }
+        if (safeEnd === null) safeEnd = naiveEnd;
+        pageSplits.push({ start: pageStart, end: safeEnd });
+        pageStart = safeEnd;
+      }
+
+      for (let i = 0; i < pageSplits.length; i++) {
+        const { start, end } = pageSplits[i];
+        const cropHeight = end - start;
+        if (cropHeight < 1) continue;
+        const tmp = document.createElement('canvas');
+        tmp.width = mainCanvas.width;
+        tmp.height = cropHeight;
+        const ctx = tmp.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, tmp.width, cropHeight);
+        ctx.drawImage(mainCanvas, 0, -start);
+        const pageImg = tmp.toDataURL(imgFormat === 'PNG' ? 'image/png' : 'image/jpeg', jpegQuality);
+        const pageMmHeight = (cropHeight * contentWidth) / mainCanvas.width;
+        if (i > 0) pdf.addPage();
+        pdf.addImage(pageImg, imgFormat, contentXOffset, contentYOffset, contentWidth, pageMmHeight, undefined, 'MEDIUM');
+        pageRecipes.push({ img: pageImg, y: contentYOffset, h: pageMmHeight, x: contentXOffset, w: contentWidth });
+      }
+    }
+
+    for (const pageEl of extraPages) {
+      const c = await html2canvas(pageEl, {
+        ...captureOptions(pageEl),
+        onclone: (cd) => { cd.querySelectorAll('*').forEach(n => { n.style.letterSpacing = '0px'; n.style.wordSpacing = '0px'; }); }
+      });
+      const extraImg = c.toDataURL(imgFormat === 'PNG' ? 'image/png' : 'image/jpeg', jpegQuality);
+      const extraH = Math.min((c.height * pdfWidth) / c.width, pdfPageHeight);
+      pdf.addPage();
+      pdf.addImage(extraImg, imgFormat, 0, 0, pdfWidth, extraH, undefined, 'MEDIUM');
+      pageRecipes.push({ img: extraImg, y: 0, h: extraH });
+    }
+
+    const ps = printSettings;
+    const totalPages = pdf.getNumberOfPages();
+
+    if (ps.multiCopyEnabled && ps.multiCopyCount > 1) {
+      const labels = ps.multiCopyLabels || ['ORIGINAL', 'DUPLICATE', 'TRIPLICATE'];
+      const originalPageCount = pageRecipes.length;
+      for (let copyIdx = 1; copyIdx < ps.multiCopyCount; copyIdx++) {
+        for (const recipe of pageRecipes) {
+          pdf.addPage();
+          pdf.addImage(recipe.img, imgFormat,
+            recipe.x ?? 0, recipe.y,
+            recipe.w ?? pdfWidth, recipe.h,
+            undefined, 'MEDIUM');
+        }
+      }
+      const totalCopies = ps.multiCopyCount;
+      for (let copyIdx = 0; copyIdx < totalCopies; copyIdx++) {
+        const label = labels[Math.min(copyIdx, labels.length - 1)] || `COPY ${copyIdx + 1}`;
+        for (let p = 1; p <= originalPageCount; p++) {
+          const absolutePage = copyIdx * originalPageCount + p;
+          pdf.setPage(absolutePage);
+          pdf.setFont('helvetica', 'bold');
+          pdf.setFontSize(8);
+          pdf.setTextColor(80, 80, 80);
+          const labelWidth = pdf.getTextWidth(label) + 6;
+          pdf.setDrawColor(80, 80, 80);
+          pdf.setLineWidth(0.3);
+          pdf.rect(pdfWidth - labelWidth - 4, 4, labelWidth, 6, 'S');
+          pdf.text(label, pdfWidth - labelWidth - 1, 8);
+          pdf.setTextColor(0);
+        }
+      }
+    }
+
+    pageRecipes.length = 0;
+
+    const isThermalPdf = getPaperSize(invoiceOptions.paperSize, invoiceOptions).kind === 'thermal';
+
+    let rawText = null;
+    if (!isThermalPdf && ps.watermarkEnabled) {
+      if (ps.watermarkUseCustomText) {
+        rawText = ps.watermarkCustomText ? ps.watermarkCustomText : null;
+      } else {
+        rawText = ps.watermarkText || null;
+      }
+    }
+    if (rawText) {
+      const text = String(rawText).toUpperCase();
+      const opacity = Math.max(0, Math.min(1, (Number(ps.watermarkOpacity) || 15) / 100));
+      const angle = Number(ps.watermarkAngle) || -35;
+      const size = Number(ps.watermarkFontSize) || 90;
+      const finalPages = pdf.getNumberOfPages();
+      for (let p = 1; p <= finalPages; p++) {
+        pdf.setPage(p);
+        pdf.setFont('helvetica', 'bold');
+        pdf.setFontSize(size);
+        try {
+          const gState = new pdf.GState({ opacity });
+          pdf.setGState(gState);
+        } catch {}
+        pdf.setTextColor(200, 200, 200);
+        const cx = pdfWidth / 2;
+        const cy = pdfPageHeight / 2;
+        pdf.text(text, cx, cy, { align: 'center', angle });
+        try {
+          const gState = new pdf.GState({ opacity: 1 });
+          pdf.setGState(gState);
+        } catch {}
+        pdf.setTextColor(0);
+      }
+    }
+
+    if (!isThermalPdf && ps.reprintLabelEnabled && Number(editingBill?.printedCount) > 0) {
+      const label = `REPRINT · Copy #${(Number(editingBill.printedCount) || 0) + 1}`;
+      const finalPages = pdf.getNumberOfPages();
+      const pageWidthMm = pdf.internal.pageSize.getWidth();
+      for (let p = 1; p <= finalPages; p++) {
+        pdf.setPage(p);
+        pdf.setFont('helvetica', 'bold');
+        pdf.setFontSize(8);
+        pdf.setTextColor(220, 38, 38);
+        const w = pdf.getTextWidth(label) + 4;
+        const x = pageWidthMm - w - 4;
+        pdf.setDrawColor(220, 38, 38);
+        pdf.rect(x, 4, w, 6, 'S');
+        pdf.text(label, x + 2, 8);
+        pdf.setTextColor(0);
+      }
+    }
+
+    if (!isThermalPdf && (ps.invoiceQrEnabled || ps.invoiceBarcodeEnabled)) {
+      const QRCode = (await import('qrcode')).default;
+      const qrPayload = ps.invoiceQrUrl
+        ? ps.invoiceQrUrl.replace(/\{invoice_number\}/g, encodeURIComponent(details.invoiceNumber))
+        : details.invoiceNumber;
+      if (ps.invoiceQrEnabled) {
+        try {
+          const qrDataUrl = await QRCode.toDataURL(qrPayload, { errorCorrectionLevel: 'M', margin: 0, width: 200 });
+          pdf.setPage(pdf.getNumberOfPages());
+          const size = 18;
+          pdf.addImage(qrDataUrl, 'PNG', pdfWidth - size - 6, pdfPageHeight - size - 12, size, size);
+          pdf.setFontSize(6); pdf.setTextColor(80);
+          pdf.text('Verify invoice', pdfWidth - size - 6, pdfPageHeight - 6);
+          pdf.setTextColor(0);
+        } catch {}
+      }
+      if (ps.invoiceBarcodeEnabled) {
+        pdf.setPage(pdf.getNumberOfPages());
+        pdf.setFont('courier', 'bold');
+        pdf.setFontSize(14);
+        pdf.setTextColor(0);
+        pdf.text(String(details.invoiceNumber), 8, pdfPageHeight - 6);
+      }
+    }
+
+    if (!isThermalPdf && ps.feedbackQrEnabled && ps.feedbackQrUrl) {
+      const QRCode = (await import('qrcode')).default;
+      try {
+        const dataUrl = await QRCode.toDataURL(ps.feedbackQrUrl, { errorCorrectionLevel: 'M', margin: 0, width: 200 });
+        pdf.setPage(pdf.getNumberOfPages());
+        const size = 16;
+        pdf.addImage(dataUrl, 'PNG', 6, pdfPageHeight - size - 12, size, size);
+        pdf.setFontSize(6); pdf.setTextColor(80);
+        pdf.text(ps.feedbackQrLabel || 'Rate us', 6, pdfPageHeight - 6);
+        pdf.setTextColor(0);
+      } catch {}
+    }
+
+    if (!isThermalPdf && (ps.pageNumbersEnabled || ps.pageHeaderEnabled) && pdf.getNumberOfPages() > 1) {
+      const finalPages = pdf.getNumberOfPages();
+      for (let p = 2; p <= finalPages; p++) {
+        pdf.setPage(p);
+        if (ps.pageHeaderEnabled && profile?.businessName) {
+          pdf.setFont('helvetica', 'bold');
+          pdf.setFontSize(9);
+          pdf.setTextColor(80);
+          pdf.text(profile.businessName, 8, 6);
+          pdf.setDrawColor(200); pdf.setLineWidth(0.2);
+          pdf.line(8, 8, pdfWidth - 8, 8);
+          pdf.setTextColor(0);
+        }
+        if (ps.pageNumbersEnabled) {
+          pdf.setFont('helvetica', 'normal');
+          pdf.setFontSize(8);
+          pdf.setTextColor(120);
+          pdf.text(`Page ${p} of ${finalPages}`, pdfWidth - 8, pdfPageHeight - 4, { align: 'right' });
+          pdf.setTextColor(0);
+        }
+      }
+    }
+
+    return pdf;
+  };
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape' && leaveModal) {
+        e.preventDefault();
+        setLeaveModal(false);
+        return;
+      }
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod) return;
+      if (e.key === 's' || e.key === 'S') {
+        if (!isMeaningfulInvoice()) return;
+        e.preventDefault();
+        saveInvoiceToDB(false).then(() => toast('Invoice saved', 'success')).catch(() => toast('Save failed', 'error'));
+      } else if (e.key === 'p' || e.key === 'P') {
+        e.preventDefault();
+        setTimeout(() => generatePDF(), 0);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        addItem();
+      } else if (e.shiftKey && (e.key === 'd' || e.key === 'D')) {
+        e.preventDefault();
+        setItems(prev => {
+          if (prev.length === 0) return prev;
+          const last = prev[prev.length - 1];
+          return [...prev, { ...last, id: Date.now().toString() }];
+        });
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isMeaningfulInvoice, leaveModal]);
+
+  const printViaIframe = (blob) => {
+    const url = URL.createObjectURL(blob);
+    let cleaned = false;
+    const cleanup = () => { if (!cleaned) { cleaned = true; URL.revokeObjectURL(url); } };
+    const timer = setTimeout(cleanup, 90_000);
+    try {
+      let frame = document.getElementById('fgsb-print-frame');
+      if (!frame) {
+        frame = document.createElement('iframe');
+        frame.id = 'fgsb-print-frame';
+        frame.style.cssText = 'position:fixed;left:-99999px;top:-99999px;width:0;height:0;border:0;';
+        document.body.appendChild(frame);
+      }
+      frame.src = url;
+      frame.onload = () => {
+        try { frame.contentWindow.focus(); frame.contentWindow.print(); }
+        catch { window.open(url, '_blank'); }
+        setTimeout(() => { clearTimeout(timer); cleanup(); }, 60_000);
+      };
+      frame.onerror = () => { clearTimeout(timer); cleanup(); };
+    } catch (err) {
+      clearTimeout(timer); cleanup(); throw err;
+    }
+  };
+
+  const printThermalViaHtml = async () => {
+    if (!printRef.current) return false;
+    const receipt = printRef.current.querySelector('#invoice-preview') || printRef.current;
+    if (!receipt) return false;
+
+    const paperCfg = getPaperSize(invoiceOptions.paperSize, invoiceOptions);
+    const widthMm = paperCfg.widthMm || 80;
+
+    const collectStyles = () => {
+      const parts = [];
+      for (const sheet of Array.from(document.styleSheets)) {
+        try {
+          const rules = sheet.cssRules;
+          if (!rules) continue;
+          for (const rule of Array.from(rules)) parts.push(rule.cssText);
+        } catch {}
+      }
+      return parts.join('\n');
+    };
+
+    const doc = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Print Receipt</title>
+  <style>
+    @page { size: ${widthMm}mm auto; margin: 0; }
+    html, body { margin: 0; padding: 0; background: #fff; color: #000; }
+    #invoice-preview {
+      margin: 0 !important;
+      padding: 0 !important;
+      border: none !important;
+      box-shadow: none !important;
+      background: #fff !important;
+      color: #000 !important;
+      min-height: 0 !important;
+    }
+    ${collectStyles()}
+  </style>
+</head>
+<body>${receipt.outerHTML}</body>
+</html>`;
+
+    const iframe = document.createElement('iframe');
+    iframe.style.cssText = 'position:fixed;left:-99999px;top:0;width:0;height:0;border:0;';
+    iframe.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(iframe);
+
+    try {
+      await new Promise((resolve) => {
+        iframe.onload = resolve;
+        iframe.srcdoc = doc;
+      });
+      const imgs = iframe.contentDocument?.querySelectorAll('img') || [];
+      await Promise.all(Array.from(imgs).map(img => (
+        img.complete
+          ? Promise.resolve()
+          : new Promise(r => { img.onload = r; img.onerror = r; setTimeout(r, 3000); })
+      )));
+      iframe.contentWindow.focus();
+      iframe.contentWindow.print();
+      setTimeout(() => { try { iframe.remove(); } catch {} }, 8000);
+      return true;
+    } catch (err) {
+      console.warn('Direct thermal print failed, will fall back to PDF:', err);
+      try { iframe.remove(); } catch {}
+      return false;
+    }
+  };
+
+  const isThermalPaper = () => getPaperSize(invoiceOptions.paperSize, invoiceOptions).kind === 'thermal';
+
+  const withPreviewOnScreen = async (fn) => {
+    const wasCollapsed = previewCollapsed;
+    if (!wasCollapsed) return fn();
+    setPreviewCollapsed(false);
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 200))));
+    try {
+      return await fn();
+    } finally {
+      setPreviewCollapsed(true);
+    }
+  };
+
+  const executePrint = async () => {
+    if (!printRef.current) return;
+    setSaving(true);
+    try {
+      await withPreviewOnScreen(async () => {
+        try {
+          if (isThermalPaper() && (getPrintSettings().thermalPrintMode || 'direct') === 'direct') {
+            const ok = await printThermalViaHtml();
+            if (ok) return;
+          }
+          const pdf = await buildPDF();
+          const blob = pdf.output('blob');
+          printViaIframe(blob);
+        } catch (err) {
+          console.error('Print failed', err);
+          toast('Print failed — try Download PDF instead', 'error');
+        }
+      });
+    } catch {
+      toast('Print failed — try Download PDF instead', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const directPrint = async () => {
+    if (!printRef.current) return;
+    if (isThermalPaper()) {
+      setShowPrintPreview(true);
+      return;
+    }
+    await executePrint();
+  };
+
+  const generatePDF = async () => {
+    if (!printRef.current) return;
+    try {
+      setSaving(true);
+      const pdf = await withPreviewOnScreen(() => buildPDF());
+      const fileName = `${typeConfig.prefix}_${details.invoiceNumber.replace(/\//g, '-')}.pdf`;
+      pdf.save(fileName);
+
+      const prevPrinted = Number(editingBill?.printedCount) || 0;
+      const printedPatch = {
+        printedCount: prevPrinted + 1,
+        lastPrintedAt: new Date().toISOString(),
+      };
+      await saveInvoiceToDB(false, printedPatch);
+      clearDraft();
+
+      const pdfBlob = pdf.output('blob');
+
+      const invoiceDate = details.invoiceDate ? new Date(details.invoiceDate) : new Date();
+      const monthName = invoiceDate.toLocaleString('en-IN', { month: 'long', year: 'numeric' });
+      const clientName = client?.name || 'General';
+      const params = new URLSearchParams({ name: fileName, client: clientName, month: monthName });
+      fetch(`/api/save-pdf?${params}`, { method: 'POST', headers: { 'Content-Type': 'application/pdf' }, body: pdfBlob }).catch(() => {});
+
+      toast(`Invoice downloaded & saved to Saved Invoices/${clientName}/`, 'success');
+      uploadToGoogleDrive(pdfBlob, fileName);
+
+      const ps = getPrintSettings();
+      if (ps.autoPrintOnSave || invoiceOptions.clientAutoPrint) {
+        try { printViaIframe(pdfBlob); }
+        catch {}
+      }
+    } catch (err) {
+      console.error(err);
+      toast('Failed to generate PDF.', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const shareWhatsApp = () => {
+    const cur = invoiceOptions.currency || 'INR';
+    const total = formatCurrency(Number(totals.total) || 0, cur);
+    const subtotal = formatCurrency(Number(totals.subtotal) || 0, cur);
+    const dateStr = details.invoiceDate ? new Date(details.invoiceDate).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
+    const businessName = profile?.businessName || '';
+    const lines = [
+      `*Invoice: ${details.invoiceNumber}*`,
+      `Date: ${dateStr}`,
+      `Client: ${client?.name || ''}`,
+      `Subtotal: ${subtotal}`,
+      `*Total: ${total}*`,
+    ];
+    if (businessName) lines.push('', `— ${businessName}`);
+    openWhatsAppShare(client?.phone, lines.join('\n'));
+  };
+
+  const exportEWayBill = () => {
+    try {
+      if (!profile?.gstin) { 
+        toast('Set your Business GSTIN in Settings first', 'warning'); 
+        return; 
+      }
+      if (!client?.state) {
+        toast('Client State is required to generate E-Way Bill', 'warning');
+        return;
+      }
+
+      // Generate the JSON data
+      const ewb = generateEWayBillJSON(profile, client, details, items, totals, invoiceType, { taxInclusive });
+      
+      if (!ewb) {
+        toast('Failed to format E-Way Bill data', 'error');
+        return;
+      }
+
+      // Create the downloadable file
+      const blob = new Blob([JSON.stringify(ewb, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      
+      // Fix for browsers blocking detached element clicks
+      a.style.display = 'none';
+      a.href = url;
+      a.download = `EWB-${details.invoiceNumber?.replace(/[\/\\]/g, '-') || 'draft'}.json`;
+      document.body.appendChild(a); 
+      
+      a.click();
+      
+      // Cleanup safely
+      setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 100);
+      
+      toast('E-Way Bill JSON downloaded', 'success');
+    } catch (err) {
+      console.error('E-Way Bill Error:', err);
+      toast('Failed to generate E-Way Bill. Ensure all fields are filled.', 'error');
+    }
+  };
+
+  return (
+    <div className="generator-container">
+      <div className="generator-toolbar">
+        <div className="flex gap-2 items-center">
+          <button className="btn btn-secondary" onClick={handleBack}><ArrowLeft size={18} /> Back</button>
+          <HelpButton title="Invoice Generator — how to use">
+            <ul style={{ paddingLeft: '1.1rem', margin: 0 }}>
+              <li><strong>Invoice type</strong> — Tax Invoice / Proforma / Bill of Supply / Composition / Credit Note / Delivery Challan.</li>
+              <li><strong>Line items</strong> — start typing to auto-complete from your Products list. HSN autofills the GST rate for common codes. Click "+ Add description" for a detailed note.</li>
+              <li><strong>Discount</strong> — per line: pick ₹ (fixed) or % of the line. Below the items: whole-bill discount, applied after tax.</li>
+              <li><strong>Customize</strong> — toggle columns and sections on/off, pick paper size (A4 / A5 / 58mm / 80mm thermal), change the invoice title and PDF style.</li>
+              <li><strong>Focus mode</strong> — the ▶/◀ button at the top hides the preview so the editor takes the full screen for heavy data entry.</li>
+              <li><strong>Keyboard</strong> — Ctrl+S save · Ctrl+P PDF · Ctrl+Enter add row · Ctrl+Shift+D duplicate last row · Esc close leave modal.</li>
+              <li><strong>Auto-save</strong> — every 2s once the invoice is meaningful (client + at least one item).</li>
+            </ul>
+          </HelpButton>
+          {(() => {
+            const saving = autoSaveStatus === 'saving';
+            const saved = autoSaveStatus === 'saved';
+            const isDraft = autoSaveStatus === 'idle' && !isMeaningfulInvoice();
+            const color = saving ? '#3b82f6' : saved ? '#059669' : isDraft ? '#d97706' : '#94a3b8';
+            const bg = saving ? 'rgba(59, 130, 246, 0.12)'
+              : saved ? 'rgba(5, 150, 105, 0.12)'
+              : isDraft ? 'rgba(217, 119, 6, 0.12)'
+              : 'var(--bg-secondary)';
+            const label = saving ? 'Saving…'
+              : saved ? 'All changes saved'
+              : isDraft ? 'Draft — click to complete'
+              : 'Ready';
+            const onClick = () => {
+              if (!isDraft) return;
+              if (!client?.name?.trim()) {
+                clientNameRef.current?.focus();
+                clientNameRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                return;
+              }
+              const emptyRow = document.querySelector('.line-item-row input.form-input:placeholder-shown, .line-item-row input.form-input[value=""]');
+              if (emptyRow) {
+                emptyRow.focus();
+                emptyRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }
+            };
+            return (
+              <button type="button" onClick={onClick} disabled={!isDraft}
+                title={isDraft ? 'Click to focus the first missing field' : label}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                  fontSize: '0.75rem', fontWeight: 600,
+                  padding: '0.35rem 0.7rem',
+                  borderRadius: 999,
+                  background: bg,
+                  border: `1px solid ${color}55`,
+                  color: color,
+                  cursor: isDraft ? 'pointer' : 'default',
+                }}>
+                {saving && <Loader size={12} className="spin" />}
+                {saved && <Check size={12} />}
+                {!saving && !saved && (
+                  <span style={{
+                    width: 8, height: 8, borderRadius: '50%',
+                    background: color,
+                    boxShadow: isDraft ? `0 0 0 3px ${color}33` : 'none',
+                  }} />
+                )}
+                {label}
+              </button>
+            );
+          })()}
+        </div>
+        <div className="flex gap-2">
+          <button className="btn btn-primary" onClick={async () => {
+            try {
+              setSaving(true);
+              await saveInvoiceToDB(false);
+              clearDraft();
+              toast('Invoice saved', 'success');
+            } catch (err) {
+              if (err?.status !== 409) {
+                console.error('Save failed', err);
+                toast('Save failed — try again', 'error');
+              }
+            } finally {
+              setSaving(false);
+            }
+          }} disabled={saving}
+          title="Save the invoice without downloading (Ctrl+S)">
+            <Check size={18} /> {saving ? 'Saving…' : 'Save'}
+          </button>
+          <button className="btn btn-secondary" onClick={generatePDF} disabled={saving}
+            title="Save + download the PDF">
+            <Download size={18} /> {saving ? 'Generating...' : 'Save & Download'}
+          </button>
+          <button className="btn btn-secondary" onClick={directPrint} disabled={saving}
+            title={
+              isThermalPaper()
+                ? 'Send directly to your thermal printer'
+                : 'Open browser print dialog (skip the PDF download)'
+            }>
+            <Printer size={18} /> Print
+          </button>
+          <button className="btn btn-secondary" onClick={shareWhatsApp} disabled={saving} style={{ background: '#25d366', color: '#fff', borderColor: '#25d366' }}>
+            <MessageCircle size={18} /> WhatsApp
+          </button>
+          {(invoiceType === 'tax-invoice' || invoiceType === 'delivery-challan') && (
+            <button className="btn btn-secondary" onClick={exportEWayBill} title="Download E-Way Bill JSON for NIC portal upload">
+              <Truck size={18} /> E-Way Bill
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className={`split-view ${previewCollapsed ? 'split-view-focus' : ''}`}>
+        <div className="editor-pane">
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+            <button type="button" className="btn btn-secondary"
+              onClick={() => setPreviewCollapsed(v => !v)}
+              style={{ fontSize: '0.72rem', padding: '0.25rem 0.6rem' }}
+              title={previewCollapsed ? 'Show live preview' : 'Hide preview to focus on entries'}>
+              {previewCollapsed ? '◀ Show preview' : '▶ Focus mode (hide preview)'}
+            </button>
+          </div>
+
+          {allProfiles.length > 1 && (
+            <div className="glass-panel p-6 mb-6">
+              <h3 className="section-title" style={{ marginBottom: '0.75rem' }}>Billing From (Business Profile)</h3>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.6rem' }}>
+                {allProfiles.map(bp => {
+                  const isSelected = (activeProfile?.businessName || profileProp?.businessName) === bp.businessName;
+                  return (
+                    <button key={bp.id} type="button"
+                      onClick={() => setActiveProfile(bp)}
+                      style={{
+                        padding: '0.5rem 1rem', borderRadius: 8, fontSize: '0.85rem', cursor: 'pointer',
+                        border: isSelected ? '2px solid var(--primary)' : '1px solid var(--border)',
+                        background: isSelected ? 'rgba(59,130,246,0.08)' : 'var(--surface)',
+                        color: isSelected ? 'var(--primary)' : 'var(--text)',
+                        fontWeight: isSelected ? 700 : 400,
+                      }}>
+                      {bp.businessName}
+                      {bp.gstin && <span style={{ fontSize: '0.72rem', marginLeft: 6, opacity: 0.7 }}>{bp.gstin}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          <div className="glass-panel p-6 mb-6">
+            <div className="flex justify-between items-center">
+              <h3 className="section-title" style={{ margin: 0 }}>Invoice Type</h3>
+              <button type="button" className="btn btn-secondary" style={{ padding: '0.4rem 0.75rem', fontSize: '0.8rem' }}
+                onClick={() => setShowOptions(!showOptions)}>
+                <Settings size={15} /> {showOptions ? 'Hide Options' : 'Customize'}
+              </button>
+            </div>
+            <div className="type-selector" style={{ marginTop: '0.75rem' }}>
+              {Object.entries(INVOICE_TYPES).map(([key, val]) => (
+                <button key={key} className={`type-chip ${invoiceType === key ? 'type-chip-active' : ''}`}
+                  onClick={() => handleTypeChange(key)}>{val.label}</button>
+              ))}
+            </div>
+            <p className="type-desc">{typeConfig?.description}</p>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
+              <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginRight: '0.25rem' }}>This invoice is for:</span>
+              {[
+                { id: 'goods',    label: '📦 Goods',    desc: 'Physical products — defaults to Nos / Kg / Pcs units' },
+                { id: 'services', label: '⏱ Services', desc: 'Time / work-based — defaults to Hrs and surfaces Session / Visit / Month units' },
+                { id: 'mixed',    label: '🔀 Mixed',   desc: 'Both — full unit list available, no filtering' },
+              ].map(opt => (
+                <button key={opt.id} type="button"
+                  className={`type-chip ${(invoiceOptions.invoiceMode || 'goods') === opt.id ? 'type-chip-active' : ''}`}
+                  onClick={() => setInvoiceOptions(prev => ({ ...prev, invoiceMode: opt.id }))}
+                  title={opt.desc}
+                  style={{ fontSize: '0.78rem', padding: '0.3rem 0.6rem' }}>
+                  {opt.label}
+                </button>
+              ))}
+              {invoiceOptions.invoiceMode === 'services' && (
+                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginLeft: 'auto' }}>
+                  💡 Use a <strong>SAC code</strong> (services accounting code) in the HSN field
+                </span>
+              )}
+            </div>
+
+            {showOptions && (
+              <div className="invoice-options">
+                <div className="form-group" style={{ marginBottom: '0.75rem' }}>
+                  <label className="form-label">Invoice Title</label>
+                  <input type="text" className="form-input" value={invoiceOptions.customTitle}
+                    onChange={(e) => setInvoiceOptions(prev => ({ ...prev, customTitle: e.target.value }))}
+                    placeholder={typeConfig?.title || 'TAX INVOICE'} />
+                </div>
+                <div className="form-group" style={{ marginBottom: '0.75rem' }}>
+                  <label className="form-label">Currency</label>
+                  <select className="form-input" value={invoiceOptions.currency}
+                    onChange={(e) => setInvoiceOptions(prev => ({ ...prev, currency: e.target.value }))}>
+                    {Array.from(new Map(getCountriesForRegion(getRegionMode()).map(c => [c.currency, c])).values()).map(c => (
+                      <option key={c.currency} value={c.currency}>{c.currency} ({c.currencySymbol === c.currency ? c.name : c.currencySymbol})</option>
+                    ))}
+                  </select>
+                </div>
+                {invoiceOptions.currency !== 'INR' && (
+                  <div className="form-group" style={{ marginBottom: '0.75rem' }}>
+                    <label className="form-label">Exchange Rate (optional, snapshot)</label>
+                    <input type="number" step="any" min="0" className="form-input"
+                      value={invoiceOptions.exchangeRate}
+                      onChange={(e) => setInvoiceOptions(prev => ({ ...prev, exchangeRate: e.target.value }))}
+                      placeholder={`1 ${invoiceOptions.currency} = ? INR`} />
+                    <small style={{ color: '#94a3b8', fontSize: '0.7rem' }}>Stored on this invoice — historical reports stay accurate even if rates change.</small>
+                  </div>
+                )}
+
+                {(() => {
+                  const rec = invoiceOptions.recurring;
+                  const isOn = !!rec?.enabled;
+                  const toggle = () => {
+                    if (isOn) {
+                      setInvoiceOptions(prev => ({ ...prev, recurring: { ...prev.recurring, enabled: false } }));
+                    } else {
+                      const next = new Date(details.invoiceDate || new Date().toISOString());
+                      next.setMonth(next.getMonth() + 1);
+                      setInvoiceOptions(prev => ({
+                        ...prev,
+                        recurring: {
+                          enabled: true,
+                          frequency: 'monthly',
+                          interval: 1,
+                          nextDate: next.toISOString().split('T')[0],
+                          endMode: 'never',
+                          endDate: '',
+                          maxOccurrences: '',
+                        },
+                      }));
+                    }
+                  };
+                  const set = (key, val) => setInvoiceOptions(prev => ({
+                    ...prev, recurring: { ...prev.recurring, [key]: val },
+                  }));
+                  return (
+                    <div className={`form-group${isOn ? ' notice notice-info' : ''}`} style={{ marginBottom: '0.75rem', padding: '0.6rem', borderRadius: '6px', display: 'block' }}>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.82rem', cursor: 'pointer' }}>
+                        <input type="checkbox" checked={isOn} onChange={toggle}
+                          style={{ width: 16, height: 16, accentColor: 'var(--primary)' }} />
+                        <strong>🔁 Make this a recurring invoice</strong>
+                        <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                          (auto-generate a new invoice on schedule, same items, new number)
+                        </span>
+                      </label>
+                      {isOn && (
+                        <div style={{ marginTop: '0.6rem', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+                          <div className="form-group" style={{ margin: 0 }}>
+                            <label className="form-label">Frequency</label>
+                            <select className="form-input" value={rec.frequency}
+                              onChange={e => set('frequency', e.target.value)}>
+                              <option value="weekly">Weekly</option>
+                              <option value="monthly">Monthly</option>
+                              <option value="quarterly">Quarterly</option>
+                              <option value="yearly">Yearly</option>
+                            </select>
+                          </div>
+                          <div className="form-group" style={{ margin: 0 }}>
+                            <label className="form-label">Every N (interval)</label>
+                            <input type="number" min="1" max="12" className="form-input"
+                              value={rec.interval || 1}
+                              onChange={e => set('interval', parseInt(e.target.value) || 1)} />
+                          </div>
+                          <div className="form-group" style={{ margin: 0 }}>
+                            <label className="form-label">Next invoice date</label>
+                            <input type="date" className="form-input" value={rec.nextDate || ''}
+                              onChange={e => set('nextDate', e.target.value)} />
+                          </div>
+                          <div className="form-group" style={{ margin: 0 }}>
+                            <label className="form-label">End condition</label>
+                            <select className="form-input" value={rec.endMode || 'never'}
+                              onChange={e => set('endMode', e.target.value)}>
+                              <option value="never">Never (until I stop it)</option>
+                              <option value="onDate">On a specific date</option>
+                              <option value="afterN">After N invoices</option>
+                            </select>
+                          </div>
+                          {rec.endMode === 'onDate' && (
+                            <div className="form-group" style={{ margin: 0, gridColumn: 'span 2' }}>
+                              <label className="form-label">Stop generating after this date</label>
+                              <input type="date" className="form-input" value={rec.endDate || ''}
+                                onChange={e => set('endDate', e.target.value)} />
+                            </div>
+                          )}
+                          {rec.endMode === 'afterN' && (
+                            <div className="form-group" style={{ margin: 0, gridColumn: 'span 2' }}>
+                              <label className="form-label">Stop after this many invoices have been generated</label>
+                              <input type="number" min="1" className="form-input"
+                                value={rec.maxOccurrences || ''}
+                                onChange={e => set('maxOccurrences', parseInt(e.target.value) || '')}
+                                placeholder="e.g. 12 for a 1-year monthly contract" />
+                            </div>
+                          )}
+                          <div style={{ gridColumn: 'span 2', fontSize: '0.7rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                            Auto-generation fires every time you open the app (or daily if it stays running).
+                            Future invoices get fresh sequential numbers, today's date as their invoice date,
+                            and the same client + items + amounts as this one. Edit or pause the template any
+                            time via <strong>Recurring</strong> in the sidebar.
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                {(profile?.country || 'India') === 'India' && (
+                  <div className={`form-group${invoiceOptions.showTCS ? ' notice notice-warn' : ''}`} style={{ marginBottom: '0.75rem', padding: '0.6rem', borderRadius: '6px', display: 'block' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.82rem', cursor: 'pointer' }}>
+                      <input type="checkbox" checked={!!invoiceOptions.showTCS}
+                        onChange={() => setInvoiceOptions(prev => ({ ...prev, showTCS: !prev.showTCS }))}
+                        style={{ width: 16, height: 16, accentColor: 'var(--primary)' }} />
+                      <strong>TCS — Tax Collected at Source</strong>
+                      <span style={{ fontSize: '0.7rem', color: '#94a3b8' }}>(Adds to invoice total)</span>
+                    </label>
+                    {invoiceOptions.showTCS && (
+                      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '0.5rem', marginTop: '0.5rem' }}>
+                        <select className="form-input" value={invoiceOptions.tcsSection || '206C(1H)'}
+                          onChange={(e) => {
+                            const code = e.target.value;
+                            const section = TCS_SECTIONS.find(s => s.code === code);
+                            setInvoiceOptions(prev => ({ ...prev, tcsSection: code, tcsRate: code === 'custom' ? prev.tcsRate : section?.rate ?? prev.tcsRate }));
+                          }}>
+                          {TCS_SECTIONS.map(s => <option key={s.code} value={s.code}>{s.label}</option>)}
+                        </select>
+                        <input type="number" step="any" min="0" max="100" className="form-input"
+                          value={invoiceOptions.tcsRate}
+                          onChange={(e) => setInvoiceOptions(prev => ({ ...prev, tcsRate: e.target.value }))}
+                          placeholder="Rate %" />
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {(profile?.country || 'India') === 'India' && (
+                  <div className={`form-group${invoiceOptions.showTDS ? ' notice notice-info' : ''}`} style={{ marginBottom: '0.75rem', padding: '0.6rem', borderRadius: '6px', display: 'block' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.82rem', cursor: 'pointer' }}>
+                      <input type="checkbox" checked={!!invoiceOptions.showTDS}
+                        onChange={() => setInvoiceOptions(prev => ({ ...prev, showTDS: !prev.showTDS }))}
+                        style={{ width: 16, height: 16, accentColor: 'var(--primary)' }} />
+                      <strong>TDS — Tax Deducted at Source</strong>
+                      <span style={{ fontSize: '0.7rem', color: '#94a3b8' }}>(Buyer deducts; informational)</span>
+                    </label>
+                    {invoiceOptions.showTDS && (
+                      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '0.5rem', marginTop: '0.5rem' }}>
+                        <select className="form-input" value={invoiceOptions.tdsSection || '194Q'}
+                          onChange={(e) => {
+                            const code = e.target.value;
+                            const section = TDS_SECTIONS.find(s => s.code === code);
+                            setInvoiceOptions(prev => ({ ...prev, tdsSection: code, tdsRate: code === 'custom' ? prev.tdsRate : section?.rate ?? prev.tdsRate }));
+                          }}>
+                          {TDS_SECTIONS.map(s => <option key={s.code} value={s.code}>{s.label}</option>)}
+                        </select>
+                        <input type="number" step="any" min="0" max="100" className="form-input"
+                          value={invoiceOptions.tdsRate}
+                          onChange={(e) => setInvoiceOptions(prev => ({ ...prev, tdsRate: e.target.value }))}
+                          placeholder="Rate %" />
+                      </div>
+                    )}
+                  </div>
+                )}
+                {(() => {
+                  const accounts = getActiveAccounts(profile);
+                  if (accounts.length === 0) return null;
+                  const resolved = getAccountById(profile, invoiceOptions.selectedAccountId);
+                  return (
+                    <div className="form-group" style={{ marginBottom: '0.75rem' }}>
+                      <label className="form-label">Payment account on this invoice</label>
+                      <select className="form-input" value={resolved?.id || ''}
+                        onChange={(e) => {
+                          const newId = e.target.value || null;
+                          const newSnap = newId ? getAccountById(profile, newId) : null;
+                          setInvoiceOptions(prev => ({ ...prev, selectedAccountId: newId, paymentAccountSnapshot: newSnap }));
+                        }}>
+                        {accounts.map(a => (
+                          <option key={a.id} value={a.id}>
+                            {a.isDefault ? '⭐ ' : ''}{a.label || a.bankName || 'Untitled account'}
+                            {a.bankName && a.label !== a.bankName ? ` — ${a.bankName}` : ''}
+                          </option>
+                        ))}
+                      </select>
+                      <small style={{ color: 'var(--text-muted)', fontSize: '0.7rem' }}>
+                        Bank details and UPI QR on the PDF come from the selected account.
+                        Manage accounts in Settings → Payment Accounts.
+                      </small>
+                    </div>
+                  );
+                })()}
+                <div className="form-group" style={{ marginBottom: '0.75rem' }}>
+                  <label className="form-label">PDF Style</label>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    {PDF_STYLES.map(s => (
+                      <button key={s.id} type="button"
+                        className={`type-chip ${(invoiceOptions.pdfStyle || 'classic') === s.id ? 'type-chip-active' : ''}`}
+                        onClick={() => setInvoiceOptions(prev => ({ ...prev, pdfStyle: s.id }))}
+                        title={s.desc}>{s.label}</button>
+                    ))}
+                  </div>
+                </div>
+                <div className="form-group" style={{ marginBottom: '0.75rem' }}>
+                  <label className="form-label">Accent Color</label>
+                  <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                    <button type="button" title="Auto (match invoice type)"
+                      style={{ width: '28px', height: '28px', borderRadius: '50%', border: !invoiceOptions.accentColor ? '2.5px solid #334155' : '2px solid #cbd5e1', background: 'conic-gradient(#1e40af, #7c3aed, #0f766e, #be123c, #1e40af)', cursor: 'pointer', position: 'relative' }}
+                      onClick={() => setInvoiceOptions(prev => ({ ...prev, accentColor: '' }))}>
+                      {!invoiceOptions.accentColor && <span style={{ position: 'absolute', inset: '3px', borderRadius: '50%', border: '2px solid white' }} />}
+                    </button>
+                    {ACCENT_PRESETS.map(p => (
+                      <button key={p.color} type="button" title={p.label}
+                        style={{ width: '28px', height: '28px', borderRadius: '50%', backgroundColor: p.color, border: invoiceOptions.accentColor === p.color ? '2.5px solid #334155' : '2px solid #cbd5e1', cursor: 'pointer', position: 'relative' }}
+                        onClick={() => setInvoiceOptions(prev => ({ ...prev, accentColor: p.color }))}>
+                        {invoiceOptions.accentColor === p.color && <span style={{ position: 'absolute', inset: '3px', borderRadius: '50%', border: '2px solid white' }} />}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {[
+                  { group: 'Header & branding', items: [
+                    ['showLogo', 'Logo'],
+                    ['showBusinessName', 'Business name'],
+                    ['showBusinessAddress', 'Business address'],
+                    ['showBusinessPhone', 'Business phone'],
+                    ['showBusinessEmail', 'Business email'],
+                    ['showState', 'Business state'],
+                    ['showGSTIN', 'Tax ID (GSTIN/VAT/etc.)'],
+                  ]},
+                  { group: 'Client / Bill-to', items: [
+                    ['showClientAddress', 'Client address'],
+                    ['showClientPhone', 'Client phone'],
+                    ['showClientEmail', 'Client email'],
+                    ['showPlaceOfSupply', 'Place of Supply'],
+                  ]},
+                  { group: 'Invoice meta', items: [
+                    ['showInvoiceNumber', 'Invoice number'],
+                    ['showInvoiceDate', 'Invoice date'],
+                    ['showDueDate', 'Due date'],
+                  ]},
+                  { group: 'Items table', items: [
+                    ['showHSN', 'HSN/SAC column'],
+                    ['showItemQty', 'Qty column'],
+                    ['showItemUnit', 'Unit suffix (next to Qty)'],
+                    ['showRateColumn', 'Rate column'],
+                    ['showDiscount', 'Discount column'],
+                    ['showGST', 'Tax % column (GST/VAT/etc.)'],
+                    ['showCess', 'GST Cess % column (India — tobacco/auto/coal)'],
+                  ]},
+                  { group: 'Totals', items: [
+                    ['showSubtotal', 'Subtotal row'],
+                    ['showAmountWords', 'Amount in words'],
+                    ['showRoundOff', 'Round-off line'],
+                  ]},
+                  { group: 'Compliance flags (India)', items: [
+                    ['reverseCharge', 'Reverse Charge applies (Section 9(3)/9(4)) — recipient pays GST'],
+                  ]},
+                  { group: '__PAPER_SIZE__', items: [] },
+                  { group: 'Footer', items: [
+                    ['showBankDetails', 'Bank details'],
+                    ['showAccountLabel', 'Show "Pay via: <account>" label above bank block'],
+                    ['showUPI', 'UPI QR (India only)'],
+                    ['showSignature', 'Signature block'],
+                    ['showSignatoryText', 'Show "Authorized Signatory" caption'],
+                    ['showTerms', 'Terms & Conditions'],
+                    ['showNotes', 'Notes / Remarks'],
+                  ]},
+                ].map(section => {
+                  if (section.group === '__PAPER_SIZE__') {
+                    return (
+                      <div key="paper-size" style={{ marginBottom: '0.6rem' }}>
+                        <div style={{ fontSize: '0.7rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.3rem' }}>Paper / print size</div>
+                        <select className="form-input" style={{ fontSize: '0.85rem' }}
+                          value={invoiceOptions.paperSize || 'a4'}
+                          onChange={e => setInvoiceOptions(prev => ({ ...prev, paperSize: e.target.value }))}>
+                          {Object.entries(PAPER_SIZES).map(([key, ps]) => (
+                            <option key={key} value={key}>{ps.label}</option>
+                          ))}
+                        </select>
+                        <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', margin: '0.3rem 0 0' }}>
+                          {getPaperSize(invoiceOptions.paperSize, invoiceOptions).hint}
+                        </p>
+
+                        {invoiceOptions.paperSize === 'custom' && (
+                          <div style={{ marginTop: '0.5rem', padding: '0.55rem 0.65rem', background: 'var(--bg-secondary)', borderRadius: 6, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+                            <div>
+                              <label style={{ fontSize: '0.72rem', fontWeight: 600, display: 'block', marginBottom: 3 }}>Width (mm)</label>
+                              <input type="number" min="30" max="500" step="1"
+                                value={invoiceOptions.customPaperWidth || 80}
+                                onChange={e => setInvoiceOptions(prev => ({ ...prev, customPaperWidth: parseInt(e.target.value, 10) || 80 }))}
+                                className="form-input" style={{ fontSize: '0.8rem', padding: '0.35rem' }} />
+                            </div>
+                            <div>
+                              <label style={{ fontSize: '0.72rem', fontWeight: 600, display: 'block', marginBottom: 3 }}>Height (mm)</label>
+                              <input type="number" min="50" max="1200" step="1"
+                                value={invoiceOptions.customPaperHeight || 297}
+                                onChange={e => setInvoiceOptions(prev => ({ ...prev, customPaperHeight: parseInt(e.target.value, 10) || 297 }))}
+                                className="form-input" style={{ fontSize: '0.8rem', padding: '0.35rem' }} />
+                            </div>
+                            <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', gridColumn: 'span 2', margin: 0 }}>
+                              Tip: enter your printer's <strong>printable</strong> width, not the roll width. Most 58mm thermals print at 48mm; 80mm print at 72mm. <strong>Below 100mm width auto-switches to thermal receipt layout</strong> — same rendering as the 58/80mm presets, just at your exact size.
+                            </p>
+                            <div style={{ gridColumn: 'span 2', display: 'flex', gap: '0.35rem', flexWrap: 'wrap', marginTop: 4 }}>
+                              <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', alignSelf: 'center' }}>Quick-pick:</span>
+                              {[
+                                { label: '40mm', w: 32 },
+                                { label: '76mm', w: 68 },
+                                { label: '90mm', w: 80 },
+                                { label: '110mm', w: 102 },
+                              ].map(p => (
+                                <button type="button" key={p.label}
+                                  onClick={() => setInvoiceOptions(prev => ({ ...prev, customPaperWidth: p.w, customPaperHeight: 297 }))}
+                                  className="btn btn-secondary"
+                                  style={{ fontSize: '0.7rem', padding: '0.15rem 0.5rem' }}
+                                  title={`Set to ${p.label} roll (${p.w}mm printable × auto height)`}>
+                                  {p.label}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {getPaperSize(invoiceOptions.paperSize, invoiceOptions).kind === 'thermal' && (
+                          <div style={{ marginTop: '0.6rem', padding: '0.6rem', background: 'var(--bg-secondary)', borderRadius: 6 }}>
+                            <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.4rem' }}>
+                              Thermal printer settings
+                            </div>
+
+                            <label style={{ display: 'block', fontSize: '0.78rem', marginBottom: '0.35rem' }}>
+                              <span style={{ fontWeight: 600 }}>Font size</span>
+                              <select className="form-input"
+                                style={{ fontSize: '0.78rem', marginTop: 2 }}
+                                value={invoiceOptions.thermalFontSize || 'medium'}
+                                onChange={e => setInvoiceOptions(prev => ({ ...prev, thermalFontSize: e.target.value }))}>
+                                <option value="small">Small (fits more per page)</option>
+                                <option value="medium">Medium (recommended)</option>
+                                <option value="large">Large (easier to read)</option>
+                              </select>
+                            </label>
+
+                            <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.4rem', fontSize: '0.78rem', marginTop: '0.5rem', cursor: 'pointer' }}>
+                              <input type="checkbox" checked={!!invoiceOptions.thermalCompact}
+                                onChange={e => setInvoiceOptions(prev => ({ ...prev, thermalCompact: e.target.checked }))}
+                                style={{ marginTop: 2, accentColor: 'var(--primary)' }} />
+                              <span>
+                                <strong>Compact mode</strong>
+                                <span style={{ display: 'block', fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                                  Skip HSN + per-item rate line; use two-line item rows. Saves paper on long orders.
+                                </span>
+                              </span>
+                            </label>
+
+                            <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.4rem', fontSize: '0.78rem', marginTop: '0.4rem', cursor: 'pointer' }}>
+                              <input type="checkbox" checked={invoiceOptions.thermalCutMark !== false}
+                                onChange={e => setInvoiceOptions(prev => ({ ...prev, thermalCutMark: e.target.checked }))}
+                                style={{ marginTop: 2, accentColor: 'var(--primary)' }} />
+                              <span>
+                                <strong>Cut mark at bottom</strong>
+                                <span style={{ display: 'block', fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                                  Adds "— cut here —" line for auto-cutter thermal printers. Turn off if your printer feeds paper automatically.
+                                </span>
+                              </span>
+                            </label>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }
+                  return (
+                    <div key={section.group} style={{ marginBottom: '0.6rem' }}>
+                      <div style={{ fontSize: '0.7rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.3rem' }}>{section.group}</div>
+                      <div className="options-grid">
+                        {section.items.map(([key, label]) => {
+                          const offByDefault = key === 'showRoundOff' || key === 'showAccountLabel'
+                            || key === 'showCess' || key === 'reverseCharge';
+                          const checked = offByDefault ? !!invoiceOptions[key] : invoiceOptions[key] !== false;
+                          return (
+                            <label key={key} className="option-toggle">
+                              <input type="checkbox" checked={checked} onChange={() => toggleOption(key)} />
+                              <span>{label}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+                <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.4rem' }}>
+                  <button type="button" className="btn btn-secondary"
+                    onClick={() => {
+                      const allKeys = ['showLogo','showBusinessName','showBusinessAddress','showBusinessPhone','showBusinessEmail','showState','showGSTIN','showClientAddress','showClientPhone','showClientEmail','showPlaceOfSupply','showInvoiceNumber','showInvoiceDate','showDueDate','showHSN','showItemQty','showItemUnit','showRateColumn','showDiscount','showGST','showSubtotal','showAmountWords','showRoundOff','showBankDetails','showAccountLabel','showUPI','showSignature','showSignatoryText','showTerms','showNotes'];
+                      setInvoiceOptions(prev => { const out = { ...prev }; allKeys.forEach(k => { out[k] = false; }); return out; });
+                    }}
+                    style={{ fontSize: '0.72rem', padding: '0.3rem 0.6rem' }}>
+                    Hide all
+                  </button>
+                  <button type="button" className="btn btn-secondary"
+                    onClick={() => setInvoiceOptions(prev => ({
+                      ...DEFAULT_OPTIONS,
+                      paymentAccountSnapshot: prev.paymentAccountSnapshot,
+                      selectedAccountId: prev.selectedAccountId,
+                    }))}
+                    style={{ fontSize: '0.72rem', padding: '0.3rem 0.6rem' }}>
+                    Reset to default
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <ClientModal show={showClientModal} onClose={() => setShowClientModal(false)} onSave={handleClientModalSave} client={modalClient} isEditing={isEditingClient} defaultCountry={profile?.country} />
+
+          <div className="glass-panel p-6 mb-6">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="section-title" style={{ margin: 0 }}>Billed To</h3>
+            </div>
+
+            {!editingBill && clientCredit.available > 0.005 && (
+              <div style={{
+                marginBottom: '1rem', padding: '0.75rem 1rem',
+                background: 'rgba(3, 105, 161, 0.08)',
+                border: '1px solid rgba(3, 105, 161, 0.3)',
+                borderRadius: 8, fontSize: '0.85rem',
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+                  <div>
+                    <strong style={{ color: '#0369a1' }}>💳 Client has {formatCurrency(clientCredit.available, invoiceOptions.currency || 'INR')} credit</strong>
+                    <span style={{ color: 'var(--text-muted)', marginLeft: 8 }}>
+                      from {clientCredit.sources.length} prior overpayment{clientCredit.sources.length > 1 ? 's' : ''}
+                      {' '}({clientCredit.sources.map(s => s.invoiceNumber).slice(0, 3).join(', ')}
+                      {clientCredit.sources.length > 3 ? '…' : ''})
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+                    <input type="number" min="0" step="any" className="form-input"
+                      value={creditToApply || ''} placeholder="0"
+                      onChange={e => {
+                        const v = Math.max(0, Number(e.target.value) || 0);
+                        const cap = Math.min(clientCredit.available, Number(totals.total) || Infinity);
+                        setCreditToApply(Math.min(v, cap));
+                      }}
+                      style={{ width: 100, fontSize: '0.82rem', padding: '0.3rem 0.5rem' }} />
+                    <button type="button" className="btn btn-secondary"
+                      style={{ fontSize: '0.78rem', padding: '0.3rem 0.6rem' }}
+                      onClick={() => setCreditToApply(Math.min(clientCredit.available, Number(totals.total) || 0))}>
+                      Apply full
+                    </button>
+                    {creditToApply > 0 && (
+                      <button type="button" className="btn btn-secondary"
+                        style={{ fontSize: '0.78rem', padding: '0.3rem 0.6rem', color: '#dc2626', borderColor: '#fca5a5' }}
+                        onClick={() => setCreditToApply(0)}>
+                        Skip
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {creditToApply > 0.005 && (
+                  <div style={{ marginTop: 6, fontSize: '0.78rem', color: '#0369a1' }}>
+                    → Will apply {formatCurrency(creditToApply, invoiceOptions.currency || 'INR')} as advance from prior overpayment
+                    {creditToApply < clientCredit.available ? ` (${formatCurrency(clientCredit.available - creditToApply, invoiceOptions.currency || 'INR')} credit will remain)` : ''}.
+                  </div>
+                )}
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                  <input type="checkbox" checked={!!invoiceOptions.autoApplyClientCredit}
+                    onChange={e => setInvoiceOptions(prev => ({ ...prev, autoApplyClientCredit: e.target.checked }))} />
+                  Auto-apply available client credit on future invoices
+                </label>
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="form-group full-width" style={{ position: 'relative' }}>
+                <label className="form-label">Client Name</label>
+                <div style={{ display: 'flex', gap: '0.4rem' }}>
+                  <input type="text" className="form-input" style={{ flex: 1 }} value={client.name} ref={clientNameRef}
+                    onChange={(e) => {
+                      setClient({ ...client, name: e.target.value });
+                      setSelectedClientId(null);
+                      setShowClientSuggestions(true);
+                      setClientPickerIdx(-1);
+                    }}
+                    onFocus={() => { if (savedClients.length > 0) setShowClientSuggestions(true); }}
+                    onKeyDown={(e) => {
+                      if (!showClientSuggestions || !filteredClients.length) return;
+                      if (e.key === 'ArrowDown') {
+                        e.preventDefault();
+                        setClientPickerIdx(i => (i + 1) % filteredClients.length);
+                      } else if (e.key === 'ArrowUp') {
+                        e.preventDefault();
+                        setClientPickerIdx(i => (i <= 0 ? filteredClients.length - 1 : i - 1));
+                      } else if (e.key === 'Enter') {
+                        if (clientPickerIdx >= 0 && filteredClients[clientPickerIdx]) {
+                          e.preventDefault();
+                          selectSavedClient(filteredClients[clientPickerIdx]);
+                        }
+                      } else if (e.key === 'Escape') {
+                        setShowClientSuggestions(false);
+                      }
+                    }}
+                    placeholder="Type client name to search or add new" autoComplete="off" />
+                  {selectedClientId && (
+                    <button type="button" className="btn-client-edit" onClick={() => openEditClientModal(savedClients.find(c => c.id === selectedClientId))} title="Edit saved client">
+                      <Pencil size={14} />
+                    </button>
+                  )}
+                </div>
+                {showClientSuggestions && savedClients.length > 0 && (
+                  <div className="client-suggestions" ref={clientSuggestionsRef}>
+                    {filteredClients.length > 0 && filteredClients.map((cli, i) => (
+                      <div key={cli.id} className="client-suggestion-row"
+                        style={i === clientPickerIdx ? { background: 'var(--primary-light, rgba(30,64,175,0.12))' } : undefined}>
+                        <button type="button" className="client-suggestion-item"
+                          onMouseEnter={() => setClientPickerIdx(i)}
+                          onClick={() => selectSavedClient(cli)}>
+                          <div className="client-suggestion-main">
+                            <strong>{cli.name}</strong>
+                            {(cli.city || cli.address) && <small className="client-suggestion-addr">{cli.city || cli.address.substring(0, 30)}{!cli.city && cli.address.length > 30 ? '...' : ''}</small>}
+                          </div>
+                          <span>{cli.state}{cli.gstin ? ` · ${cli.gstin}` : ''}</span>
+                        </button>
+                        <button type="button" className="client-suggestion-edit" onClick={() => { openEditClientModal(cli); setShowClientSuggestions(false); }} title="Edit client">
+                          <Pencil size={12} />
+                        </button>
+                      </div>
+                    ))}
+                    {client.name.trim() && (
+                      <button type="button" className="client-suggestion-save" onClick={openAddClientModal}>
+                        <UserPlus size={14} /> Save "{client.name.trim()}" as new client
+                      </button>
+                    )}
+                    {filteredClients.length === 0 && !client.name.trim() && (
+                      <div className="client-picker-empty">Type to search clients</div>
+                    )}
+                  </div>
+                )}
+              </div>
+              
+              <div className="form-group full-width">
+                <label className="form-label">Drug Licence No. (Buyer)</label>
+                <input type="text" className="form-input" value={client.licence || ''}
+                  onChange={(e) => setClient({ ...client, licence: e.target.value })} placeholder="e.g. 20B/21B..." />
+              </div>
+
+              <div className="form-group full-width">
+                <label className="form-label">Billing Address</label>
+                <input type="text" className="form-input" value={client.address}
+                  onChange={(e) => setClient({ ...client, address: e.target.value })} placeholder="Street address, locality" />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Country</label>
+                <select className="form-input" value={client.country || profile?.country || 'India'}
+                  onChange={(e) => setClient({ ...client, country: e.target.value, state: '' })}>
+                  {(() => {
+                    const visible = getCountriesForRegion(getRegionMode());
+                    const cur = client.country || profile?.country;
+                    const out = [];
+                    if (cur && !visible.some(c => c.name === cur)) {
+                      out.push(<option key={cur} value={cur}>{cur}</option>);
+                    }
+                    return out.concat(visible.map(c => <option key={c.code} value={c.name}>{c.name}</option>));
+                  })()}
+                </select>
+              </div>
+              <div className="form-group">
+                <label className="form-label">City</label>
+                <input type="text" className="form-input" value={client.city}
+                  onChange={(e) => setClient({ ...client, city: e.target.value })} placeholder="e.g. Mumbai" />
+              </div>
+              <div className="form-group">
+                {(() => { const cc = getCountryConfig(client.country || profile?.country); return <label className="form-label">{cc.postalLabel}</label>; })()}
+                <input type="text" className="form-input" value={client.pin}
+                  onChange={(e) => setClient({ ...client, pin: e.target.value })} placeholder="Postal / PIN code" />
+              </div>
+              {invoiceOptions.showState && (() => {
+                const cc = getCountryConfig(client.country || profile?.country);
+                const stateOpts = getStatesForCountry(client.country || profile?.country);
+                return (
+                  <div className="form-group">
+                    <label className="form-label">{cc.stateLabel}</label>
+                    {stateOpts.length > 0 ? (
+                      <select className="form-input" value={client.state} onChange={(e) => setClient({ ...client, state: e.target.value })}>
+                        <option value="">Select {cc.stateLabel}</option>
+                        {stateOpts.map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    ) : (
+                      <input type="text" className="form-input" value={client.state}
+                        onChange={(e) => setClient({ ...client, state: e.target.value })} placeholder={cc.stateLabel} />
+                    )}
+                  </div>
+                );
+              })()}
+              {invoiceOptions.showGSTIN && (() => {
+                const cc = getCountryConfig(client.country || profile?.country);
+                return (
+                  <div className="form-group">
+                    <label className="form-label">{cc.taxIdLabel}</label>
+                    <input type="text" className="form-input" value={client.gstin}
+                      onChange={(e) => setClient({ ...client, gstin: e.target.value.toUpperCase() })} placeholder="Optional" maxLength={20} />
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+
+          <div className="glass-panel p-6 mb-6">
+            <h3 className="section-title">Invoice Details</h3>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="form-group">
+                <label className="form-label">Invoice Number</label>
+                <input type="text" className="form-input" value={details.invoiceNumber}
+                  onChange={(e) => setDetails({ ...details, invoiceNumber: e.target.value })} />
+              </div>
+              
+              <div className="form-group">
+                <label className="form-label">Drug Licence No. (Seller)</label>
+                <input type="text" className="form-input" value={details.sellerLicence || ''}
+                  onChange={(e) => setDetails({ ...details, sellerLicence: e.target.value })} placeholder="e.g. 20B/58/..." />
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">Invoice Date</label>
+                <input type="date" className="form-input" value={details.invoiceDate}
+                  onChange={(e) => setDetails({ ...details, invoiceDate: e.target.value })} />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Due Date</label>
+                <input type="date" className="form-input" value={details.dueDate}
+                  onChange={(e) => setDetails({ ...details, dueDate: e.target.value })} />
+              </div>
+              <div className="form-group">
+                <label className="form-label">PO NO.</label>
+                <input type="text" className="form-input" value={details.poNumber || ''}
+                  onChange={(e) => setDetails({ ...details, poNumber: e.target.value })} 
+                  placeholder="Purchase Order No." />
+              </div>
+              {invoiceOptions.showPlaceOfSupply && (() => {
+                const posOpts = getStatesForCountry(profile?.country);
+                return (
+                  <div className="form-group">
+                    <label className="form-label">Place of Supply</label>
+                    {posOpts.length > 0 ? (
+                      <select className="form-input" value={details.placeOfSupply}
+                        onChange={(e) => setDetails({ ...details, placeOfSupply: e.target.value })}>
+                        <option value="">Defaults to Client State</option>
+                        {posOpts.map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    ) : (
+                      <input type="text" className="form-input" value={details.placeOfSupply}
+                        onChange={(e) => setDetails({ ...details, placeOfSupply: e.target.value })} placeholder="State / Region" />
+                    )}
+                  </div>
+                );
+              })()}
+              {invoiceType === 'credit-note' && (
+                <div className="form-group full-width">
+                  <label className="form-label">Original Invoice Reference</label>
+                  <input type="text" className="form-input" value={details.originalInvoiceRef}
+                    onChange={(e) => setDetails({ ...details, originalInvoiceRef: e.target.value })} placeholder="e.g. INV/2025-26/0001" />
+                </div>
+              )}
+
+              <div className="form-group full-width" style={{ marginTop: '0.5rem', padding: '0.6rem 0.85rem', background: 'var(--bg-secondary)', borderRadius: 6 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', userSelect: 'none', fontSize: '0.88rem' }}>
+                  <input type="checkbox" checked={details.shipToSameAsBilling !== false}
+                    onChange={e => setDetails({ ...details, shipToSameAsBilling: e.target.checked })}
+                    style={{ width: 16, height: 16, accentColor: 'var(--primary)' }} />
+                  <span><strong>Ship to</strong> same as bill-to address</span>
+                </label>
+                {details.shipToSameAsBilling === false && (
+                  <div className="grid grid-cols-2 gap-3" style={{ marginTop: '0.6rem' }}>
+                    <div className="form-group full-width">
+                      <label className="form-label" style={{ fontSize: '0.78rem' }}>Shipping Address</label>
+                      <textarea className="form-input" rows={2} value={details.shippingAddress || ''}
+                        onChange={e => setDetails({ ...details, shippingAddress: e.target.value })}
+                        placeholder="Delivery address / warehouse / consignee location" />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label" style={{ fontSize: '0.78rem' }}>Shipping City</label>
+                      <input type="text" className="form-input" value={details.shippingCity || ''}
+                        onChange={e => setDetails({ ...details, shippingCity: e.target.value })} />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label" style={{ fontSize: '0.78rem' }}>Shipping PIN</label>
+                      <input type="text" className="form-input" value={details.shippingPin || ''}
+                        onChange={e => setDetails({ ...details, shippingPin: e.target.value })}
+                        placeholder="6-digit PIN" maxLength={6} />
+                    </div>
+                    <div className="form-group full-width">
+                      <label className="form-label" style={{ fontSize: '0.78rem' }}>Shipping State</label>
+                      {(() => {
+                        const posOpts = getStatesForCountry(profile?.country);
+                        return posOpts.length > 0 ? (
+                          <select className="form-input" value={details.shippingState || ''}
+                            onChange={e => setDetails({ ...details, shippingState: e.target.value })}>
+                            <option value="">Same as billing state</option>
+                            {posOpts.map(s => <option key={s} value={s}>{s}</option>)}
+                          </select>
+                        ) : (
+                          <input type="text" className="form-input" value={details.shippingState || ''}
+                            onChange={e => setDetails({ ...details, shippingState: e.target.value })}
+                            placeholder="Delivery state / region" />
+                        );
+                      })()}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="glass-panel p-6 mb-6">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+              <h3 className="section-title" style={{ margin: 0 }}>Line Items</h3>
+              {showGST && (
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.82rem', cursor: 'pointer', userSelect: 'none' }}>
+                  <input type="checkbox" checked={taxInclusive} onChange={e => setTaxInclusive(e.target.checked)}
+                    style={{ width: 16, height: 16, accentColor: 'var(--primary)', cursor: 'pointer' }} />
+                  <span style={{ fontWeight: 500 }}>Prices include tax</span>
+                </label>
+              )}
+            </div>
+            {items.map((item, idx) => (
+              <LineItem
+                key={item.id}
+                item={item}
+                invoiceOptions={invoiceOptions}
+                taxInclusive={taxInclusive}
+                showGST={showGST}
+                taxLabel={taxLabel}
+                units={units}
+                countryTaxRates={countryTaxRates}
+                filterUnitsByMode={filterUnitsByMode}
+                invoiceMode={invoiceOptions.invoiceMode}
+                currency={invoiceOptions.currency}
+                profileCountry={profile?.country}
+                suggestions={getProductSuggestions(item.id)}
+                onFieldChange={handleItemChange}
+                onSelectProduct={selectProduct}
+                onSetProductSearch={setProductSearch}
+                onAddCustomUnit={handleAddCustomUnit}
+                onRemoveCustomUnit={handleRemoveCustomUnit}
+                onRemove={removeItem}
+                clampNonNeg={clampNonNeg}
+                isLastRow={idx === items.length - 1}
+                onAddRow={addItem}
+              />
+            ))}
+            <button className="btn btn-secondary mt-2" onClick={addItem}><Plus size={18} /> Add Item</button>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: '0.75rem', flexWrap: 'wrap' }}>
+              <label style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>Discount on total (whole bill)</label>
+              <input type="number" min="0" step="any" className="form-input"
+                value={invoiceOptions.invoiceDiscountValue || ''}
+                onChange={(e) => setInvoiceOptions(prev => ({ ...prev, invoiceDiscountValue: clampNonNeg(e.target.value) }))}
+                style={{ width: 100 }} placeholder="0" />
+              <select className="form-input"
+                value={invoiceOptions.invoiceDiscountType === 'percent' ? 'percent' : 'fixed'}
+                onChange={(e) => setInvoiceOptions(prev => ({ ...prev, invoiceDiscountType: e.target.value }))}
+                style={{ width: 90 }}>
+                <option value="fixed">₹ (fixed)</option>
+                <option value="percent">% of total</option>
+              </select>
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                Applied after tax. For GST-compliant pre-tax discount, use per-line discount instead.
+              </span>
+            </div>
+          </div>
+
+          <div className="glass-panel p-6 mb-6">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem', flexWrap: 'wrap', gap: '0.75rem' }}>
+              <h3 className="section-title" style={{ margin: 0 }}>Terms & Conditions</h3>
+              <div style={{ display: 'flex', gap: '0.35rem', alignItems: 'center' }}>
+                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 700 }}>PDF layout</span>
+                {[
+                  { id: 'compact', label: 'Compact', hint: 'Tiny footer text — saves paper' },
+                  { id: 'formatted', label: 'Formatted', hint: 'Larger readable paragraphs' },
+                ].map(mode => {
+                  const active = (invoiceOptions.termsFormatMode || 'compact') === mode.id;
+                  return (
+                    <button key={mode.id} type="button"
+                      onClick={() => setInvoiceOptions(prev => ({ ...prev, termsFormatMode: mode.id }))}
+                      title={mode.hint}
+                      style={{
+                        fontSize: '0.72rem', fontWeight: 600,
+                        padding: '0.28rem 0.65rem', borderRadius: 999,
+                        background: active
+                          ? 'linear-gradient(135deg, var(--primary), var(--primary-darker))'
+                          : 'var(--bg-secondary)',
+                        color: active ? '#fff' : 'var(--text)',
+                        border: active ? '1px solid transparent' : '1px solid var(--border)',
+                        cursor: 'pointer', transition: 'all 0.15s',
+                      }}>
+                      {mode.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: termsTemplates.length > 0 ? '1fr 1fr' : '1fr', gap: '0.75rem', marginBottom: '0.5rem' }}>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label">Insert preset (by business type)</label>
+                <select className="form-input" defaultValue=""
+                  onChange={async (e) => {
+                    if (!e.target.value) return;
+                    const preset = TERMS_PRESETS.find(p => p.id === e.target.value);
+                    if (!preset) return;
+                    if (customTerms && customTerms.replace(/<[^>]*>/g, '').trim()) {
+                      const skipConfirm = sessionStorage.getItem('gst_termsPresetConfirmed') === '1';
+                      if (!skipConfirm) {
+                        const proceed = await confirmAction({
+                          title: 'Replace current Terms?',
+                          message: 'Your existing Terms text will be lost. Subsequent preset swaps this session will happen silently — this confirmation is shown once.',
+                          confirmLabel: 'Replace',
+                          tone: 'warning',
+                        });
+                        if (!proceed) { e.target.value = ''; return; }
+                        try { sessionStorage.setItem('gst_termsPresetConfirmed', '1'); } catch {}
+                      }
+                    }
+                    setCustomTerms(preset.body);
+                    setSelectedTermsId('');
+                    e.target.value = '';
+                    if (preset.body) toast(`Inserted "${preset.label}" preset`, 'success');
+                  }}>
+                  <option value="">— Pick a business type —</option>
+                  {TERMS_PRESETS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+                </select>
+                <small style={{ color: '#94a3b8', fontSize: '0.7rem' }}>India-specific starter wording. Edit freely.</small>
+              </div>
+              {termsTemplates.length > 0 && (
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label className="form-label">Load saved template</label>
+                  <select className="form-input" value={selectedTermsId} onChange={(e) => handleTermsSelect(e.target.value)}>
+                    <option value="">— Custom —</option>
+                    {termsTemplates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                </div>
+              )}
+            </div>
+            <div className="form-group">
+              <label className="form-label">Terms (appears on invoice — supports rich formatting)</label>
+              <RichEditor toolbar value={customTerms}
+                onChange={(v) => { setCustomTerms(v); setSelectedTermsId(''); }}
+                placeholder="Enter or paste your terms & conditions..." />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Notes / Remarks (optional)</label>
+              <RichEditor toolbar value={customNotes}
+                onChange={(v) => setCustomNotes(v)}
+                placeholder="Project details, special instructions, additional notes..." />
+            </div>
+            <div className="form-group" style={{ background: '#fefce8', border: '1px dashed #ca8a04', borderRadius: 8, padding: '0.75rem 1rem' }}>
+              <label className="form-label" style={{ color: '#92400e', fontSize: '0.78rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M12 8v4m0 4h.01"/></svg>
+                Private Note (not shown on invoice)
+              </label>
+              <textarea rows="2" className="form-input note-textarea" value={internalNote}
+                onChange={(e) => setInternalNote(e.target.value)}
+                style={{ fontSize: '0.82rem' }}
+                placeholder="e.g. Client asked for 15-day credit, follow up on 20th, referred by Ravi..." />
+            </div>
+          </div>
+
+          <div className="glass-panel p-6 mb-6">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="section-title" style={{ margin: 0 }}>Additional Pages / Sections</h3>
+              <button type="button" className="btn btn-secondary" style={{ padding: '0.4rem 0.75rem', fontSize: '0.8rem' }}
+                onClick={() => setExtraSections(prev => [...prev, { id: Date.now().toString(), title: '', content: '' }])}>
+                <Plus size={15} /> Add Section
+              </button>
+            </div>
+            <p className="text-muted" style={{ fontSize: '0.8rem', marginBottom: '1rem' }}>
+              Add extra sections that appear after the invoice footer. You can paste formatted HTML content (bold, lists, tables, etc.).
+            </p>
+            {extraSections.length === 0 ? (
+              <p className="text-muted" style={{ fontSize: '0.85rem' }}>No extra sections. Click "Add Section" to create one.</p>
+            ) : (
+              extraSections.map((section, idx) => (
+                <div key={section.id} className="extra-section-editor">
+                  <div className="flex gap-2 items-center mb-2">
+                    <input type="text" className="form-input" value={section.title}
+                      onChange={(e) => setExtraSections(prev => prev.map(s => s.id === section.id ? { ...s, title: e.target.value } : s))}
+                      placeholder="Section title (e.g. Scope of Work, Delivery Timeline)" style={{ flex: 1 }} />
+                    <button className="icon-btn" onClick={() => {
+                      if (idx > 0) setExtraSections(prev => { const arr = [...prev]; [arr[idx - 1], arr[idx]] = [arr[idx], arr[idx - 1]]; return arr; });
+                    }} title="Move up" disabled={idx === 0}><ChevronUp size={14} /></button>
+                    <button className="icon-btn" onClick={() => {
+                      if (idx < extraSections.length - 1) setExtraSections(prev => { const arr = [...prev]; [arr[idx], arr[idx + 1]] = [arr[idx + 1], arr[idx]]; return arr; });
+                    }} title="Move down" disabled={idx === extraSections.length - 1}><ChevronDown size={14} /></button>
+                    <button className="icon-btn icon-btn-red" onClick={() => setExtraSections(prev => prev.filter(s => s.id !== section.id))} title="Remove"><Trash2 size={14} /></button>
+                  </div>
+                  <div className="form-group" style={{ marginBottom: '0.5rem' }}>
+                    <RichEditor
+                      value={section.content}
+                      onChange={(html) => setExtraSections(prev => prev.map(s => s.id === section.id ? { ...s, content: html } : s))}
+                      placeholder="Type or paste formatted content here (supports bold, lists, tables from Word/Docs)..." />
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        <div ref={previewPaneRef} className="preview-pane" style={previewCollapsed
+          ? { position: 'absolute', left: '-99999px', top: 0, width: '794px', pointerEvents: 'none', opacity: 0 }
+          : undefined}>
+          <div className="preview-pane-label" style={{
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            padding: '0.55rem 0.85rem',
+            background: 'var(--card-bg)',
+            border: '1px solid var(--border)',
+            borderRadius: 999,
+            marginBottom: '0.5rem',
+            boxShadow: '0 2px 8px rgba(0, 0, 0, 0.03)',
+            gap: '0.75rem',
+          }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <span style={{ fontSize: '0.85rem' }}>👁</span>
+              Live preview
+            </span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+              <div style={{
+                display: 'inline-flex', alignItems: 'center',
+                background: 'var(--bg-secondary)',
+                border: '1px solid var(--border)',
+                borderRadius: 999,
+                overflow: 'hidden',
+              }}>
+                <button type="button" title="Zoom out (Ctrl+−)"
+                  onClick={() => setPreviewZoom(z => Math.max(50, z - 10))}
+                  style={{ padding: '0.25rem 0.7rem', border: 'none', background: 'transparent', cursor: 'pointer', fontSize: '0.9rem', fontWeight: 700, color: 'var(--text)', lineHeight: 1 }}>−</button>
+                <span style={{ padding: '0.25rem 0.55rem', fontSize: '0.72rem', fontWeight: 700, color: 'var(--text)', minWidth: 42, textAlign: 'center', borderLeft: '1px solid var(--border)', borderRight: '1px solid var(--border)' }}>{previewZoom}%</span>
+                <button type="button" title="Zoom in (Ctrl+=)"
+                  onClick={() => setPreviewZoom(z => Math.min(200, z + 10))}
+                  style={{ padding: '0.25rem 0.7rem', border: 'none', background: 'transparent', cursor: 'pointer', fontSize: '0.9rem', fontWeight: 700, color: 'var(--text)', lineHeight: 1 }}>+</button>
+              </div>
+              <button type="button" title="Fit preview to the pane width"
+                onClick={handleFitToWidth}
+                style={{
+                  padding: '0.28rem 0.75rem',
+                  border: '1px solid var(--primary)',
+                  background: 'var(--primary-light, rgba(30,64,175,0.08))',
+                  color: 'var(--primary)',
+                  cursor: 'pointer',
+                  fontSize: '0.72rem', fontWeight: 700,
+                  borderRadius: 999,
+                  letterSpacing: '0.02em',
+                }}>Fit</button>
+            </span>
+          </div>
+          <div className="preview-scaler" style={{ transform: `scale(${previewZoom / 100})`, transformOrigin: 'top left' }}>
+            <InvoicePreview ref={printRef} profile={profile} client={client} details={details}
+              items={items} totals={totals} invoiceType={invoiceType} customTerms={customTerms}
+              customNotes={customNotes} extraSections={extraSections} 
+              options={{
+                ...invoiceOptions,
+                customTitle: invoiceOptions.customTitle || (
+                  invoiceType === 'proforma' ? 'PROFORMA INVOICE / ESTIMATE' :
+                  invoiceType === 'bill-of-supply' ? 'BILL OF SUPPLY' :
+                  invoiceType === 'composition' ? 'BILL OF SUPPLY (COMPOSITION)' :
+                  invoiceType === 'credit-note' ? 'CREDIT NOTE' :
+                  invoiceType === 'delivery-challan' ? 'DELIVERY CHALLAN' :
+                  'TAX INVOICE'
+                )
+              }} 
+            />
+          </div>
+        </div>
+      </div>
+
+      <PrintPreviewModal
+        isOpen={showPrintPreview}
+        onClose={() => setShowPrintPreview(false)}
+        onPrint={executePrint}
+        onDownloadPdf={generatePDF}
+        profile={profile}
+        client={client}
+        details={details}
+        items={items}
+        totals={totals}
+        invoiceType={invoiceType}
+        customTerms={customTerms}
+        customNotes={customNotes}
+        extraSections={extraSections}
+        invoiceOptions={invoiceOptions}
+      />
+
+      {leaveModal && (
+        <div className="modal-overlay" onClick={leaveActions.cancel}>
+          <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: '460px' }}>
+            <h3 style={{ marginTop: 0 }}>Unsaved changes</h3>
+            <p style={{ fontSize: '0.9rem', color: 'var(--text-muted)', marginBottom: '1.25rem' }}>
+              This invoice has changes that haven't been saved yet. What do you want to do?
+            </p>
+            <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+              <button className="btn btn-secondary" onClick={leaveActions.cancel}>
+                Keep editing
+              </button>
+              <button className="btn btn-secondary" style={{ color: '#dc2626', borderColor: '#fca5a5' }} onClick={leaveActions.discardAndExit}>
+                Discard &amp; leave
+              </button>
+              <button className="btn btn-primary" onClick={leaveActions.saveAndExit}>
+                Save &amp; leave
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

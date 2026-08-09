@@ -1,0 +1,16 @@
+# Dependency directories
+node_modules/
+dist/
+
+# Environment variables & Secrets
+.env
+credentials.json
+token.json
+
+# Local folders containing actual bills
+Saved Invoices/
+data/
+
+# OS generated files
+.DS_Store
+Thumbs.db
