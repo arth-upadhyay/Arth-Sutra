@@ -5,7 +5,8 @@ I built this software for my father. As a business owner, enterprise-grade billi
 
 ## Architecture Overview
 ArthSutra is an offline-first Single Page Application (SPA). It is designed to run entirely on the user's local machine with zero latency, removing the dependency on continuous internet access or expensive cloud database hosting.
-
+## password
+**ARTH**
 ### The Tech Stack
 * **Frontend:** React.js, Vite
 * **Local Database:** IndexedDB (via browser storage)
