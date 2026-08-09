@@ -42,8 +42,12 @@ Because browsers cannot securely force file downloads to specific folders withou
 * **Node.js** must be installed on the host machine.
 
 ### Local Deployment
+
+RUN THE: Install FreeGSTBill.BAT         
+         OR
 1. Clone or download this repository.
 2. Open a terminal inside the root project directory.
 3. Install the dependencies:
    ```bash
    npm install
+   
