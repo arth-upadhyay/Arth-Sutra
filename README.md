@@ -35,7 +35,8 @@ After the DOM is rendered in the background, the application uses `html2canvas` 
 Because browsers cannot securely force file downloads to specific folders without user prompts, the frontend sends the PDF blob to a local Node.js daemon (`server.js`) running in the background via a `/api/save-pdf` endpoint. 
 * The Node server physically writes the PDF to a "Saved Invoices" directory on the user's hard drive.
 * If configured, it will simultaneously utilize the Google Drive API to push a copy of the invoice to the cloud for secure backup.
-
+## note: 
+*its hard coded to turn your product's price to a increase of 30% change it your needs*
 ## Installation and Setup
 
 ### Prerequisites
