@@ -158,7 +158,7 @@
 <body>
   <div class="wrap">
     <header>
-      <h1>ArthSutra
+      <h1>ArthSutra</h1>
       <p>Control Panel - start, stop, and open your local billing app</p>
     </header>
 
@@ -167,7 +167,7 @@
         <div class="nojs-warning">
           <strong>JavaScript is disabled in your browser.</strong>
           This control panel needs JavaScript to check server status. Either enable it,
-          or open the file <code>Start FreeGSTBill.bat</code> in the install folder
+          or open the file <code>Start ArthSutra Server.bat</code> in the install folder
           and then go to <a href="http://localhost:47371/">http://localhost:47371/</a>
           in your browser.
         </div>
@@ -187,10 +187,10 @@
         <a id="open-app" class="btn btn-primary btn-primary-full" href="#" target="_blank" rel="noopener" aria-disabled="true">
           Open Billing App
         </a>
-        <a id="start-btn" class="btn" href="freegstbill://run">
+        <a id="start-btn" class="btn" href="arthsutra://run">
           Start Server
         </a>
-        <a id="stop-btn" class="btn btn-danger" href="freegstbill-stop://run" aria-disabled="true">
+        <a id="stop-btn" class="btn btn-danger" href="arthsutra-stop://run" aria-disabled="true">
           Stop Server
         </a>
       </div>
@@ -210,11 +210,11 @@
         <div class="help">
           <p>Try these in order:</p>
           <ol>
-            <li>Click <strong>Start Server</strong> above. Your browser may ask to allow <code>freegstbill://</code> - click Allow.</li>
-            <li>If nothing happens after 30 seconds, open the install folder and double-click <code>Start FreeGSTBill.bat</code> directly. A small black window should appear briefly.</li>
-            <li>If you see "Node.js is not installed", run <code>Install FreeGSTBill.bat</code> first.</li>
+            <li>Click <strong>Start Server</strong> above. Your browser may ask to allow <code>arthsutra://</code> - click Allow.</li>
+            <li>If nothing happens after 30 seconds, open the install folder and double-click <code>Start ArthSutra Server.bat</code> directly. A small black window should appear briefly.</li>
+            <li>If you see "Node.js is not installed", run <code>Install ArthSutra.bat</code> first.</li>
             <li>If the port is busy, open <code>data\port.txt</code> in Notepad to see which port the app picked, or delete that file and restart to let the server pick a fresh one.</li>
-            <li>Still stuck? Open a <a href="https://github.com/IamRamgarhia/arth-sutra/issues" target="_blank" rel="noopener">GitHub issue</a>.</li>
+            <li>Still stuck? Open a <a href="https://github.com/arth-upadhyay/ArthSutra/issues" target="_blank" rel="noopener">GitHub issue</a>.</li>
           </ol>
           <p><strong>Tip:</strong> Press <kbd>F12</kbd> to open browser developer tools and check the Console tab for any errors. Share what you see if you ask for support.</p>
         </div>
@@ -222,49 +222,26 @@
     </div>
 
     <footer>
-      ArthSutracensed &middot;
-      <a href="https://github.com/arth-upadhyay/arth-sutra" target="_blank" rel="noopener">GitHub</a> &middot;
+      ArthSutra &middot;
+      <a href="https://github.com/arth-upadhyay/ArthSutra" target="_blank" rel="noopener">GitHub</a> &middot;
       made by Arth
     </footer>
   </div>
 
   <script>
-    // Wrap everything in try/catch so a single browser quirk doesn't blank
-    // the panel. Errors get logged to console and shown on-page.
     (function () {
       'use strict';
 
-      // v1.9.6 — Polling redesigned to eliminate console spam.
-      //
-      // BEFORE: every 2 seconds we scanned 50 ports (47371-47420) in
-      // parallel looking for the server. When the server was down, that
-      // meant ~25 failed fetches per second flooding DevTools console
-      // with net::ERR_CONNECTION_REFUSED for every port + hitting the
-      // OS's TCP stack constantly. User's screenshot showed dozens of
-      // errors per few seconds.
-      //
-      // AFTER:
-      //   - On startup: try cached port. If it fails, do ONE full scan.
-      //     After that, we remember whichever port worked (or `null` if
-      //     none did).
-      //   - Regular polls (every 2s): only ping the KNOWN port. No scans.
-      //   - If server transitions to stopped: exponential backoff
-      //     (2s → 5s → 15s → stopped). No more auto-polling.
-      //   - "Retry now" button appears in stopped state → resets backoff,
-      //     does a fresh scan.
-      //
-      // Net result when server is down: ~1 request every 15s max, not
-      // 25 per second.
       var DEFAULT_PORT = 47371;
       var SCAN_RANGE = 50;
       var activePort = DEFAULT_PORT;
       var pollTimer = null;
       var didInitialScan = false;
       var consecutiveFailures = 0;
-      var currentInterval = 2000; // ms; grows on failure, resets on success
+      var currentInterval = 2000;
 
       try {
-        var cached = window.sessionStorage && sessionStorage.getItem('fgsb_port');
+        var cached = window.sessionStorage && sessionStorage.getItem('arthsutra_port');
         if (cached) {
           var n = parseInt(cached, 10);
           if (n >= 1024 && n <= 65535) activePort = n;
@@ -293,8 +270,6 @@
         });
       }
 
-      // Full scan of the port range — used ONLY on first mount + when
-      // user explicitly clicks "Retry now". Never on regular polls.
       function fullScan() {
         var probes = [];
         for (var p = DEFAULT_PORT; p < DEFAULT_PORT + SCAN_RANGE; p++) {
@@ -306,12 +281,7 @@
         });
       }
 
-      // Regular poll: only pings the KNOWN cached port. No scan.
-      // Returns the hit object (with port + version) or null.
       function findRunningPort() {
-        // On first check, run the initial scan so we find the server even
-        // if the cached port is stale. After that, only ping the known
-        // port. User can force a re-scan via the "Retry now" button.
         if (!didInitialScan) {
           didInitialScan = true;
           return pingPort(activePort).then(function (hit) {
@@ -319,8 +289,6 @@
             return fullScan();
           });
         }
-        // Regular tick — only ping the cached port. If it fails, we back
-        // off in checkServer(). No console spam.
         return pingPort(activePort);
       }
 
@@ -360,8 +328,7 @@
         return findRunningPort().then(function (hit) {
           if (hit) {
             activePort = hit.port;
-            try { sessionStorage.setItem('fgsb_port', String(hit.port)); } catch (e) {}
-            // Success — reset backoff, poll every 2s
+            try { sessionStorage.setItem('arthsutra_port', String(hit.port)); } catch (e) {}
             consecutiveFailures = 0;
             currentInterval = 2000;
             setStatus('running', 'Server is running on port ' + hit.port, 'Click "Open Billing App" to launch in a new tab.');
@@ -369,14 +336,12 @@
             setInfo(true, hit.port, hit.version);
             schedulePoll();
           } else {
-            // Failure — increment counter, back off exponentially, and
-            // eventually stop auto-polling. User then uses "Retry now".
             consecutiveFailures += 1;
-            var detailMsg = 'Click "Start Server" — your browser may ask to allow freegstbill://. Click Allow.';
+            var detailMsg = 'Click "Start Server" — your browser may ask to allow arthsutra://. Click Allow.';
             if (consecutiveFailures === 1) currentInterval = 5000;
             else if (consecutiveFailures === 2) currentInterval = 15000;
             else if (consecutiveFailures >= 3) {
-              currentInterval = 0; // stop
+              currentInterval = 0; 
               detailMsg = 'Auto-check paused after 3 failures. Click "Retry now" to check again.';
             }
             setStatus('stopped', 'Server is not running', detailMsg);
@@ -393,9 +358,6 @@
         });
       }
 
-      // Retry button injected below the status pill when polling has
-      // stopped due to repeated failures. Clicking it does a full scan
-      // and resets the backoff so regular polling resumes on success.
       function showRetryButton(visible) {
         var existing = $('retry-btn');
         if (!visible) {
@@ -409,7 +371,7 @@
         btn.style.cssText = 'margin-top:10px;font-size:0.85rem;padding:6px 12px;';
         btn.textContent = '↻ Retry now';
         btn.addEventListener('click', function () {
-          didInitialScan = false; // force a full scan
+          didInitialScan = false; 
           consecutiveFailures = 0;
           currentInterval = 2000;
           btn.style.display = 'none';
@@ -428,25 +390,16 @@
         if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
       }
 
-      // Pause polls when tab is backgrounded (saves CPU).
       try {
         document.addEventListener('visibilitychange', function () {
           if (document.hidden) stopPolling(); else startPolling();
         });
       } catch (e) {}
 
-      // Burst-poll after Start/Stop clicks so status updates within a
-      // second. Uses ONLY the known port (not scan) — the user's action
-      // triggered this, so we know we're looking for the same server.
-      // After the burst, regular polling resumes at 2s.
       function burst(durationMs) {
         var start = Date.now();
-        // Reset the backoff so the burst polls at fast interval + the
-        // subsequent regular polling doesn't inherit any prior failure count.
         consecutiveFailures = 0;
         currentInterval = 2000;
-        // Force a fresh scan on Start click since the server may come up
-        // on a different port than the cached one.
         didInitialScan = false;
         var burstTimer = setInterval(function () {
           checkServer();
