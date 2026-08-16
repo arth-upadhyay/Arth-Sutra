@@ -44,7 +44,7 @@ Because browsers cannot securely force file downloads to specific folders withou
 
 ### Local Deployment
 
-RUN THE: Install FreeGSTBill.BAT         
+RUN THE: Install ArthSutra.bat        
          OR
 1. Clone or download this repository.
 2. Open a terminal inside the root project directory.
