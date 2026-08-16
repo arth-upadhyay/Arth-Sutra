@@ -770,11 +770,11 @@ app.post('/api/trash-pdf', express.json(), (req, res) => {
 // ========================
 // Version check
 // ========================
-const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf-8'));[cite: 1]
+const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf-8'));
 
 app.get('/api/version', (req, res) => {
-  res.json({ current: pkg.version });[cite: 1]
-});[cite: 1]
+  res.json({ current: pkg.version });
+});
 
 // Replaced update logic to permanently disable external pings
 app.get('/api/check-update', async (req, res) => {
