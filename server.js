@@ -770,69 +770,23 @@ app.post('/api/trash-pdf', express.json(), (req, res) => {
 // ========================
 // Version check
 // ========================
-const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf-8'));
+const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf-8'));[cite: 1]
 
 app.get('/api/version', (req, res) => {
-  res.json({ current: pkg.version });
-});
+  res.json({ current: pkg.version });[cite: 1]
+});[cite: 1]
 
-// Naive semver compare — returns +1 if a > b, -1 if a < b, 0 if equal.
-// "1.4.10" > "1.4.2" correctly (numeric parts), unlike a string compare.
-function compareSemver(a, b) {
-  const pa = String(a || '0').split('.').map(n => parseInt(n, 10) || 0);
-  const pb = String(b || '0').split('.').map(n => parseInt(n, 10) || 0);
-  for (let i = 0; i < 3; i++) {
-    if ((pa[i] || 0) > (pb[i] || 0)) return 1;
-    if ((pa[i] || 0) < (pb[i] || 0)) return -1;
-  }
-  return 0;
-}
-
+// Replaced update logic to permanently disable external pings
 app.get('/api/check-update', async (req, res) => {
-  try {
-    // Two parallel fetches: package.json (definitive version source) and the
-    // GitHub Releases API (for release notes). Both have a 4s timeout so a
-    // flaky network can't lock the UI.
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 4000);
-    const [pkgRes, relRes] = await Promise.all([
-      fetch('https://raw.githubusercontent.com/arth-upadhyay/Arth-Sutra/main/package.json', { signal: ctrl.signal }),
-      fetch('https://api.github.com/repos/arth-upadhyay/Arth-Sutra/releases/latest', {
-        signal: ctrl.signal,
-        headers: { 'Accept': 'application/vnd.github+json', 'User-Agent': 'FreeGSTBill-update-check' },
-      }).catch(() => null),
-    ]);
-    clearTimeout(t);
-
-    if (!pkgRes.ok) throw new Error('GitHub fetch failed');
-    const remote = await pkgRes.json();
-    const cmp = compareSemver(remote.version, pkg.version);
-    const updateAvailable = cmp > 0;
-
-    let releaseNotes = null;
-    let releaseUrl = null;
-    let releasePublishedAt = null;
-    let releaseTag = null;
-    if (relRes && relRes.ok) {
-      const rel = await relRes.json();
-      releaseNotes = rel.body || null;
-      releaseUrl = rel.html_url || null;
-      releasePublishedAt = rel.published_at || null;
-      releaseTag = rel.tag_name || null;
-    }
-
-    res.json({
-      current: pkg.version,
-      latest: remote.version,
-      updateAvailable,
-      releaseNotes,
-      releaseUrl,
-      releasePublishedAt,
-      releaseTag,
-    });
-  } catch {
-    res.json({ current: pkg.version, latest: null, updateAvailable: false, error: 'Could not check for updates' });
-  }
+  res.json({ 
+    current: pkg.version, 
+    latest: pkg.version, 
+    updateAvailable: false, 
+    releaseNotes: null,
+    releaseUrl: null,
+    releasePublishedAt: null,
+    releaseTag: null 
+  });
 });
 
 // ========================
