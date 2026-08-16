@@ -1,5 +1,4 @@
-
-  ========================================================
+ ========================================================
 
      ArthSutra
      By ARTH  -  
@@ -8,7 +7,7 @@
 
   -------- IF YOU'RE NEW HERE: JUST DO STEP 1 ------------
 
-  1. Double-click   Install FreeGSTBill.bat
+  1. Double-click   Install ArthSutra.bat
 
      That's it. The installer takes care of:
        *  installing Node.js (if your PC doesn't have it)
@@ -37,7 +36,7 @@
      -> Click  "More info"  then  "Run anyway"
 
   "This file came from another computer and might be blocked"?
-     -> Right-click  Install FreeGSTBill.bat  ->  Properties
+     -> Right-click  Install ArthSutra.bat  ->  Properties
      -> Tick the  Unblock  box at the bottom  ->  OK
      -> Then double-click again.
 
@@ -61,17 +60,13 @@
 
   Open the app:
      Double-click "ArthSutra" on your Desktop
-     (or search "Free GST Billing" from the Start Menu)
+     (or search "ArthSutra" from the Start Menu)
 
   Bookmark / direct URL:
      http://localhost:47371
 
   Stop the app (rare, you usually won't need to):
-     Double-click   Stop FreeGSTBill.bat
-
-  Update to a newer version:
-     Double-click   Update FreeGSTBill.bat
-     Your data is never touched by updates.
+     Double-click   Stop ArthSutra.bat
 
   ---------------------------------------------------------
 
@@ -167,7 +162,7 @@
   Installer says "Node.js install failed"?
      -> Install it manually from https://nodejs.org
         (pick the LTS version).
-        Then run Install FreeGSTBill.bat again.
+        Then run Install ArthSutra.bat again.
 
   Something else is wrong?
      -> Read docs/USER_GUIDE.md (in this folder) - has detailed
