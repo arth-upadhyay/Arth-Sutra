@@ -298,13 +298,13 @@ const InvoicePreview = React.forwardRef(({ profile, client, details, items, tota
             <tr>
               <td style={{ width: '50%' }}>
                 <div className="font-bold" style={{ fontSize: '13px', color: '#000080' }}>
-                  {profile?.businessName || 'buisness name'}
+                  {profile?.businessName || 'Business Name'}
                 </div>
                 <div>Pharmaceutical Distributors</div>
                 <div>{profile?.address}</div>
                 <div>{[profile?.city, profile?.state, profile?.pin].filter(Boolean).join(', ')}</div>
                 <div>Phone : {profile?.phone}</div>
-                <div>Licence No. : {details?.sellerLicence || 'for ex:20B/9612..........2026'}</div>
+                <div>Licence No. : {details?.sellerLicence || '20B/1234/27/2026'}</div>
                 <div>GSTIN : {profile?.gstin}</div>
                 <div>E-Mail : {profile?.email}</div>
               </td>
@@ -330,11 +330,11 @@ const InvoicePreview = React.forwardRef(({ profile, client, details, items, tota
                   </table>
                 </div>
 
-                <div className="font-bold">M/s {client?.name || 'sample name '}</div>
+                <div className="font-bold">M/s {client?.name || 'Sample Client Name'}</div>
                 <div>{client?.address}</div>
                 <div>{[client?.city, client?.state, client?.pin].filter(Boolean).join(', ')}</div>
                 <div>Ph.No.: {client?.phone}</div>
-                <div>GST : {client?.gstin} &nbsp;&nbsp;&nbsp; Licence No. : {client?.licence || 'for ex: 20B/76/................2026'}</div>
+                <div>GST : {client?.gstin} &nbsp;&nbsp;&nbsp; Licence No. : {client?.licence || '20B/12/34/2015'}</div>
               </td>
             </tr>
           </tbody>
@@ -482,11 +482,11 @@ const InvoicePreview = React.forwardRef(({ profile, client, details, items, tota
                     </tr>
                     <tr>
                       <td>SGST PAYBLE</td>
-                      <td className="no-border-right text-right">{totals.sgst?.toFixed(2) || '0.00'}</td>
+                      <td className="no-border-right text-right">{(totals.totalTaxAmount / 2)?.toFixed(2) || '0.00'}</td>
                     </tr>
                     <tr>
                       <td>CGST PAYBLE</td>
-                      <td className="no-border-right text-right">{totals.cgst?.toFixed(2) || '0.00'}</td>
+                      <td className="no-border-right text-right">{(totals.totalTaxAmount / 2)?.toFixed(2) || '0.00'}</td>
                     </tr>
                     <tr>
                       <td>ADD/LESS</td>
@@ -518,14 +518,14 @@ const InvoicePreview = React.forwardRef(({ profile, client, details, items, tota
               </td>
               <td style={{ width: '30%', padding: '4px', borderRight: '1px solid #000', borderBottom: 'none' }}>
                 <div className="font-bold text-center" style={{ textDecoration: 'underline', marginBottom: '4px' }}>BANK DETAIL</div>
-                <div className="font-bold">{profile?.businessName || 'buisness name '}</div>
-                <div className="font-bold">bank name </div>
-                <div className="font-bold">A/C NO. {account?.accountNumber || profile?.accountNumber || 'account no'}</div>
-                <div className="font-bold">IFSC CODE {account?.ifsc || profile?.ifsc || 'ifsc code'}</div>
+                <div className="font-bold">{profile?.businessName || 'Business Name'}</div>
+                <div className="font-bold">Bank Name</div>
+                <div className="font-bold">A/C NO. {account?.accountNumber || profile?.accountNumber || '1234567890'}</div>
+                <div className="font-bold">IFSC CODE {account?.ifsc || profile?.ifsc || 'ABCD0001234'}</div>
               </td>
               <td style={{ width: '30%', padding: '4px', textAlign: 'center', verticalAlign: 'top', borderRight: 'none', borderBottom: 'none' }}>
                 <div className="font-bold" style={{ textAlign: 'right', fontSize: '10px' }}>
-                  For {profile?.businessName || 'buisness name'}
+                  For {profile?.businessName || 'Business Name'}
                 </div>
                 <br /><br /><br />
                 <div className="font-bold" style={{ textAlign: 'right', fontSize: '10px' }}>Authorized Signatory</div>
@@ -535,12 +535,8 @@ const InvoicePreview = React.forwardRef(({ profile, client, details, items, tota
         </table>
 
       </div>
-      
-      {/* BRANDING FOOTER */}
-      <div style={{ textAlign: 'center', fontSize: '10px', fontStyle: 'italic', marginTop: '4px', color: '#333' }}>
+             style={{ textAlign: 'center', fontSize: '10px', fontStyle: 'italic', marginTop: '4px', color: '#333' }}>
         created by Arth Upadhyay || ph:9425877961
-      </div>
-      
     </div>
   );
 });
