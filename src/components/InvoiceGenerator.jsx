@@ -51,15 +51,15 @@ function RichEditor({ value, onChange, placeholder, toolbar = false }) {
     <>
       {toolbar && (
         <div style={{ display: 'flex', gap: '0.25rem', flexWrap: 'wrap', marginBottom: '0.4rem' }}>
-          <button type="button" onClick={() => applyFormat('bold')}        title="Bold (Ctrl+B)"      style={{ ...btnStyle, fontWeight: 700 }}>B</button>
-          <button type="button" onClick={() => applyFormat('italic')}      title="Italic (Ctrl+I)"    style={{ ...btnStyle, fontStyle: 'italic' }}>I</button>
-          <button type="button" onClick={() => applyFormat('underline')}   title="Underline (Ctrl+U)" style={{ ...btnStyle, textDecoration: 'underline' }}>U</button>
+          <button type="button" onClick={() => applyFormat('bold')} title="Bold (Ctrl+B)" style={{ ...btnStyle, fontWeight: 700 }}>B</button>
+          <button type="button" onClick={() => applyFormat('italic')} title="Italic (Ctrl+I)" style={{ ...btnStyle, fontStyle: 'italic' }}>I</button>
+          <button type="button" onClick={() => applyFormat('underline')} title="Underline (Ctrl+U)" style={{ ...btnStyle, textDecoration: 'underline' }}>U</button>
           <span style={{ width: 1, background: 'var(--border-color)', margin: '0 0.2rem' }} />
-          <button type="button" onClick={() => applyFormat('insertUnorderedList')} title="Bullet list"  style={btnStyle}>•&nbsp;List</button>
-          <button type="button" onClick={() => applyFormat('insertOrderedList')}   title="Numbered list" style={btnStyle}>1.&nbsp;List</button>
+          <button type="button" onClick={() => applyFormat('insertUnorderedList')} title="Bullet list" style={btnStyle}>•&nbsp;List</button>
+          <button type="button" onClick={() => applyFormat('insertOrderedList')} title="Numbered list" style={btnStyle}>1.&nbsp;List</button>
           <span style={{ width: 1, background: 'var(--border-color)', margin: '0 0.2rem' }} />
-          <button type="button" onClick={() => applyFormat('formatBlock', '<h4>')}  title="Heading"   style={{ ...btnStyle, fontWeight: 700, fontSize: '0.85rem' }}>H</button>
-          <button type="button" onClick={() => applyFormat('formatBlock', '<p>')}   title="Paragraph" style={btnStyle}>¶</button>
+          <button type="button" onClick={() => applyFormat('formatBlock', '<h4>')} title="Heading" style={{ ...btnStyle, fontWeight: 700, fontSize: '0.85rem' }}>H</button>
+          <button type="button" onClick={() => applyFormat('formatBlock', '<p>')} title="Paragraph" style={btnStyle}>¶</button>
           <button type="button" onClick={async () => {
             const url = await promptAction({
               title: 'Insert link',
