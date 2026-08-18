@@ -529,8 +529,11 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
   const numberReserved = useRef(!!editingBill);
   const hasBeenSaved = useRef(!!editingBill);
 
-  const typeConfig = INVOICE_TYPES[invoiceType];
-  const showGST = invoiceOptions.showGST;
+  const typeConfig = INVOICE_TYPES[invoiceType] || INVOICE_TYPES['tax-invoice'];
+  
+  // FORCE GST VISIBILITY FOR TAX INVOICES SO THE CORE MATH ENGINE DOES NOT BREAK
+  const showGST = invoiceType === 'bill-of-supply' || invoiceType === 'composition' ? false : true;
+  
   const sellerCountryConfig = getCountryConfig(profile?.country);
   const _psPrintForRates = getPrintSettings();
   const customRates = Array.isArray(_psPrintForRates.customTaxRates)
