@@ -51,15 +51,15 @@ function RichEditor({ value, onChange, placeholder, toolbar = false }) {
     <>
       {toolbar && (
         <div style={{ display: 'flex', gap: '0.25rem', flexWrap: 'wrap', marginBottom: '0.4rem' }}>
-          <button type="button" onClick={() => applyFormat('bold')} title="Bold (Ctrl+B)" style={{ ...btnStyle, fontWeight: 700 }}>B</button>
-          <button type="button" onClick={() => applyFormat('italic')} title="Italic (Ctrl+I)" style={{ ...btnStyle, fontStyle: 'italic' }}>I</button>
-          <button type="button" onClick={() => applyFormat('underline')} title="Underline (Ctrl+U)" style={{ ...btnStyle, textDecoration: 'underline' }}>U</button>
+          <button type="button" onClick={() => applyFormat('bold')}        title="Bold (Ctrl+B)"      style={{ ...btnStyle, fontWeight: 700 }}>B</button>
+          <button type="button" onClick={() => applyFormat('italic')}      title="Italic (Ctrl+I)"    style={{ ...btnStyle, fontStyle: 'italic' }}>I</button>
+          <button type="button" onClick={() => applyFormat('underline')}   title="Underline (Ctrl+U)" style={{ ...btnStyle, textDecoration: 'underline' }}>U</button>
           <span style={{ width: 1, background: 'var(--border-color)', margin: '0 0.2rem' }} />
-          <button type="button" onClick={() => applyFormat('insertUnorderedList')} title="Bullet list" style={btnStyle}>•&nbsp;List</button>
-          <button type="button" onClick={() => applyFormat('insertOrderedList')} title="Numbered list" style={btnStyle}>1.&nbsp;List</button>
+          <button type="button" onClick={() => applyFormat('insertUnorderedList')} title="Bullet list"  style={btnStyle}>•&nbsp;List</button>
+          <button type="button" onClick={() => applyFormat('insertOrderedList')}   title="Numbered list" style={btnStyle}>1.&nbsp;List</button>
           <span style={{ width: 1, background: 'var(--border-color)', margin: '0 0.2rem' }} />
-          <button type="button" onClick={() => applyFormat('formatBlock', '<h4>')} title="Heading" style={{ ...btnStyle, fontWeight: 700, fontSize: '0.85rem' }}>H</button>
-          <button type="button" onClick={() => applyFormat('formatBlock', '<p>')} title="Paragraph" style={btnStyle}>¶</button>
+          <button type="button" onClick={() => applyFormat('formatBlock', '<h4>')}  title="Heading"   style={{ ...btnStyle, fontWeight: 700, fontSize: '0.85rem' }}>H</button>
+          <button type="button" onClick={() => applyFormat('formatBlock', '<p>')}   title="Paragraph" style={btnStyle}>¶</button>
           <button type="button" onClick={async () => {
             const url = await promptAction({
               title: 'Insert link',
@@ -2723,17 +2723,8 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
                   })()}
                 </select>
               </div>
-              <div className="form-group">
-                <label className="form-label">City</label>
-                <input type="text" className="form-input" value={client.city}
-                  onChange={(e) => setClient({ ...client, city: e.target.value })} placeholder="e.g. Mumbai" />
-              </div>
-              <div className="form-group">
-                {(() => { const cc = getCountryConfig(client.country || profile?.country); return <label className="form-label">{cc.postalLabel}</label>; })()}
-                <input type="text" className="form-input" value={client.pin}
-                  onChange={(e) => setClient({ ...client, pin: e.target.value })} placeholder="Postal / PIN code" />
-              </div>
-              {invoiceOptions.showState && (() => {
+
+              {(() => {
                 const cc = getCountryConfig(client.country || profile?.country);
                 const stateOpts = getStatesForCountry(client.country || profile?.country);
                 return (
@@ -2751,7 +2742,31 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
                   </div>
                 );
               })()}
-              {invoiceOptions.showGSTIN && (() => {
+
+              <div className="form-group">
+                <label className="form-label">City</label>
+                <input type="text" className="form-input" value={client.city}
+                  onChange={(e) => setClient({ ...client, city: e.target.value })} placeholder="e.g. Mumbai" />
+              </div>
+              <div className="form-group">
+                {(() => { const cc = getCountryConfig(client.country || profile?.country); return <label className="form-label">{cc.postalLabel}</label>; })()}
+                <input type="text" className="form-input" value={client.pin}
+                  onChange={(e) => setClient({ ...client, pin: e.target.value })} placeholder="Postal / PIN code" />
+              </div>
+              
+              <div className="form-group">
+                <label className="form-label">Phone No.</label>
+                <input type="text" className="form-input" value={client.phone || ''}
+                  onChange={(e) => setClient({ ...client, phone: e.target.value })} placeholder="e.g. +91 9876543210" />
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">Email Address</label>
+                <input type="email" className="form-input" value={client.email || ''}
+                  onChange={(e) => setClient({ ...client, email: e.target.value })} placeholder="client@example.com" />
+              </div>
+
+              {(() => {
                 const cc = getCountryConfig(client.country || profile?.country);
                 return (
                   <div className="form-group">
