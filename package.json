@@ -88,7 +88,8 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "icons": "node scripts/generate-icons.mjs",
-    "bundle:tesseract": "node scripts/bundle-tesseract-assets.mjs"
+    "bundle:tesseract": "node scripts/bundle-tesseract-assets.mjs",
+    "test": "vitest"
   },
   "dependencies": {
     "cors": "^2.8.6",
@@ -113,6 +114,7 @@
     "eslint-plugin-react-refresh": "^0.4.24",
     "globals": "^16.5.0",
     "sharp": "^0.35.3",
-    "vite": "^7.3.1"
+    "vite": "^7.3.1",
+    "vitest": "^5.0.0"
   }
 }

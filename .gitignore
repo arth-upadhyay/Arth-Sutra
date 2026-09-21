@@ -14,3 +14,19 @@ data/
 # OS generated files
 .DS_Store
 Thumbs.db
+# User data — never commit
+data/
+Saved Invoices/
+Trash/
+*.pdf
+
+# Old build artifacts
+dist/
+
+# Local env
+.env
+.env.local
+
+# OS
+Thumbs.db
+.DS_Store

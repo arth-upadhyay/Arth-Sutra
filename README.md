@@ -51,4 +51,4 @@ RUN THE: Install ArthSutra.bat
 3. Install the dependencies:
    ```bash
    npm install
-   npm start
+   

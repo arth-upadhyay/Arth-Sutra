@@ -60,6 +60,177 @@ function calcPurchaseTotal(items, applyRoundOff = false) {
   return { ...raw, roundOff, finalTotal: raw.total + roundOff };
 }
 
+// Applies OR reverts the product/stock side-effects of a purchase bill, kept as
+// one function so the "save" and "delete" flows can never drift apart.
+//
+// direction: 'apply'  — used on save. If `editingId` is set, first reverts the
+//            OLD version of the bill (looked up from `purchases`), then applies
+//            the current `purchase.items`. This mirrors the original inline
+//            "revert-old-then-apply-new" logic for edits, and also creates new
+//            Product records for line items that don't match an existing product.
+//          'revert'   — used on delete. Reverts `purchase.items` only (the bill
+//            being deleted); never creates new products.
+//
+// Stock rules (see bugs #1/#3):
+//   - Batched lines only ever touch wProd.batches.
+//   - A batchless line on a product that has NEVER used batches adds/subtracts
+//     wProd.stock directly.
+//   - A batchless line on a product that DOES have batches is the "mixing"
+//     case: rather than silently merging into a batch or being dropped, it's
+//     kept as its own batchless bucket (__batchlessBucket) so it survives the
+//     final stock = sum(batches) recompute below. (Chosen over rejecting the
+//     line outright, since OCR/manual entry can legitimately omit a batch.)
+//
+// Selling-price rule (see bug #2): a product's sellingPrice is only defaulted
+// to purchasePrice × 1.3 when it's brand new, or when it existed but never had
+// a price set (sellingPrice === 0). Any manually-set sellingPrice (from
+// InventoryView) is left untouched; purchasePrice is still always refreshed.
+async function syncProductsFromPurchase({ purchase, editingId, purchases, direction }) {
+  const warnings = [];
+  try {
+    const existingProducts = await getAllProducts();
+    const byId = new Map(existingProducts.map(p => [p.id, p]));
+    const byName = new Map(existingProducts.map(p => [(p.name || '').trim().toLowerCase(), p]));
+    const modifiedProducts = new Map();
+
+    const getWorkingProd = (prod) => {
+      if (!modifiedProducts.has(prod.id)) {
+        const clone = JSON.parse(JSON.stringify(prod));
+        // Captured once, from the untouched original — decides whether price
+        // updates below are allowed to overwrite sellingPrice.
+        clone.__hadManualPrice = Number(prod.sellingPrice) > 0;
+        clone.__batchlessBucket = 0;
+        modifiedProducts.set(prod.id, clone);
+      }
+      return modifiedProducts.get(prod.id);
+    };
+
+    const findProduct = (item) => {
+      const searchName = (item.name || '').trim().toLowerCase();
+      return item.productId ? byId.get(item.productId) : byName.get(searchName);
+    };
+
+    const applyLineToProduct = (wProd, item) => {
+      const qty = Number(item.quantity) || 0;
+      const hasBatches = Array.isArray(wProd.batches) && wProd.batches.length > 0;
+      if (item.batch) {
+        if (!Array.isArray(wProd.batches)) wProd.batches = [];
+        const bIdx = wProd.batches.findIndex(b => b.batchNo === item.batch);
+        if (bIdx >= 0) {
+          wProd.batches[bIdx].quantity += qty;
+          if (item.expiry) wProd.batches[bIdx].expiry = item.expiry;
+        } else {
+          wProd.batches.push({ batchNo: item.batch, expiry: item.expiry || '', quantity: qty });
+        }
+      } else if (hasBatches) {
+        wProd.__batchlessBucket = (wProd.__batchlessBucket || 0) + qty;
+      } else {
+        wProd.stock = (wProd.stock || 0) + qty;
+      }
+    };
+
+    const revertLineFromProduct = (wProd, item) => {
+      const qty = Number(item.quantity) || 0;
+      const hasBatches = Array.isArray(wProd.batches) && wProd.batches.length > 0;
+      if (item.batch && Array.isArray(wProd.batches)) {
+        const bIdx = wProd.batches.findIndex(b => b.batchNo === item.batch);
+        if (bIdx >= 0) {
+          wProd.batches[bIdx].quantity -= qty;
+          if (wProd.batches[bIdx].quantity <= 0) wProd.batches.splice(bIdx, 1);
+        } else {
+          warnings.push(`Batch "${item.batch}" not found on "${wProd.name}" — could not revert stock for this line.`);
+        }
+      } else if (hasBatches) {
+        wProd.__batchlessBucket = (wProd.__batchlessBucket || 0) - qty;
+      } else {
+        wProd.stock = Math.max(0, (wProd.stock || 0) - qty);
+      }
+    };
+
+    const applyPriceUpdate = (wProd, item) => {
+      // Don't clobber manual prices — see bug #2 comment above the function.
+      wProd.purchasePrice = item.rate;
+      if (!wProd.__hadManualPrice) {
+        wProd.sellingPrice = Number(item.rate) * 1.30;
+        wProd.rate = Number(item.rate) * 1.30;
+      } else {
+        wProd.rate = wProd.sellingPrice; // legacy mirror follows the real selling price, not a fixed multiplier
+      }
+    };
+
+    if (direction === 'revert') {
+      for (const item of (purchase.items || []).filter(x => x.name)) {
+        const existing = findProduct(item);
+        if (!existing) {
+          warnings.push(`Could not find product "${item.name}" to revert stock for.`);
+          continue;
+        }
+        revertLineFromProduct(getWorkingProd(existing), item);
+      }
+    } else {
+      // direction === 'apply'
+      if (editingId) {
+        const oldPurchase = (purchases || []).find(p => p.id === editingId);
+        if (oldPurchase && Array.isArray(oldPurchase.items)) {
+          for (const oldItem of oldPurchase.items.filter(x => x.name)) {
+            const existing = findProduct(oldItem);
+            if (existing) revertLineFromProduct(getWorkingProd(existing), oldItem);
+          }
+        }
+      }
+      for (const item of (purchase.items || []).filter(x => x.name)) {
+        const qty = Number(item.quantity) || 0;
+        const searchName = item.name.trim().toLowerCase();
+        const existing = findProduct(item);
+        if (existing) {
+          const wProd = getWorkingProd(existing);
+          applyLineToProduct(wProd, item);
+          applyPriceUpdate(wProd, item);
+        } else {
+          let wProd = modifiedProducts.get(`__new__::${searchName}`);
+          if (!wProd) {
+            wProd = {
+              name: item.name.trim(),
+              hsn: item.hsn || '',
+              purchasePrice: item.rate,
+              sellingPrice: Number(item.rate) * 1.30,
+              rate: Number(item.rate) * 1.30,
+              taxPercent: item.taxPercent || 0,
+              cessPercent: item.cessPercent || 0,
+              unit: 'Nos',
+              stock: 0,
+              batches: [],
+              __hadManualPrice: false,
+              __batchlessBucket: 0,
+              description: '',
+            };
+            modifiedProducts.set(`__new__::${searchName}`, wProd);
+          }
+          applyLineToProduct(wProd, item);
+        }
+      }
+    }
+
+    const upserts = [];
+    for (const prod of modifiedProducts.values()) {
+      const bucket = prod.__batchlessBucket || 0;
+      delete prod.__hadManualPrice;
+      delete prod.__batchlessBucket;
+      if (Array.isArray(prod.batches) && prod.batches.length > 0) {
+        prod.batches = prod.batches.filter(b => b.quantity > 0);
+        prod.stock = prod.batches.reduce((sum, b) => sum + (Number(b.quantity) || 0), 0) + Math.max(0, bucket);
+      } else {
+        prod.stock = Math.max(0, prod.stock || 0);
+      }
+      upserts.push(prod);
+    }
+    return { upserts, warnings };
+  } catch (e) {
+    warnings.push('Product sync failed: ' + (e && e.message ? e.message : String(e)));
+    return { upserts: [], warnings };
+  }
+}
+
 export default function PurchaseBills() {
   const [purchases, setPurchases] = useState([]);
   const [search, setSearch] = useState('');
@@ -73,21 +244,45 @@ export default function PurchaseBills() {
   const applyOCR = (extracted) => {
     setEditingId(null);
     let items;
+    let usedRealLineItems = false;
     if (Array.isArray(extracted.items) && extracted.items.length > 0) {
-      items = extracted.items.map(it => ({
-        name: it.name || '',
-        hsn: it.hsn || '',
-        quantity: Number(it.quantity) || 1,
-        rate: Number(it.rate) || 0,
-        taxPercent: Number(it.taxPercent) || 0,
-        cessPercent: 0,
-        batch: '',
-        expiry: ''
-      }));
-    } else if (extracted.grandTotal > 0) {
-      items = [{ name: 'From OCR — split into real items', hsn: '', quantity: 1, rate: extracted.grandTotal, taxPercent: 0, cessPercent: 0, batch: '', expiry: '' }];
-    } else {
-      items = [{ ...emptyItem }];
+      // Minimal guards on OCR-extracted line items: the extractor's output shape
+      // isn't trustworthy, so sanitize/default each field and drop lines that
+      // are pure noise (no name AND no rate) before capping to a sane ceiling.
+      items = extracted.items
+        .slice(0, 200) // sanity ceiling — never load more than 200 lines from OCR
+        .map(it => {
+          const name = typeof it.name === 'string' ? it.name.trim() : '';
+          let quantity = Number(it.quantity);
+          if (!Number.isFinite(quantity) || quantity <= 0) quantity = 1;
+          let rate = Number(it.rate);
+          if (!Number.isFinite(rate) || rate < 0) rate = 0;
+          return {
+            name,
+            hsn: it.hsn || '',
+            quantity,
+            rate,
+            taxPercent: Number(it.taxPercent) || 0,
+            cessPercent: 0,
+            batch: '',
+            expiry: ''
+          };
+        })
+        .filter(it => !(it.name === '' && it.rate === 0)); // drop rows that are blank name + zero rate
+
+      if (items.length === 0) {
+        // Everything got filtered out as noise — fall back to the grand-total path below.
+        items = null;
+      } else {
+        usedRealLineItems = true;
+      }
+    }
+    if (!items) {
+      if (extracted.grandTotal > 0) {
+        items = [{ name: 'From OCR — split into real items', hsn: '', quantity: 1, rate: extracted.grandTotal, taxPercent: 0, cessPercent: 0, batch: '', expiry: '' }];
+      } else {
+        items = [{ ...emptyItem }];
+      }
     }
     setForm({
       ...emptyForm,
@@ -98,8 +293,8 @@ export default function PurchaseBills() {
       items,
     });
     setShowForm(true);
-    const msg = Array.isArray(extracted.items) && extracted.items.length > 0
-      ? `OCR loaded ${extracted.items.length} line item${extracted.items.length === 1 ? '' : 's'} — review HSN + tax rates before saving.`
+    const msg = usedRealLineItems
+      ? `OCR loaded ${items.length} line item${items.length === 1 ? '' : 's'} — review HSN + tax rates before saving.`
       : 'OCR values loaded — please review, then break the total into line items with correct GST.';
     toast(msg, 'info');
   };
@@ -137,8 +332,8 @@ export default function PurchaseBills() {
 
   const totalStats = filtered.reduce((acc, p) => {
     const t = calcPurchaseTotal(p.items, !!p.applyRoundOff);
-    return { taxable: acc.taxable + t.taxable, tax: acc.tax + t.tax, total: acc.total + t.finalTotal };
-  }, { taxable: 0, tax: 0, total: 0 });
+    return { taxable: acc.taxable + t.taxable, tax: acc.tax + t.tax, cess: acc.cess + t.cess, total: acc.total + t.finalTotal };
+  }, { taxable: 0, tax: 0, cess: 0, total: 0 });
 
   const openAdd = () => {
     setForm({ ...emptyForm, items: [{ ...emptyItem }] });
@@ -156,7 +351,11 @@ export default function PurchaseBills() {
       items: purchase.items && purchase.items.length > 0 ? purchase.items.map(i => ({ ...i, batch: i.batch || '', expiry: i.expiry || '' })) : [{ ...emptyItem }],
       paymentStatus: purchase.paymentStatus || 'Unpaid',
       interstate: !!purchase.interstate,
-      applyRoundOff: !!purchase.applyRoundOff || (typeof purchase.roundOff === 'number' && purchase.roundOff !== 0),
+      // Only infer applyRoundOff from the stored flag itself. A stored `roundOff`
+      // value is the *result* of the toggle having been on, not evidence of its
+      // state — inferring from it silently re-enables round-off for legacy
+      // records whose stored roundOff was a fluke (e.g. imported/edited data).
+      applyRoundOff: !!purchase.applyRoundOff,
       note: purchase.note || '',
     });
     setEditingId(purchase.id);
@@ -289,107 +488,17 @@ export default function PurchaseBills() {
       
       await savePurchase(purchase);
 
-      // BATCH-AWARE PRODUCT UPSERT - BULLETPROOF REVERT & APPLY LOGIC
+      // BATCH-AWARE PRODUCT UPSERT — apply/revert logic lives in the shared
+      // syncProductsFromPurchase helper so this stays symmetric with delete.
       try {
-        const existingProducts = await getAllProducts();
-        const byId = new Map(existingProducts.map(p => [p.id, p]));
-        const byName = new Map(existingProducts.map(p => [(p.name || '').trim().toLowerCase(), p]));
-        const modifiedProducts = new Map();
-
-        const getWorkingProd = (prod) => {
-          if (!modifiedProducts.has(prod.id)) {
-            modifiedProducts.set(prod.id, JSON.parse(JSON.stringify(prod)));
-          }
-          return modifiedProducts.get(prod.id);
-        };
-
-        // 1. REVERT old quantities if we are editing an existing bill
-        if (editingId) {
-          const oldPurchase = purchases.find(p => p.id === editingId);
-          if (oldPurchase && Array.isArray(oldPurchase.items)) {
-            for (const oldItem of oldPurchase.items) {
-              const searchName = (oldItem.name || '').trim().toLowerCase();
-              const existing = oldItem.productId ? byId.get(oldItem.productId) : byName.get(searchName);
-              
-              if (existing) {
-                let wProd = getWorkingProd(existing);
-                if (oldItem.batch && Array.isArray(wProd.batches)) {
-                  const bIdx = wProd.batches.findIndex(b => b.batchNo === oldItem.batch);
-                  if (bIdx >= 0) wProd.batches[bIdx].quantity -= (Number(oldItem.quantity) || 0);
-                } else {
-                  wProd.stock -= (Number(oldItem.quantity) || 0);
-                }
-              }
-            }
-          }
-        }
-
-        // 2. APPLY new quantities from the current form
-        for (const it of purchase.items.filter(x => x.name)) {
-          const qty = Number(it.quantity) || 0;
-          const searchName = it.name.trim().toLowerCase();
-          let existing = it.productId ? byId.get(it.productId) : byName.get(searchName);
-
-          if (existing) {
-            let wProd = getWorkingProd(existing);
-            if (!Array.isArray(wProd.batches)) wProd.batches = [];
-
-            if (it.batch) {
-              const bIdx = wProd.batches.findIndex(b => b.batchNo === it.batch);
-              if (bIdx >= 0) {
-                wProd.batches[bIdx].quantity += qty;
-                if (it.expiry) wProd.batches[bIdx].expiry = it.expiry;
-              } else {
-                wProd.batches.push({ batchNo: it.batch, expiry: it.expiry || '', quantity: qty });
-              }
-            } else {
-              wProd.stock = (wProd.stock || 0) + qty;
-            }
-
-            wProd.purchasePrice = it.rate;
-            wProd.sellingPrice = Number(it.rate) * 1.30;
-            wProd.rate = Number(it.rate) * 1.30;
-          } else {
-            // It's a completely new product
-            let wProd = modifiedProducts.get(`__new__::${searchName}`);
-            if (!wProd) {
-              wProd = {
-                name: it.name.trim(),
-                hsn: it.hsn || '',
-                purchasePrice: it.rate,
-                sellingPrice: Number(it.rate) * 1.30,
-                rate: Number(it.rate) * 1.30,
-                taxPercent: it.taxPercent || 0,
-                cessPercent: it.cessPercent || 0,
-                unit: 'Nos',
-                stock: 0,
-                batches: [],
-                description: '',
-              };
-            }
-            if (it.batch) {
-              const bIdx = wProd.batches.findIndex(b => b.batchNo === it.batch);
-              if (bIdx >= 0) wProd.batches[bIdx].quantity += qty;
-              else wProd.batches.push({ batchNo: it.batch, expiry: it.expiry || '', quantity: qty });
-            } else {
-              wProd.stock += qty;
-            }
-            modifiedProducts.set(`__new__::${searchName}`, wProd);
-          }
-        }
-
-        // 3. CLEANUP and SAVE
-        const upserts = [];
-        for (const prod of modifiedProducts.values()) {
-          if (Array.isArray(prod.batches) && prod.batches.length > 0) {
-            prod.batches = prod.batches.filter(b => b.quantity > 0);
-            prod.stock = prod.batches.reduce((sum, b) => sum + (Number(b.quantity) || 0), 0);
-          } else {
-            prod.stock = Math.max(0, prod.stock || 0);
-          }
-          upserts.push(saveProduct(prod));
-        }
-        await Promise.all(upserts);
+        const { upserts, warnings } = await syncProductsFromPurchase({
+          purchase,
+          editingId,
+          purchases,
+          direction: 'apply',
+        });
+        await Promise.all(upserts.map(p => saveProduct(p)));
+        if (warnings.length > 0) console.warn('Product sync warnings:', warnings);
       } catch (e) {
         console.warn('Products auto-sync from purchase failed (non-fatal):', e);
       }
@@ -403,6 +512,7 @@ export default function PurchaseBills() {
   };
 
   const handleDelete = async (id) => {
+    const target = purchases.find(p => p.id === id);
     if (await confirmAction({
       title: 'Delete this purchase bill?',
       message: 'Stock levels for the products in this bill will be reverted. Any GST ITC already claimed against this bill in past returns stays as filed.',
@@ -410,6 +520,24 @@ export default function PurchaseBills() {
       tone: 'danger',
     })) {
       try {
+        if (target) {
+          const { upserts, warnings } = await syncProductsFromPurchase({
+            purchase: target,
+            editingId: null,
+            purchases,
+            direction: 'revert',
+          });
+          // Promise.allSettled: one product failing to save should not stop the
+          // others from reverting, and should not block the delete below either.
+          const results = await Promise.allSettled(upserts.map(p => saveProduct(p)));
+          const failedCount = results.filter(r => r.status === 'rejected').length;
+          if (failedCount > 0 || warnings.length > 0) {
+            console.warn('Stock revert on delete had issues:', warnings, results.filter(r => r.status === 'rejected'));
+          }
+        }
+        // deletePurchase runs only after the revert attempt has settled (success
+        // or failure) — the bill record isn't removed before we've tried to give
+        // its stock back, but a stock-save hiccup still won't block the delete.
         await deletePurchase(id);
         toast('Purchase deleted', 'success');
         loadPurchases();
@@ -576,7 +704,7 @@ export default function PurchaseBills() {
         </div>
         <div className="stat-card">
           <div className="stat-icon stat-icon-green"><ShoppingCart size={22} /></div>
-          <div><p className="stat-label">GST (ITC Eligible)</p><h2 className="stat-value stat-value-green">{formatCurrency(totalStats.tax)}</h2></div>
+          <div><p className="stat-label">GST + Cess (ITC Eligible)</p><h2 className="stat-value stat-value-green">{formatCurrency(totalStats.tax + totalStats.cess)}</h2></div>
         </div>
         <div className="stat-card">
           <div className="stat-icon stat-icon-blue"><ShoppingCart size={22} /></div>

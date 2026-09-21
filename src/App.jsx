@@ -1,22 +1,8 @@
 import LockScreen from './components/LockScreen';
-import { useState, useEffect, useRef, useMemo, lazy, Suspense } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react';
 import { Home, FileText, Settings, Plus, Users, Package, BarChart3, Wallet, RefreshCw, Receipt, BookOpen, Moon, Sun, Download, X, ShoppingCart, ChevronDown, Building2, Pencil, HelpCircle, Search, Command, Bell, Calculator } from 'lucide-react';
 import { getAllProfiles, saveProfile, getEnabledModules, getAllBills, getAllProducts, getStockAlertSettings, getAllClients } from './store';
 import { isModuleEnabled, getUpcomingFilings } from './utils';
-// v1.10.4 — Route-level lazy loading. Prior App.jsx synchronously
-// imported all 12 views (~15k LOC combined), so a first-paint on
-// Dashboard downloaded and parsed GSTReturns (1952), InvoiceGenerator
-// (2409), IncomeTax (1038), SettingsView (1479), PrintSettings (1294)
-// etc. before the user even asked for them.
-//
-// Now:
-//  - Dashboard stays eager — it's the default landing route.
-//  - InvoiceGenerator stays eager — new-invoice is the primary action
-//    reachable from Ctrl+K / manifest shortcut / big blue button.
-//  - Every other view is React.lazy → own Vite chunk → fetched on
-//    first navigation only. Suspense fallback is a lightweight spinner.
-// Result: smaller initial JS payload; each heavy view chunk-caches
-// once fetched.
 import Dashboard from './components/Dashboard';
 import InvoiceGenerator from './components/InvoiceGenerator';
 import SetupWizard from './components/SetupWizard';
@@ -36,8 +22,6 @@ const PurchaseBills = lazy(() => import('./components/PurchaseBills'));
 const UserGuideView = lazy(() => import('./components/UserGuideView'));
 import { getPrintSettings } from './utils/printSettings';
 
-// v1.10.4 — Lightweight Suspense fallback shown while a lazy view
-// downloads. Purely visual — no data fetching, no state.
 function ViewLoading() {
   return (
     <div style={{ padding: '3rem', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
@@ -53,71 +37,292 @@ function ViewLoading() {
   );
 }
 
+// ============================================================================
+// v1.10.44 — Rules-of-Hooks fix + reactivity improvements.
+//
+// BUG THAT DROVE THIS REWRITE:
+//   The old App() called `useState(isUnlocked)` at the top, then
+//   `if (!isUnlocked) return <LockScreen/>` — and 20+ more hooks AFTER
+//   that early return. On first render (locked) React saw 1 hook. On
+//   the render after unlock React saw ~25. "Rendered more hooks than
+//   during the previous render" → hard crash. This was the #1 reported
+//   white-screen-on-unlock bug.
+//
+// FIX: every hook now runs unconditionally at the top of App(). The
+// three legitimate early-return states (locked / server-down / welcome
+// wizard) sit BELOW all hooks. Hooks inside the main body are gated by
+// `if (!isUnlocked) return;` INSIDE the effect, not by an outer return.
+//
+// ALSO FIXED:
+//   • enabledModules is now React state (was re-read from localStorage
+//     on every render with no re-render trigger — toggling a module in
+//     Settings didn't update the sidebar until full reload).
+//   • navItems is memoised and its handler deps are useCallback'd, so
+//     the paletteActions useMemo actually fires only when relevant.
+//   • Ctrl+S / Ctrl+P now dispatch 'fgsb-save-invoice' / 'fgsb-print-invoice'
+//     custom events. InvoiceGenerator needs to listen for these
+//     (follow-up); the shortcuts table reflects that they only work
+//     when the invoice form is open.
+// ============================================================================
+
 function App() {
+  // ═══════════════════════════════════════════════════════════════════════
+  // 1. STATE  (every hook, no exceptions, before any conditional return)
+  // ═══════════════════════════════════════════════════════════════════════
+
   const [isUnlocked, setIsUnlocked] = useState(() => {
-  return sessionStorage.getItem('fgsb_unlocked') === 'true';
-});
+    return sessionStorage.getItem('fgsb_unlocked') === 'true';
+  });
 
-const handleUnlock = () => {
-  setIsUnlocked(true);
-  sessionStorage.setItem('fgsb_unlocked', 'true');
-};
-
-if (!isUnlocked) {
-  return <LockScreen onUnlock={handleUnlock} />;
-}
-  // v1.9.3 — Setup Wizard shown on first-run (before onboardingComplete = true)
   const [showWizard, setShowWizard] = useState(() => {
     try { return !getPrintSettings().onboardingComplete; } catch { return false; }
   });
+
   const [currentView, setCurrentView] = useState(() => {
-    // PWA manifest "shortcuts" deep-link in via ?view=X (e.g. right-clicking
-    // the pinned taskbar icon → "New Invoice" opens /?view=new). Honour that
-    // before falling back to whatever the user was last looking at.
     try {
       const params = new URLSearchParams(window.location.search);
       const v = params.get('view');
       const valid = ['dashboard', 'new', 'clients', 'inventory', 'expenses', 'purchases', 'recurring', 'receipts', 'reports', 'filing', 'incometax', 'guide', 'settings'];
       if (v && valid.includes(v)) {
-        // Strip the query string so a refresh doesn't keep snapping back to
-        // the shortcut target — only the *first* navigation honours it.
         window.history.replaceState({}, '', window.location.pathname);
         return v;
       }
-    } catch { /* sandboxed history API — fall through */ }
+    } catch { /* sandboxed history API */ }
     return sessionStorage.getItem('gst_currentView') || 'dashboard';
   });
+
   const [profile, setProfile] = useState(null);
+
   const [editingBill, setEditingBill] = useState(() => {
     try {
       const saved = sessionStorage.getItem('gst_editingBill');
       return saved ? JSON.parse(saved) : null;
     } catch { return null; }
   });
+
   const [darkMode, setDarkMode] = useState(() => {
     return localStorage.getItem('freegstbill_theme') === 'dark';
   });
+
   const [showWelcome, setShowWelcome] = useState(false);
   const [showInstallBanner, setShowInstallBanner] = useState(false);
   const [serverDown, setServerDown] = useState(false);
-  const deferredPrompt = useRef(null);
-  const retryTimer = useRef(null);
+  const [serverStatus, setServerStatus] = useState('checking');
 
-  const [serverStatus, setServerStatus] = useState('checking'); // 'checking' | 'online' | 'offline'
-  const profileLoaded = useRef(false);
   const [allProfiles, setAllProfiles] = useState([]);
   const [showProfileMenu, setShowProfileMenu] = useState(false);
-  const profileMenuRef = useRef(null);
 
-  // Update notification state. Auto-checks GitHub on mount + every 6h.
-  // The user can dismiss a specific version (stored in localStorage) so the
-  // banner doesn't keep nagging once they've seen it. A NEW version released
-  // after that dismissal will re-show the banner.
   const [updateInfo, setUpdateInfo] = useState(null);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
-  const updateBannerVisible = updateInfo?.updateAvailable
-    && localStorage.getItem('freegstbill_dismissedUpdate') !== updateInfo.latest;
 
+  const [notifications, setNotifications] = useState({ overdue: [], dueSoon: [], lowStock: [], filings: [], autoFire: null });
+  const [showNotifs, setShowNotifs] = useState(false);
+
+  const [showPalette, setShowPalette] = useState(false);
+  const [paletteQuery, setPaletteQuery] = useState('');
+  const [paletteIdx, setPaletteIdx] = useState(0);
+  const [searchCorpus, setSearchCorpus] = useState({ bills: [], clients: [], products: [] });
+  const [showShortcutsHelp, setShowShortcutsHelp] = useState(false);
+
+  // Enabled feature modules — stateful so toggling in Settings reflects
+  // in the sidebar. Refreshed by 'fgsb-modules-changed' custom event
+  // (fired by SettingsView when a toggle is flipped) OR on view change
+  // as a fallback if the event isn't wired yet.
+  const [enabledModules, setEnabledModulesState] = useState(() => getEnabledModules());
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // 2. REFS
+  // ═══════════════════════════════════════════════════════════════════════
+
+  const deferredPrompt = useRef(null);
+  const retryTimer = useRef(null);
+  const profileLoaded = useRef(false);
+  const profileMenuRef = useRef(null);
+  // Ref mirror of showPalette so the global Esc handler (mounted once)
+  // can see the current value without needing to re-subscribe.
+  const showPaletteRef = useRef(showPalette);
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // 3. CALLBACKS  (stable references for props + effect deps)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  const handleUnlock = useCallback(() => {
+    setIsUnlocked(true);
+    sessionStorage.setItem('fgsb_unlocked', 'true');
+  }, []);
+
+  const handleNewInvoice = useCallback(() => {
+    sessionStorage.removeItem('gst_invoiceDraft');
+    setEditingBill(null);
+    setCurrentView('new');
+  }, []);
+
+  const handleEditInvoice = useCallback((bill) => {
+    sessionStorage.removeItem('gst_invoiceDraft');
+    setEditingBill(bill);
+    setCurrentView('new');
+  }, []);
+
+  const handleDuplicateInvoice = useCallback((bill) => {
+    sessionStorage.removeItem('gst_invoiceDraft');
+    const clone = JSON.parse(JSON.stringify(bill));
+    clone._isDuplicate = true;
+    setEditingBill(clone);
+    setCurrentView('new');
+  }, []);
+
+  const handleConvertToInvoice = useCallback((bill) => {
+    sessionStorage.removeItem('gst_invoiceDraft');
+    const clone = JSON.parse(JSON.stringify(bill));
+    clone._isDuplicate = true;
+    clone._convertToType = 'tax-invoice';
+    setEditingBill(clone);
+    setCurrentView('new');
+  }, []);
+
+  const handleSwitchProfile = useCallback(async (bp) => {
+    setShowProfileMenu(false);
+    const loaded = { ...bp };
+    delete loaded.id;
+    await saveProfile(loaded);
+    setProfile(loaded);
+  }, []);
+
+  const handleInstallPWA = useCallback(async () => {
+    if (!deferredPrompt.current) return;
+    deferredPrompt.current.prompt();
+    const result = await deferredPrompt.current.userChoice;
+    if (result.outcome === 'accepted') {
+      setShowInstallBanner(false);
+    }
+    deferredPrompt.current = null;
+  }, []);
+
+  const dismissInstallBanner = useCallback(() => {
+    setShowInstallBanner(false);
+    localStorage.setItem('freegstbill_pwa_dismissed_at', String(Date.now()));
+  }, []);
+
+  const dismissUpdate = useCallback(() => {
+    if (updateInfo?.latest) {
+      localStorage.setItem('freegstbill_dismissedUpdate', updateInfo.latest);
+    }
+    setShowUpdateModal(false);
+  }, [updateInfo]);
+
+  const showIfModule = useCallback(
+    (moduleId) => isModuleEnabled(moduleId, enabledModules),
+    [enabledModules]
+  );
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // 4. MEMOISED DERIVED VALUES
+  // ═══════════════════════════════════════════════════════════════════════
+
+  const updateBannerVisible = useMemo(() => {
+    if (!updateInfo?.updateAvailable) return false;
+    try {
+      return localStorage.getItem('freegstbill_dismissedUpdate') !== updateInfo.latest;
+    } catch { return true; }
+  }, [updateInfo]);
+
+  const notifTotal = useMemo(() => (
+    notifications.overdue.length
+    + notifications.dueSoon.length
+    + notifications.lowStock.length
+    + notifications.filings.length
+    + (notifications.autoFire?.count > 0 ? 1 : 0)
+  ), [notifications]);
+
+  const navItems = useMemo(() => [
+    { id: 'dashboard', icon: Home, label: 'Dashboard', module: 'dashboard' },
+    { id: 'new', icon: Plus, label: 'New Invoice', onClick: handleNewInvoice, module: 'invoicing' },
+    { id: 'clients', icon: Users, label: 'Clients', module: 'clients' },
+    { id: 'inventory', icon: Package, label: 'Products', module: 'inventory' },
+    { id: 'expenses', icon: Wallet, label: 'Expenses', module: 'expenses' },
+    { id: 'purchases', icon: ShoppingCart, label: 'Purchases', module: 'purchases' },
+    { id: 'recurring', icon: RefreshCw, label: 'Recurring', module: 'recurring' },
+    { id: 'receipts', icon: Receipt, label: 'Receipts', module: 'receipts' },
+    { id: 'reports', icon: BarChart3, label: 'Reports', module: 'reports' },
+    { id: 'filing', icon: BookOpen, label: 'GST Returns', module: 'gstReturns' },
+    { id: 'incometax', icon: Calculator, label: 'Income Tax', module: 'incomeTax' },
+    { id: 'guide', icon: HelpCircle, label: 'User Guide', module: 'dashboard' },
+  ].filter(item => showIfModule(item.module)), [showIfModule, handleNewInvoice]);
+
+  const paletteActions = useMemo(() => {
+    const acts = [
+      { label: 'New Invoice', hint: 'Ctrl+N', category: 'action', run: () => handleNewInvoice() },
+    ];
+    navItems.forEach(item => {
+      if (item.id === 'new') return;
+      acts.push({
+        label: `Go to ${item.label}`,
+        hint: '',
+        category: 'nav',
+        run: item.onClick || (() => setCurrentView(item.id)),
+      });
+    });
+    acts.push({ label: 'Go to Settings', hint: '', category: 'nav', run: () => setCurrentView('settings') });
+    acts.push({ label: 'Toggle dark mode', hint: '', category: 'action', run: () => setDarkMode(d => !d) });
+    acts.push({ label: 'Show keyboard shortcuts', hint: 'Ctrl+/', category: 'help', run: () => setShowShortcutsHelp(true) });
+    if (updateInfo?.updateAvailable) {
+      acts.push({ label: `View update — v${updateInfo.latest}`, hint: '', category: 'update', run: () => setShowUpdateModal(true) });
+    }
+    searchCorpus.bills.forEach(b => {
+      acts.push({
+        label: `📄 ${b.invoiceNumber || 'INV-?'} — ${b.clientName || 'No client'}`,
+        hint: b.invoiceDate ? new Date(b.invoiceDate).toLocaleDateString('en-IN') : '',
+        category: 'invoice',
+        run: () => handleEditInvoice(b),
+      });
+    });
+    searchCorpus.clients.forEach(c => {
+      acts.push({
+        label: `👤 ${c.name} — client${c.gstin ? ' · GSTIN: ' + c.gstin : ''}`,
+        hint: c.phone || c.email || '',
+        category: 'client',
+        run: () => setCurrentView('clients'),
+      });
+    });
+    searchCorpus.products.forEach(p => {
+      acts.push({
+        label: `📦 ${p.name} — product${p.hsn ? ' · HSN: ' + p.hsn : ''}`,
+        hint: (p.stock ?? 0) + ' in stock',
+        category: 'product',
+        run: () => setCurrentView('inventory'),
+      });
+    });
+    const settingsJumps = [
+      'Company profile', 'Payment accounts', 'Print & PDF Settings', 'PDF Style Editor',
+      'Business type presets', 'Section labels', 'Watermarks', 'Multi-copy print',
+      'Digital signature', 'Company letterhead', 'Modules', 'Region preference',
+      'Google Drive backup', 'App updates',
+    ];
+    settingsJumps.forEach(s => {
+      acts.push({ label: `⚙️ Settings → ${s}`, hint: '', category: 'settings', run: () => setCurrentView('settings') });
+    });
+    return acts;
+  }, [navItems, updateInfo, handleNewInvoice, handleEditInvoice, searchCorpus]);
+
+  const filteredPalette = useMemo(
+    () => paletteActions.filter(a =>
+      !paletteQuery.trim() || a.label.toLowerCase().includes(paletteQuery.toLowerCase())
+    ),
+    [paletteActions, paletteQuery]
+  );
+
+  const showResumeSetupPill = useMemo(() => {
+    try {
+      const ps = getPrintSettings();
+      return !showWizard && ps.onboardingComplete === true && ps.onboardingSkipped === true;
+    } catch { return false; }
+  }, [showWizard]);
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // 5. EFFECTS
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // -- Update check (runs regardless of lock state; harmless) --
   useEffect(() => {
     let cancelled = false;
     const check = async () => {
@@ -125,26 +330,16 @@ if (!isUnlocked) {
         const res = await fetch('/api/check-update');
         const data = await res.json();
         if (!cancelled) setUpdateInfo(data);
-      } catch { /* offline — quietly skip */ }
+      } catch { /* offline */ }
     };
-    // First check ~5 seconds after mount so it doesn't fight the initial load.
     const initial = setTimeout(check, 5000);
-    // Then re-check every 6 hours while the app is open.
     const interval = setInterval(check, 6 * 60 * 60 * 1000);
     return () => { cancelled = true; clearTimeout(initial); clearInterval(interval); };
   }, []);
 
-  // ---- Notification centre ----
-  // Computed from server data on app boot + every 10 minutes; tucked under a
-  // bell icon next to dark-mode toggle in the sidebar. Each section is one
-  // click away from the relevant page.
-  const [notifications, setNotifications] = useState({ overdue: [], dueSoon: [], lowStock: [], filings: [], autoFire: null });
-  const [showNotifs, setShowNotifs] = useState(false);
-  const notifTotal = notifications.overdue.length + notifications.dueSoon.length
-    + notifications.lowStock.length + notifications.filings.length
-    + (notifications.autoFire?.count > 0 ? 1 : 0);
-
+  // -- Notifications (only meaningful once unlocked) --
   useEffect(() => {
+    if (!isUnlocked) return;
     let cancelled = false;
     const compute = async () => {
       try {
@@ -165,17 +360,11 @@ if (!isUnlocked) {
           const d = b.data?.details?.dueDate;
           return d && d >= today && d <= tomorrowStr && b.status !== 'paid';
         });
-        // Honour the user's stock-alert preferences. When disabled, the filter
-        // returns nothing — bell badge drops to 0 for the stock category.
-        // When enabled, use the configured threshold (default 5).
         const stockThreshold = Number(stockAlertCfg?.threshold ?? 5);
         const lowStock = stockAlertCfg?.enabled === false
           ? []
           : products.filter(p => (p.stock ?? 999) <= stockThreshold);
         const filings = getUpcomingFilings().filter(f => f.daysAway <= 10);
-        // Recurring auto-fire breadcrumb — set by server.js processDueRecurring().
-        // Only "fresh" (today's) auto-fires count as a notification; older ones
-        // would otherwise stay sticky forever.
         let autoFire = null;
         try {
           const r = await fetch('/api/meta/lastRecurringAutoFire');
@@ -185,26 +374,16 @@ if (!isUnlocked) {
           }
         } catch { /* fine */ }
         setNotifications({ overdue, dueSoon, lowStock, filings, autoFire });
-      } catch { /* offline / server down — leave previous counts */ }
+      } catch { /* offline / server down */ }
     };
     compute();
     const interval = setInterval(compute, 10 * 60 * 1000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [currentView]); // recompute on view change so the bell stays fresh after the user records a payment
+  }, [isUnlocked, currentView]);
 
-  // ---- Keyboard shortcuts + command palette ----
-  // Ctrl+K opens a Spotlight-style command palette; Ctrl+N starts a new
-  // invoice from anywhere; Ctrl+/ shows the full shortcuts list. Ctrl+S /
-  // Ctrl+P live in InvoiceGenerator (they need invoice-form context). All
-  // global handlers also accept Meta (⌘) for macOS users.
-  const [showPalette, setShowPalette] = useState(false);
-  const [paletteQuery, setPaletteQuery] = useState('');
-  const [paletteIdx, setPaletteIdx] = useState(0);
-  // v1.9.4 — pre-load searchable content so Ctrl+K acts as a true global
-  // search across invoices, clients, products, and settings sections.
-  // Small cost (fires once on mount + when palette opens); big UX win.
-  const [searchCorpus, setSearchCorpus] = useState({ bills: [], clients: [], products: [] });
+  // -- Command palette search corpus --
   useEffect(() => {
+    if (!isUnlocked || !showPalette) return;
     Promise.all([
       getAllBills().catch(() => []),
       getAllClients().catch(() => []),
@@ -216,26 +395,9 @@ if (!isUnlocked) {
         products: products.slice(0, 200),
       });
     });
-  }, [showPalette]); // refresh when palette opens
-  const [showShortcutsHelp, setShowShortcutsHelp] = useState(false);
+  }, [isUnlocked, showPalette]);
 
-  // Palette useMemo + dependent effects are declared further down, AFTER
-  // `navItems` and `handleNewInvoice` exist. Declaring them up here would
-  // throw "Cannot access 'X' before initialization" at render time because
-  // useMemo's dependency array is evaluated synchronously every render.
-
-  const dismissUpdate = () => {
-    if (updateInfo?.latest) {
-      localStorage.setItem('freegstbill_dismissedUpdate', updateInfo.latest);
-      // v1.10.6 — audit L10: was `setUpdateInfo(prev => prev ? { ...prev }
-      // : prev)` "to trigger re-render". No-op — `setShowUpdateModal(false)`
-      // below already re-renders, and `updateBannerVisible` reads
-      // localStorage every render so the new dismissal is picked up.
-    }
-    setShowUpdateModal(false);
-  };
-
-  // Check if server is running — continuously monitors
+  // -- Server health check --
   useEffect(() => {
     let cancelled = false;
 
@@ -266,7 +428,6 @@ if (!isUnlocked) {
     };
 
     checkServer();
-    // Keep checking every 5 seconds (fast when down, normal heartbeat when up)
     retryTimer.current = setInterval(checkServer, 5000);
 
     return () => {
@@ -275,15 +436,12 @@ if (!isUnlocked) {
     };
   }, []);
 
-  // Capture PWA install prompt. Banner re-appears 14 days after dismissal
-  // (was: dismissed forever — too aggressive, users who closed it during
-  // a busy moment never saw it again).
+  // -- PWA install banner --
   useEffect(() => {
     const dismissedAt = localStorage.getItem('freegstbill_pwa_dismissed_at');
     const isStandalone = window.matchMedia('(display-mode: standalone)').matches
-      || window.navigator.standalone === true; // iOS Safari
+      || window.navigator.standalone === true;
     if (isStandalone) return;
-    // 14-day cool-down on dismissal
     if (dismissedAt) {
       const days = (Date.now() - Number(dismissedAt)) / 86400000;
       if (days < 14) return;
@@ -298,10 +456,12 @@ if (!isUnlocked) {
     return () => window.removeEventListener('beforeinstallprompt', handler);
   }, []);
 
+  // -- Persist current view --
   useEffect(() => {
     sessionStorage.setItem('gst_currentView', currentView);
   }, [currentView]);
 
+  // -- Persist editing bill --
   useEffect(() => {
     if (editingBill) {
       sessionStorage.setItem('gst_editingBill', JSON.stringify(editingBill));
@@ -310,19 +470,21 @@ if (!isUnlocked) {
     }
   }, [editingBill]);
 
+  // -- Theme --
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light');
     localStorage.setItem('freegstbill_theme', darkMode ? 'dark' : 'light');
   }, [darkMode]);
 
-  // Load all saved business profiles
+  // -- Saved profiles list --
   useEffect(() => {
+    if (!isUnlocked) return;
     if (serverStatus === 'online') {
       getAllProfiles().then(setAllProfiles).catch(() => {});
     }
-  }, [serverStatus]);
+  }, [isUnlocked, serverStatus]);
 
-  // Close profile menu on outside click
+  // -- Profile menu outside-click --
   useEffect(() => {
     if (!showProfileMenu) return;
     const handler = (e) => {
@@ -334,168 +496,53 @@ if (!isUnlocked) {
     return () => document.removeEventListener('mousedown', handler);
   }, [showProfileMenu]);
 
-  const handleSwitchProfile = async (bp) => {
-    setShowProfileMenu(false);
-    const loaded = { ...bp };
-    delete loaded.id;
-    await saveProfile(loaded);
-    setProfile(loaded);
-  };
-
-  const handleNewInvoice = () => {
-    sessionStorage.removeItem('gst_invoiceDraft');
-    setEditingBill(null);
-    setCurrentView('new');
-  };
-
-  const handleEditInvoice = (bill) => {
-    sessionStorage.removeItem('gst_invoiceDraft');
-    setEditingBill(bill);
-    setCurrentView('new');
-  };
-
-  const handleDuplicateInvoice = (bill) => {
-    sessionStorage.removeItem('gst_invoiceDraft');
-    const clone = JSON.parse(JSON.stringify(bill));
-    clone._isDuplicate = true;
-    setEditingBill(clone);
-    setCurrentView('new');
-  };
-
-  const handleInstallPWA = async () => {
-    if (!deferredPrompt.current) return;
-    deferredPrompt.current.prompt();
-    const result = await deferredPrompt.current.userChoice;
-    if (result.outcome === 'accepted') {
-      setShowInstallBanner(false);
-    }
-    deferredPrompt.current = null;
-  };
-
-  const dismissInstallBanner = () => {
-    setShowInstallBanner(false);
-    // Timestamp-based dismissal — the 14-day cool-down in the install-prompt
-    // effect uses this to decide whether to re-show. Old boolean key kept for
-    // back-compat with v1.6.0 — readers that find only the legacy key treat
-    // it as "permanently dismissed" (same as today's behaviour for them).
-    localStorage.setItem('freegstbill_pwa_dismissed_at', String(Date.now()));
-  };
-
-  const handleConvertToInvoice = (bill) => {
-    sessionStorage.removeItem('gst_invoiceDraft');
-    const clone = JSON.parse(JSON.stringify(bill));
-    clone._isDuplicate = true;
-    clone._convertToType = 'tax-invoice';
-    setEditingBill(clone);
-    setCurrentView('new');
-  };
-
-  // Pull the user's module preferences once per render. Re-mount happens
-  // when settings save, which triggers a re-render via the profile state.
-  const enabledModules = getEnabledModules();
-  const showIfModule = (moduleId) => isModuleEnabled(moduleId, enabledModules);
-
-  // If the user just disabled the module backing the current view, kick them to dashboard
-  // so they don't land on an empty page after toggling.
+  // -- Enabled-modules reactivity --
+  // Two triggers: (1) the custom event SettingsView fires on toggle,
+  // (2) the storage event (cross-tab). The current tab can't listen to
+  // its own localStorage writes, hence the custom event.
+  // NOTE: SettingsView should dispatch `fgsb-modules-changed` after
+  // calling setEnabledModules(). Until that's wired, module toggles
+  // still apply on next full page load — same as before this fix.
   useEffect(() => {
-    const map = { new: 'invoicing', clients: 'clients', inventory: 'inventory', expenses: 'expenses', purchases: 'purchases', recurring: 'recurring', receipts: 'receipts', reports: 'reports', filing: 'gstReturns' };
+    const refresh = () => setEnabledModulesState(getEnabledModules());
+    window.addEventListener('fgsb-modules-changed', refresh);
+    window.addEventListener('storage', refresh);
+    return () => {
+      window.removeEventListener('fgsb-modules-changed', refresh);
+      window.removeEventListener('storage', refresh);
+    };
+  }, []);
+
+  // -- Redirect if current view's module is disabled --
+  useEffect(() => {
+    const map = {
+      new: 'invoicing',
+      clients: 'clients',
+      inventory: 'inventory',
+      expenses: 'expenses',
+      purchases: 'purchases',
+      recurring: 'recurring',
+      receipts: 'receipts',
+      reports: 'reports',
+      filing: 'gstReturns',
+    };
     const moduleForView = map[currentView];
     if (moduleForView && !isModuleEnabled(moduleForView, enabledModules)) {
       setCurrentView('dashboard');
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentView, JSON.stringify(enabledModules)]);
+  }, [currentView, enabledModules]);
 
-  const navItems = [
-    { id: 'dashboard', icon: Home, label: 'Dashboard', module: 'dashboard' },
-    { id: 'new', icon: Plus, label: 'New Invoice', onClick: handleNewInvoice, module: 'invoicing' },
-    { id: 'clients', icon: Users, label: 'Clients', module: 'clients' },
-    { id: 'inventory', icon: Package, label: 'Products', module: 'inventory' },
-    { id: 'expenses', icon: Wallet, label: 'Expenses', module: 'expenses' },
-    { id: 'purchases', icon: ShoppingCart, label: 'Purchases', module: 'purchases' },
-    { id: 'recurring', icon: RefreshCw, label: 'Recurring', module: 'recurring' },
-    { id: 'receipts', icon: Receipt, label: 'Receipts', module: 'receipts' },
-    { id: 'reports', icon: BarChart3, label: 'Reports', module: 'reports' },
-    { id: 'filing', icon: BookOpen, label: 'GST Returns', module: 'gstReturns' },
-    { id: 'incometax', icon: Calculator, label: 'Income Tax', module: 'incomeTax' },
-    { id: 'guide', icon: HelpCircle, label: 'User Guide', module: 'dashboard' }, // gated by dashboard so it's always available
-  ].filter(item => showIfModule(item.module));
-
-  // Command palette actions — declared here (not earlier) because the deps
-  // array references `navItems` and `handleNewInvoice`, which are consts.
-  // Reading a const before its declaration triggers a Temporal Dead Zone
-  // ReferenceError ("Cannot access 'X' before initialization") at runtime.
-  const paletteActions = useMemo(() => {
-    const acts = [
-      { label: 'New Invoice', hint: 'Ctrl+N', category: 'action', run: () => { handleNewInvoice(); } },
-    ];
-    navItems.forEach(item => {
-      if (item.id === 'new') return; // already covered above
-      acts.push({ label: `Go to ${item.label}`, hint: '', category: 'nav', run: item.onClick || (() => setCurrentView(item.id)) });
-    });
-    acts.push({ label: 'Go to Settings', hint: '', category: 'nav', run: () => setCurrentView('settings') });
-    acts.push({ label: 'Toggle dark mode', hint: '', category: 'action', run: () => setDarkMode(d => !d) });
-    acts.push({ label: 'Show keyboard shortcuts', hint: 'Ctrl+/', category: 'help', run: () => setShowShortcutsHelp(true) });
-    if (updateInfo?.updateAvailable) {
-      acts.push({ label: `View update — v${updateInfo.latest}`, hint: '', category: 'update', run: () => setShowUpdateModal(true) });
-    }
-    // v1.9.4 — cross-app search: invoices, clients, products
-    // v1.10.5 — audit H24 fix. Prior code dispatched
-    // `CustomEvent('fgsb-open-bill', { detail: b.id })` but no one
-    // listened for it — selecting an invoice in the palette silently
-    // dropped the ID and just landed on Dashboard. Now: reuse
-    // handleEditInvoice() directly, which is already the canonical way
-    // to open a bill for editing (works from Dashboard row-click too).
-    searchCorpus.bills.forEach(b => {
-      acts.push({
-        label: `📄 ${b.invoiceNumber || 'INV-?'} — ${b.clientName || 'No client'}`,
-        hint: b.invoiceDate ? new Date(b.invoiceDate).toLocaleDateString('en-IN') : '',
-        category: 'invoice',
-        run: () => handleEditInvoice(b),
-      });
-    });
-    searchCorpus.clients.forEach(c => {
-      acts.push({
-        label: `👤 ${c.name} — client${c.gstin ? ' · GSTIN: ' + c.gstin : ''}`,
-        hint: c.phone || c.email || '',
-        category: 'client',
-        run: () => setCurrentView('clients'),
-      });
-    });
-    searchCorpus.products.forEach(p => {
-      acts.push({
-        label: `📦 ${p.name} — product${p.hsn ? ' · HSN: ' + p.hsn : ''}`,
-        hint: (p.stock ?? 0) + ' in stock',
-        category: 'product',
-        run: () => setCurrentView('inventory'),
-      });
-    });
-    // Settings sections (jump to specific area)
-    const settingsJumps = [
-      'Company profile', 'Payment accounts', 'Print & PDF Settings', 'PDF Style Editor',
-      'Business type presets', 'Section labels', 'Watermarks', 'Multi-copy print',
-      'Digital signature', 'Company letterhead', 'Modules', 'Region preference',
-      'Google Drive backup', 'App updates',
-    ];
-    settingsJumps.forEach(s => {
-      acts.push({ label: `⚙️ Settings → ${s}`, hint: '', category: 'settings', run: () => setCurrentView('settings') });
-    });
-    return acts;
-  }, [navItems, updateInfo, handleNewInvoice, searchCorpus]);
-
-  const filteredPalette = paletteActions.filter(a =>
-    !paletteQuery.trim() || a.label.toLowerCase().includes(paletteQuery.toLowerCase())
-  );
-
-  // Global keyboard shortcuts. Lives down here for the same TDZ reason —
-  // the handler closes over `handleNewInvoice` which is declared above only.
+  // -- Global keyboard shortcuts --
+  // Ctrl+K palette, Ctrl+/ help, Ctrl+N new invoice, Ctrl+S save
+  // (custom event → InvoiceGenerator), Ctrl+P print (custom event).
   useEffect(() => {
     const onKey = (e) => {
       const mod = e.ctrlKey || e.metaKey;
       if (!mod) return;
       const tag = (e.target?.tagName || '').toLowerCase();
       const editable = tag === 'input' || tag === 'textarea' || e.target?.isContentEditable;
-      if (e.key === 'k' || e.key === 'K') {
+      const key = e.key.toLowerCase();
+      if (key === 'k') {
         e.preventDefault();
         setShowPalette(p => !p);
         setPaletteQuery('');
@@ -503,30 +550,32 @@ if (!isUnlocked) {
       } else if (e.key === '/') {
         e.preventDefault();
         setShowShortcutsHelp(s => !s);
-      } else if ((e.key === 'n' || e.key === 'N') && !editable) {
+      } else if (key === 'n' && !editable) {
         e.preventDefault();
         handleNewInvoice();
+      } else if (key === 's') {
+        // Only meaningful when the invoice form is open; InvoiceGenerator
+        // listens for this event and saves. Prevents the browser's
+        // "Save page as…" dialog either way.
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('fgsb-save-invoice'));
+      } else if (key === 'p') {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('fgsb-print-invoice'));
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [handleNewInvoice]);
 
-  // v1.9.4 — Accessibility hooks (v1.10.4/1.10.6 updated):
-  //   1. Mirror `title` → `aria-label` on every icon button that lacks one.
-  //      Runs on mount + via a MutationObserver when the DOM adds new
-  //      icon buttons (bulk toolbars, modals, etc.). See M15.
-  //   2. Global ESC handler for any open `.modal-overlay` — clicks the
-  //      backdrop (which triggers the overlay's own close). No CSS
-  //      class is added; the earlier `.esc-closable` idea was never
-  //      implemented, comment cleaned up (audit L7).
+  // -- Keep the palette ref in sync for the global Esc handler --
   useEffect(() => {
-    // v1.10.4 — audit M15. Prior code polled the DOM every 3 seconds
-    // to mirror title→aria-label on new .icon-btn elements. Constant
-    // idle-time work for a paper-thin accessibility win. Replaced with
-    // a MutationObserver that fires ONLY when new buttons enter the
-    // DOM. Existing buttons get the treatment once at mount.
+    showPaletteRef.current = showPalette;
+  }, [showPalette]);
+
+  // -- aria-label mirror + global Esc-to-close-modal --
+  // Mounted once. Uses showPaletteRef to avoid re-subscribing on palette toggle.
+  useEffect(() => {
     const mirrorTitleToAria = (root = document) => {
       root.querySelectorAll('button.icon-btn[title]:not([aria-label])').forEach(btn => {
         btn.setAttribute('aria-label', btn.getAttribute('title'));
@@ -537,7 +586,7 @@ if (!isUnlocked) {
       for (const m of mutations) {
         if (m.addedNodes.length) {
           for (const node of m.addedNodes) {
-            if (node.nodeType === 1) {  // Element
+            if (node.nodeType === 1) {
               if (node.matches?.('button.icon-btn[title]:not([aria-label])')) {
                 node.setAttribute('aria-label', node.getAttribute('title'));
               }
@@ -549,21 +598,20 @@ if (!isUnlocked) {
     });
     observer.observe(document.body, { childList: true, subtree: true });
 
-    // Global ESC → click the topmost modal-overlay (dismisses it).
     const onEsc = (e) => {
       if (e.key !== 'Escape') return;
+      // Palette has its own Esc handler; skip so we don't double-close.
+      if (showPaletteRef.current) return;
       const overlays = Array.from(document.querySelectorAll('.modal-overlay'));
       const top = overlays[overlays.length - 1];
       if (!top) return;
-      if (showPalette) return;
       top.click();
     };
     window.addEventListener('keydown', onEsc);
     return () => { observer.disconnect(); window.removeEventListener('keydown', onEsc); };
-  }, [showPalette]);
+  }, []);
 
-  // Palette-only arrow / Enter / Esc nav. Filtered list dep keeps the
-  // handler in sync with the user's current query.
+  // -- Command palette keyboard navigation --
   useEffect(() => {
     if (!showPalette) return;
     const onKey = (e) => {
@@ -580,11 +628,19 @@ if (!isUnlocked) {
     return () => window.removeEventListener('keydown', onKey);
   }, [showPalette, paletteIdx, filteredPalette]);
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // 6. CONDITIONAL RENDERS  (below ALL hooks — this is the critical fix)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  if (!isUnlocked) {
+    return <LockScreen onUnlock={handleUnlock} />;
+  }
+
   if (serverDown) {
     return (
       <div className="server-down-overlay">
         <div className="server-down-modal">
-          <FileText size={48} color="#3b82f6" />
+          <FileText size={48} color="#4D7C0F" />
           <h2>ArthSutra Needs a Quick Start</h2>
           <p>
             Your data is <strong>100% safe</strong> on your computer — nothing is lost.
@@ -623,17 +679,9 @@ if (!isUnlocked) {
     );
   }
 
-  // v1.10.33 — "Finish setup" bottom-right pill. Shown when the user
-  // hit Skip on the wizard (onboardingSkipped=true) so they can come
-  // back later without hunting through Settings. Hidden after they
-  // finish setup (finish() clears the flag) or if they explicitly said
-  // "None of these — I'll configure manually".
-  const showResumeSetupPill = (() => {
-    try {
-      const ps = getPrintSettings();
-      return !showWizard && ps.onboardingComplete === true && ps.onboardingSkipped === true;
-    } catch { return false; }
-  })();
+  // ═══════════════════════════════════════════════════════════════════════
+  // 7. MAIN RENDER
+  // ═══════════════════════════════════════════════════════════════════════
 
   return (
     <div className="app-layout">
@@ -647,7 +695,7 @@ if (!isUnlocked) {
             padding: '0.6rem 1rem', borderRadius: 999,
             background: 'var(--primary)', color: '#fff', border: 'none',
             fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer',
-            boxShadow: '0 6px 20px rgba(30,64,175,0.35), 0 2px 4px rgba(0,0,0,0.15)',
+            boxShadow: '0 6px 20px rgba(30,41,59,0.35), 0 2px 4px rgba(0,0,0,0.15)',
             display: 'flex', alignItems: 'center', gap: '0.4rem',
           }}>
           ✨ Finish setup
@@ -716,9 +764,6 @@ if (!isUnlocked) {
             </button>
           ))}
           <div style={{ marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
-            {/* Update-available banner — only shows when GitHub has a newer version
-                AND the user hasn't already dismissed THIS specific version. New
-                releases re-show the banner. Click to view notes + update. */}
             {updateBannerVisible && (
               <button
                 className="nav-btn"
@@ -743,9 +788,6 @@ if (!isUnlocked) {
                 }} />
               </button>
             )}
-            {/* Notification bell — opens a popover listing overdue / due-soon
-                invoices, GST filing deadlines, and low-stock items. Each row
-                is a single click away from the page that fixes it. */}
             <button
               className="nav-btn"
               onClick={() => setShowNotifs(s => !s)}
@@ -804,6 +846,7 @@ if (!isUnlocked) {
           <button className="pwa-dismiss-btn" onClick={dismissInstallBanner} title="Remind me later (re-shows in 14 days)"><X size={16} /></button>
         </div>
       )}
+
       <div className="main-content">
         {currentView === 'dashboard' && (
           <Dashboard onNew={handleNewInvoice} onEdit={handleEditInvoice} onDuplicate={handleDuplicateInvoice} onConvert={handleConvertToInvoice} />
@@ -814,48 +857,23 @@ if (!isUnlocked) {
             profile={profile} editingBill={editingBill}
           />
         )}
-        {/* v1.10.4 — All lazy views under one Suspense boundary. Only the
-             matched view's chunk actually loads; others stay unfetched. */}
         <Suspense fallback={<ViewLoading />}>
-        {currentView === 'clients' && (
-          <ClientsView onNew={handleNewInvoice} onEdit={handleEditInvoice} onDuplicate={handleDuplicateInvoice} />
-        )}
-        {currentView === 'inventory' && (
-          <InventoryView />
-        )}
-        {currentView === 'expenses' && (
-          <ExpenseTracker />
-        )}
-        {currentView === 'purchases' && (
-          <PurchaseBills />
-        )}
-        {currentView === 'recurring' && (
-          <RecurringInvoices onEdit={handleEditInvoice} />
-        )}
-        {currentView === 'receipts' && (
-          <ReceiptVoucher />
-        )}
-        {currentView === 'reports' && (
-          <ReportsView />
-        )}
-        {currentView === 'filing' && (
-          <GSTReturns />
-        )}
-        {currentView === 'incometax' && (
-          <IncomeTax />
-        )}
-        {currentView === 'guide' && (
-          <UserGuideView />
-        )}
-        {currentView === 'settings' && (
-          <SettingsView onSaved={(p) => setProfile(p)} />
-        )}
+          {currentView === 'clients' && (
+            <ClientsView onNew={handleNewInvoice} onEdit={handleEditInvoice} onDuplicate={handleDuplicateInvoice} />
+          )}
+          {currentView === 'inventory' && <InventoryView />}
+          {currentView === 'expenses' && <ExpenseTracker />}
+          {currentView === 'purchases' && <PurchaseBills />}
+          {currentView === 'recurring' && <RecurringInvoices onEdit={handleEditInvoice} />}
+          {currentView === 'receipts' && <ReceiptVoucher />}
+          {currentView === 'reports' && <ReportsView />}
+          {currentView === 'filing' && <GSTReturns />}
+          {currentView === 'incometax' && <IncomeTax />}
+          {currentView === 'guide' && <UserGuideView />}
+          {currentView === 'settings' && <SettingsView onSaved={(p) => setProfile(p)} />}
         </Suspense>
       </div>
 
-      {/* Update modal — release notes + Export-backup-first nudge + Update Now */}
-      {/* Notification popover — rendered as a click-out modal so it works on
-          tablets too. Grouped by category with a navigate-to button per group. */}
       {showNotifs && (
         <div className="modal-overlay" onClick={() => setShowNotifs(false)}>
           <div className="modal-content" style={{ maxWidth: '480px' }} onClick={e => e.stopPropagation()}>
@@ -930,8 +948,6 @@ if (!isUnlocked) {
         </div>
       )}
 
-      {/* Command palette — Ctrl/Cmd+K. Spotlight-style: type to filter actions,
-          ↑/↓ to navigate, Enter to run, Esc to close. */}
       {showPalette && (
         <div className="modal-overlay" onClick={() => setShowPalette(false)}>
           <div className="modal-content" style={{ maxWidth: '520px', padding: 0, overflow: 'hidden' }} onClick={e => e.stopPropagation()}>
@@ -974,7 +990,6 @@ if (!isUnlocked) {
         </div>
       )}
 
-      {/* Keyboard-shortcuts help — Ctrl/Cmd+/. Single-pane reference. */}
       {showShortcutsHelp && (
         <div className="modal-overlay" onClick={() => setShowShortcutsHelp(false)}>
           <div className="modal-content" style={{ maxWidth: '480px' }} onClick={e => e.stopPropagation()}>
@@ -986,8 +1001,8 @@ if (!isUnlocked) {
               <tbody>
                 <tr><td><kbd>Ctrl</kbd>&nbsp;+&nbsp;<kbd>K</kbd></td><td>Open command palette (jump to any page)</td></tr>
                 <tr><td><kbd>Ctrl</kbd>&nbsp;+&nbsp;<kbd>N</kbd></td><td>New invoice</td></tr>
-                <tr><td><kbd>Ctrl</kbd>&nbsp;+&nbsp;<kbd>S</kbd></td><td>Save current invoice (when on the invoice form)</td></tr>
-                <tr><td><kbd>Ctrl</kbd>&nbsp;+&nbsp;<kbd>P</kbd></td><td>Download PDF (when on the invoice form)</td></tr>
+                <tr><td><kbd>Ctrl</kbd>&nbsp;+&nbsp;<kbd>S</kbd></td><td>Save current invoice (only when the invoice form is open)</td></tr>
+                <tr><td><kbd>Ctrl</kbd>&nbsp;+&nbsp;<kbd>P</kbd></td><td>Download PDF (only when the invoice form is open)</td></tr>
                 <tr><td><kbd>Ctrl</kbd>&nbsp;+&nbsp;<kbd>/</kbd></td><td>Toggle this help</td></tr>
                 <tr><td><kbd>Esc</kbd></td><td>Close any open modal</td></tr>
               </tbody>
@@ -1015,8 +1030,6 @@ if (!isUnlocked) {
               <button className="icon-btn" onClick={() => setShowUpdateModal(false)} title="Close"><X size={18} /></button>
             </div>
 
-            {/* Data-safety reassurance — explicit, prominent. Same .notice-info style
-                as the Data Management privacy card so users learn one visual pattern. */}
             <div className="notice notice-info" style={{ marginBottom: '0.85rem' }}>
               <span className="notice-icon">🔒</span>
               <div>
@@ -1024,7 +1037,6 @@ if (!isUnlocked) {
               </div>
             </div>
 
-            {/* Release notes */}
             <div className="surface-card" style={{ maxHeight: '320px', overflowY: 'auto', whiteSpace: 'pre-wrap', fontSize: '0.82rem', lineHeight: 1.55, marginBottom: '0.85rem' }}>
               {updateInfo.releaseNotes || (
                 <span style={{ color: 'var(--text-muted)' }}>
@@ -1034,7 +1046,6 @@ if (!isUnlocked) {
               )}
             </div>
 
-            {/* Suggested pre-update step: export a backup */}
             <div className="notice notice-warn" style={{ marginBottom: '1rem' }}>
               <span className="notice-icon">💡</span>
               <div>

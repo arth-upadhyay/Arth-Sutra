@@ -101,7 +101,7 @@ export default function UserGuideView() {
       // Cover-page-ish heading
       writeWrapped('ArthSutra', { size: 22, bold: true, color: [30, 64, 175] });
       writeWrapped('User Guide — v1.4.0', { size: 12, color: [100, 116, 139] });
-      writeWrapped(`Generated on ${new Date().toLocaleDateString()}. by HANU — github.com/arthupadhyay/Arth-Sutra`, { size: 9, color: [148, 163, 184] });
+      writeWrapped(`Generated on ${new Date().toLocaleDateString()} by Arth Upadhyay — github.com/arthupadhyay/Arth-Sutra`, { size: 9, color: [148, 163, 184] });
       y += 4;
 
       GUIDE_CONTENT.forEach(block => {
