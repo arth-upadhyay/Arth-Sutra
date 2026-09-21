@@ -5,13 +5,6 @@
 
 Built by [@arthupadhyay](https://github.com/arthupadhyay) originally for a family business, now maintained as a public alternative to commercial ERP software like Marg, Tally, Vyapar, and myBillBook.
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Version](https://img.shields.io/badge/version-1.10.x-green.svg)
-![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)
-![Stack](https://img.shields.io/badge/stack-React%2019%20%2B%20Vite%207%20%2B%20Express%205-blueviolet.svg)
-
----
-
 ## Table of Contents
 
 - [Why this exists](#why-this-exists)
