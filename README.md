@@ -38,7 +38,7 @@ ArthSutra does those four things. It does not try to be a full ERP. It runs loca
 
 | Attribute | Value |
 |-----------|-------|
-| **Version** | v1.10.x (in active refactor) |
+| **Version** | v1.1.x (in active refactor) |
 | **Target** | India-only, A4-only, offline-first |
 | **License** | MIT |
 | **Stack** | React 19 + Vite 7 · Express 5 · Node.js 18+ |
