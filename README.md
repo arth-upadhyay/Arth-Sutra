@@ -267,24 +267,7 @@ An audit run against the current code surfaced the following. These are tracked 
 - `SetupWizard.jsx` `canFinish` is always true because `paperSize` defaults to `'a4'`. The Finish button is never disabled.
 - `UserGuideView.jsx` uses a global regex with `.test()` inside `.map()`, which is stateful via `lastIndex` and can produce inconsistent highlighting.
 - `hsnRates.js` has a duplicate SAC key `9985`; the second entry silently overwrites the first.
-- `store.js` `getNextInvoiceNumber('RCP')` returns a branded prefix unless `explicitPrefix` is true. Receipt numbers can accidentally inherit the invoice prefix.
-
-### Structural
-
-These are the "monolithic file" issues. They don't break anything today but make the codebase harder to maintain:
-
-| File | LOC | Should be split into |
-|------|-----|----------------------|
-| `GSTReturns.jsx` | ~2,500 | per-tab hooks + tab components |
-| `SettingsView.jsx` | ~2,200 | per-section components |
-| `PrintSettings.jsx` | ~1,800 | after cleanup, ~400 |
-| `Dashboard/index.jsx` | ~1,400 | already part-refactored |
-| `utils.js` | ~1,100 | format / GST / states / units / accounts |
-| `itr.js` | ~900 | slab / surcharge / deductions / presumptive |
-| `IncomeTax.jsx` | ~1,300 | per-tab components |
-
----
-
+- `store.js` `getNextInvoiceNumber('RCP')` returns a branded prefix unless `explicitPrefix` is true. Receipt numbers can accidentally inherit the invoice prefixs
 ## Security notes
 
 - All data stays on the local machine. The only outbound network calls are: Google Drive upload (opt-in), GitHub release check, and the optional Google Fonts stylesheet.
