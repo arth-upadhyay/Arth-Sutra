@@ -100,7 +100,6 @@ git clone https://github.com/arthupadhyay/Arth-Sutra
 cd Arth-Sutra
 npm install
 npm start
-```
 
 Open `http://localhost:47371` in your browser.
 
