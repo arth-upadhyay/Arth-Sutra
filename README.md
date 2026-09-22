@@ -257,16 +257,7 @@ Fixes
 · RecurringInvoices.generateNow() now populates data.totals on the generated bill so downstream reports don't crash.
 · Currency column removed from Reports (India-only → always INR).
 · ClientModal.jsx no longer carries per-client paper size / currency / auto-print preferences.
-
 ---
-
-Known issues
-
-An audit run against the current code surfaced the following. These are tracked and being addressed incrementally.
-
-
----
-
 Security notes
 
 · All data stays on the local machine. The only outbound network calls are: Google Drive upload (opt-in), GitHub release check, and the optional Google Fonts stylesheet.
