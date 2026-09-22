@@ -264,33 +264,6 @@ Known issues
 
 An audit run against the current code surfaced the following. These are tracked and being addressed incrementally.
 
-Critical
-
-· App.jsx violates the Rules of Hooks. useState(isUnlocked) runs, then an early return renders <LockScreen />, and only after unlock do the remaining hooks run. React warns: "Rendered more hooks than during the previous render." Fix: move the isUnlocked gate outside App, or wrap the app shell in a child component.
-· InvoicePreview.jsx is not generic. The current template is hardcoded to a pharmaceutical / Marg layout ("Pharmaceutical Distributors", OMRP, Batch, Expiry, MRP, Licence No). It ignores most of the props it receives (showGST, showHSN, customNotes, extraSections, paper size, template). DOMPurify is imported but never used, and customTerms is rendered with dangerouslySetInnerHTML. This is an XSS risk if an attacker can write to the terms field.
-· PurchaseBills.delete does not revert stock. The confirmation dialog promises "stock will be reverted", but handleDelete only calls deletePurchase(id). Products and batches are left inflated.
-· Income Tax FY mismatch. IncomeTax.jsx declares CURRENT_FY = '2024-25' while itr.js declares CURRENT_FY = '2025-26'. The UI label and the computed slabs belong to different assessment years.
-· GSTReturns.jsx mishandles credit notes. Credit notes are included as positive B2C / HSN values in some tables and then subtracted later, making intermediate views misleading. The GSTIN validation regex is also non-standard.
-
-Moderate
-
-· printSettings.js sample invoice totals are mathematically wrong (₹950 taxable + 18% GST ≠ ₹1130).
-· LockScreen.jsx falls back to the hardcoded password ARTH when no hash is set. Anyone with the source can unlock.
-· LockScreen.jsx uses crypto.subtle without a fallback for non-secure contexts (non-https, non-localhost).
-· ConfirmModal.jsx claims to queue concurrent calls but overwrites the active modal instead. Two simultaneous confirmAction() calls can leave the first promise unresolved forever.
-· SetupWizard.jsx canFinish is always true because paperSize defaults to 'a4'. The Finish button is never disabled.
-· UserGuideView.jsx uses a global regex with .test() inside .map(), which is stateful via lastIndex and can produce inconsistent highlighting.
-· hsnRates.js has a duplicate SAC key 9985; the second entry silently overwrites the first.
-· store.js getNextInvoiceNumber('RCP') returns a branded prefix unless explicitPrefix is true. Receipt numbers can accidentally inherit the invoice prefix.
-
-Structural
-
-File LOC Should be split into
-SettingsView.jsx ~2,200 per-section components
-PrintSettings.jsx ~1,800 after cleanup, ~400
-IncomeTax.jsx ~1,300 per-tab components
-utils.js ~1,100 format / GST / states / units / accounts
-itr.js ~900 slab / surcharge / deductions / presumptive
 
 ---
 
@@ -300,34 +273,7 @@ Security notes
 · The local Express daemon binds to 127.0.0.1 only.
 · The Content Security Policy in index.html blocks all inline <script> tags, restricts connect-src to localhost and Google APIs, and disables object-src.
 · The invoice template still uses dangerouslySetInnerHTML for the Terms & Conditions field. Until that is sanitised, do not paste untrusted content into Terms.
-
 ---
-
-Roadmap
-
-Priority order for the next few releases:
-
-1. Fix App.jsx Rules of Hooks violation. Move lock screen out of the hook tree.
-2. Make InvoicePreview generic. Read every option from props. Sanitize customTerms with the already-imported DOMPurify.
-3. Fix PurchaseBills.delete to restore stock and batches.
-4. Align Income Tax FY between IncomeTax.jsx and itr.js.
-5. Fix GSTReturns credit-note handling and the GSTIN regex.
-6. Split SettingsView.jsx, PrintSettings.jsx, IncomeTax.jsx, utils.js into focused modules.
-7. Add tests for credit notes, UTGST, cess, tax-inclusive discounts, TCS / TDS, and FY boundaries.
-
----
-
-Contributing
-
-PRs welcome. Before opening one:
-
-· Run npm test — the existing suite covers computeInvoiceTotals and resolveLineDiscount.
-· Run npm run build — the production bundle must succeed.
-· If you add a new printSettings key, add it to the export whitelist in store.js so it survives backup / restore.
-· Follow the commit style in git log --oneline -20.
-
-Reporting bugs
-
 Open an issue at github.com/arth-upadhyay/Arth-Sutra/issues with:
 
 · The action that triggered it
@@ -342,37 +288,4 @@ Email kumarup1972@gmail.com for security issues. Do not open a public issue for 
 ---
 
 License
-
 Apache License 2.0 — see LICENSE.
-
-You may use, modify, and redistribute this software for personal or commercial purposes, provided you retain the copyright notice and license text. See the LICENSE file for the full terms.
-
----
-
-Credits
-
-Built by Arth Upadhyay — github.com/arth-upadhyay
-
-Built with:
-
-· React
-· Vite
-· Express
-· jsPDF
-· html2canvas
-· Tesseract.js
-· lucide-react
-
-If ArthSutra saved your business a subscription, the best way to say thanks is to report a bug, file a PR, or star the repo.
-
----
-
-<div align="center">
-
-Made in India 🇮🇳 for Indian businesses
-
-</div>
-```
-
----
-
