@@ -1,6 +1,6 @@
 
 ```markdown
-# ArthSutra
+# ArthSutra bascally means arth's system in sanskrit 
 
 **ARTH's SYSTEM** — a free, open-source, offline-first GST billing & invoicing application built for Indian small and medium businesses.
 
@@ -11,15 +11,8 @@ Built by [@arth-upadhyay](https://github.com/arth-upadhyay) originally for a fam
 
 
 ## Why this exists
+my father needed a erp for billiing inventory mangment etc like marg erp or tally etc but they charge way too much and its bloated for his needs 
 
-Enterprise billing software is expensive and bloated. Most small Indian shops need exactly four things:
-
-1. Generate a GST-compliant tax invoice as a PDF.
-2. Track what's owed and what's paid.
-3. Export GSTR-1 / GSTR-3B for the CA or the portal.
-4. Keep the data on their own machine — no cloud subscriptions.
-
-ArthSutra does those four things. It does not try to be a full ERP. It runs locally, stores data as plain JSON files, and works without an internet connection.
 
 ---
 
@@ -205,17 +198,6 @@ Data flow
 
 What was recently cleaned up
 
-The following categories of dead code and stale features were removed (see commit history for details).
-
-Refactor: India-only
-
-· Non-India countries removed from the picker. Only India + "Other" remain.
-· US_STATES, CANADA_PROVINCES, AUSTRALIA_STATES deleted.
-· detectCountryFromBrowser deleted.
-· Region preference UI (india / international / both) removed — the app now assumes India.
-· LABEL_PRESETS trimmed to English + Hindi.
-· Dual-currency display setting removed.
-
 Refactor: A4-only
 
 · PAPER_SIZES reduced to a single A4 entry.
@@ -265,6 +247,7 @@ Security notes
 · The Content Security Policy in index.html blocks all inline <script> tags, restricts connect-src to localhost and Google APIs, and disables object-src.
 · The invoice template still uses dangerouslySetInnerHTML for the Terms & Conditions field. Until that is sanitised, do not paste untrusted content into Terms.
 ---
+**for any bugs or issues** 
 Open an issue at github.com/arth-upadhyay/Arth-Sutra/issues with:
 
 · The action that triggered it
@@ -272,11 +255,8 @@ Open an issue at github.com/arth-upadhyay/Arth-Sutra/issues with:
 · What actually happened
 · Browser console output if any
 
-Security disclosure
-
-Email kumarup1972@gmail.com for security issues. Do not open a public issue for anything that could be exploited before a fix is released.
+Email: arth14deepak@gmail.com 
 
 ---
-
 License
 Apache License 2.0 — see LICENSE.
