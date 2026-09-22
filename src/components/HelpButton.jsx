@@ -1,17 +1,6 @@
 import { useState, useEffect } from 'react';
 import { HelpCircle, X } from 'lucide-react';
 
-/*
- * v1.10.22 — Per-view help button.
- *
- * Reported: "in all tools or sidebar option there should be help button
- * in header whch will have how to use current tool."
- *
- * Consumers pass a `title` and either `children` (JSX) or a `body` string.
- * The button sits inline where dropped (typically next to a page title);
- * clicking opens a small modal explaining how to use the current view.
- * Esc closes.
- */
 export default function HelpButton({ title, body, children, size = 18 }) {
   const [open, setOpen] = useState(false);
 

@@ -7,10 +7,8 @@ import { getPrintSettings } from '../utils/printSettings';
 import { openWhatsAppShare } from '../utils/share';
 import { confirmAction } from './ConfirmModal';
 import { toast } from './Toast';
+import ClientModal from './ClientModal';
 
-// v1.10.31 — UI-C3: Shared helper to resolve the user's accent color as an
-// RGB tuple usable with jsPDF setFillColor / setDrawColor. Falls back to the
-// legacy blue (#1e40af = rgb(30, 64, 175)) when the user hasn't customised.
 function getAccentRGB() {
   try {
     const ps = getPrintSettings();
@@ -20,10 +18,9 @@ function getAccentRGB() {
         return [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)];
       }
     }
-  } catch { /* ignore — fall through to default */ }
+  } catch { }
   return [30, 64, 175];
 }
-import ClientModal from './ClientModal';
 
 const STATUS_COLORS = {
   unpaid: { label: 'Unpaid', color: '#f59e0b', bg: '#fffbeb' },
@@ -60,11 +57,6 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
     loadData();
   }, []);
 
-  // Client Statement PDF — feature A from v1.6.7 audit ("#1 daily ask when
-  // a client disputes a bill"). Produces a single-page account statement:
-  // invoice list + credit notes + payments + running balance. Reuses the
-  // profile block from InvoicePreview for the seller header so the styling
-  // matches the invoice PDFs the client already knows.
   const [profileForStatement, setProfileForStatement] = useState(null);
   useEffect(() => {
     getProfile().then(setProfileForStatement).catch(() => {});
@@ -81,15 +73,13 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
       const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
       const savedClient = clients.find(c => c.name === clientName) || { name: clientName };
       const stats = getClientStats(clientName);
-      const pageW = 210, marginL = 15, marginR = 195, tableW = marginR - marginL; // = 180
-      // Helvetica core font can't render Rupee symbol properly — use "Rs." plaintext.
-      // Numbers are formatted with Indian digit grouping (2,5,000.00 style).
+      const pageW = 210, marginL = 15, marginR = 195, tableW = marginR - marginL; 
+      
       const fmt = (n) => {
         const v = Number(n) || 0;
         const abs = Math.abs(v);
         const rounded = abs.toFixed(2);
         const parts = rounded.split('.');
-        // Indian grouping: last 3 digits, then groups of 2
         const intPart = parts[0];
         const last3 = intPart.slice(-3);
         const rest = intPart.slice(0, -3);
@@ -97,7 +87,6 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
         return (v < 0 ? '-' : '') + 'Rs. ' + grouped + '.' + parts[1];
       };
 
-      // ============== HEADER BAND ==============
       doc.setFillColor(...getAccentRGB());
       doc.rect(0, 0, pageW, 22, 'F');
       doc.setTextColor(255); doc.setFontSize(16); doc.setFont('helvetica', 'bold');
@@ -108,9 +97,8 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
 
       let y = 30;
 
-      // ============== FROM / TO BLOCKS (side-by-side, guaranteed non-overlap) ==============
-      const colL = marginL, colR = marginL + tableW / 2 + 5;   // 15 and 100
-      const colWidth = tableW / 2 - 5;                          // 85 mm each column
+      const colL = marginL, colR = marginL + tableW / 2 + 5;   
+      const colWidth = tableW / 2 - 5;                          
 
       doc.setFontSize(8); doc.setFont('helvetica', 'bold'); doc.setTextColor(100);
       doc.text('FROM', colL, y);
@@ -139,12 +127,6 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
         savedClient.phone ? `Ph: ${savedClient.phone}` : null,
       ].filter(Boolean);
 
-      // v1.10.31 — UI-C1 fix: `splitTextToSize` returns an ARRAY of
-      // wrapped sub-lines; jsPDF draws each at line-height 4mm but the
-      // outer loop only advanced `dy += 4`, so a 2-line-wrapped address
-      // collided with the next logical line ("Birnagar / Bhagar" bleed
-      // reported in Client Statement). Now dy advances by the actual
-      // rendered line count.
       let sellerDy = 0;
       sellerLines.forEach(line => {
         const wrapped = doc.splitTextToSize(line, colWidth);
@@ -159,7 +141,6 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
       });
       y += Math.max(sellerDy, clientDy) + 5;
 
-      // ============== SUMMARY STRIP ==============
       doc.setFillColor(241, 245, 249);
       doc.rect(marginL, y, tableW, 16, 'F');
       doc.setDrawColor(226, 232, 240);
@@ -183,29 +164,14 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
       doc.setTextColor(0);
       y += 22;
 
-      // ============== LEDGER TABLE (Indian Dr/Cr convention) ==============
-      // Columns follow standard Indian business-statement format:
-      //   Date | Particulars (invoice # + type) | Debit | Credit | Balance
-      // Debit  = amount charged to the client (increases receivable)
-      // Credit = payment received / credit note (decreases receivable)
-      // Balance = running Dr - Cr
-      //
-      // v1.10.35 — Column widths widened after a report showed "Dr"
-      // suffix crowding the balance number. Prior debitEnd=140 /
-      // creditEnd=168 / balanceEnd=193 left only 4mm between Credit
-      // and Balance text — tight when both were 5-digit rupee amounts.
-      // Now the Particulars column is trimmed by 5mm and that space is
-      // distributed into Debit/Credit/Balance so each has proper breathing
-      // room and long "Dr/Cr" suffixes never clip the page margin.
       const col = {
-        dateEnd: 40,        // Date column: 15 to 40 (25mm — dd/mm/yyyy fits at 8.5pt)
-        particEnd: 100,     // Particulars: 40 to 100 (60mm)
-        debitEnd: 133,      // Debit right-aligned at 133
-        creditEnd: 163,     // Credit right-aligned at 163
-        balanceEnd: marginR - 2, // Balance right-aligned at 193
+        dateEnd: 40,        
+        particEnd: 100,     
+        debitEnd: 133,      
+        creditEnd: 163,     
+        balanceEnd: marginR - 2, 
       };
 
-      // Header band
       doc.setFillColor(...getAccentRGB());
       doc.rect(marginL, y, tableW, 9, 'F');
       doc.setTextColor(255); doc.setFontSize(9); doc.setFont('helvetica', 'bold');
@@ -217,18 +183,15 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
       doc.setTextColor(0);
       y += 11;
 
-      // Opening balance row — italic + muted, above the first real row.
       doc.setFontSize(8.5); doc.setFont('helvetica', 'italic'); doc.setTextColor(80);
       doc.text('Opening Balance', col.dateEnd + 2, y);
       doc.text(fmt(0), col.balanceEnd, y, { align: 'right' });
-      // v1.10.35 — thin separator so the opening line reads as a
-      // distinct baseline, not as a squished header extension.
+      
       doc.setDrawColor(226, 232, 240); doc.setLineWidth(0.15);
       doc.line(marginL, y + 2, marginR, y + 2);
       doc.setTextColor(15, 23, 42); doc.setFont('helvetica', 'normal');
       y += 7;
 
-      // Rows
       let runningBalance = 0;
       const sortedBills = clientBills.slice().sort((a, b) => new Date(a.invoiceDate) - new Date(b.invoiceDate));
 
@@ -242,7 +205,7 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
         doc.text('Credit', col.creditEnd, y + 6, { align: 'right' });
         doc.text('Balance', col.balanceEnd, y + 6, { align: 'right' });
         doc.setTextColor(0);
-        y += 12;   // v1.10.35 — was 11; 1mm extra so text doesn't kiss the header rectangle bottom
+        y += 12;   
       };
 
       for (let i = 0; i < sortedBills.length; i++) {
@@ -250,28 +213,12 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
         const isCreditNote = bill.invoiceType === 'credit-note';
         const amount = Number(bill.totalAmount) || 0;
         const paid = Number(bill.paidAmount) || 0;
-        // Compute Dr / Cr for this row
-        //   Tax invoice: Dr = amount, Cr = 0
-        //   Credit note: Dr = 0, Cr = amount
-        //   Then if paid amount > 0 we add ANOTHER row for the payment as Cr
+        
         const debit = isCreditNote ? 0 : amount;
         const credit = isCreditNote ? amount : 0;
 
-        // Page break with header repeat
         if (y > 260) { doc.addPage(); y = 20; drawHeader(); }
 
-        // v1.10.35 — Row rendering rewrite for the reported "shows data
-        // in incorrect way" screenshot:
-        //   - Row height increased 6mm → 7mm so descenders don't kiss
-        //     the next row and the alt-shade rectangle covers the whole
-        //     row cleanly.
-        //   - Alt shading Y offset fixed (was y-4, showed above the row
-        //     text baseline on some renders).
-        //   - Empty debit/credit cells render as a light em-dash "—"
-        //     instead of a hard hyphen "-", matching the app's cell-empty
-        //     convention and reducing visual noise.
-        //   - The " Dr" / " Cr" suffix now uses the actual sign — was
-        //     always " Dr" even for credit-side balances.
         const rowH = 7;
         if (i % 2 === 1) {
           doc.setFillColor(248, 250, 252);
@@ -279,27 +226,26 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
         }
 
         doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(15, 23, 42);
-        // Date
+        
         doc.text(new Date(bill.invoiceDate).toLocaleDateString('en-IN'), marginL + 2, y);
-        // Particulars: invoice # + type label
+        
         const typeLabel = INVOICE_TYPES[bill.invoiceType]?.label || bill.invoiceType || '';
         const particulars = `${bill.invoiceNumber || ''} · ${typeLabel}`;
         const particText = doc.splitTextToSize(particulars, col.particEnd - col.dateEnd - 4);
         doc.text(particText[0] || '', col.dateEnd + 2, y);
-        // Debit — em-dash placeholder for empty cells.
+        
         if (debit > 0) {
           doc.text(fmt(debit), col.debitEnd, y, { align: 'right' });
         } else {
           doc.setTextColor(180); doc.text('—', col.debitEnd, y, { align: 'right' }); doc.setTextColor(15, 23, 42);
         }
-        // Credit
+        
         if (credit > 0) {
           doc.text(fmt(credit), col.creditEnd, y, { align: 'right' });
         } else {
           doc.setTextColor(180); doc.text('—', col.creditEnd, y, { align: 'right' }); doc.setTextColor(15, 23, 42);
         }
-        // Balance — sign determines Dr / Cr suffix. Red for owing (Dr),
-        // green for surplus (Cr), black for balanced.
+        
         runningBalance += debit - credit;
         const isDr = runningBalance > 0.01;
         const isCr = runningBalance < -0.01;
@@ -311,7 +257,6 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
         doc.setTextColor(15, 23, 42); doc.setFont('helvetica', 'normal');
         y += rowH;
 
-        // Add a follow-on row for the payment if any
         if (paid > 0.01 && !isCreditNote) {
           if (y > 265) { doc.addPage(); y = 20; drawHeader(); }
           doc.setFont('helvetica', 'italic'); doc.setFontSize(8); doc.setTextColor(80);
@@ -330,13 +275,6 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
         }
       }
 
-      // ============== CLOSING BALANCE ==============
-      // v1.10.14 — the v1.10.11 fix (label at col.debitEnd=140mm) still overlapped
-      // for medium/large balances: "CLOSING BALANCE" at 11pt bold is ~33mm wide so
-      // its right edge lands at ~173mm, but "Rs. X,XXX.XX Dr" at 12pt right-aligned
-      // at balanceEnd (~193mm) has its left edge as far left as ~165mm for 4-digit
-      // amounts. Real fix: park the label at marginL (~17mm) — 3x more breathing
-      // room and it reads better as a bottom-of-page summary line anyway.
       y += 3;
       doc.setDrawColor(...getAccentRGB()); doc.setLineWidth(0.6);
       doc.line(marginL, y, marginR, y); y += 8;
@@ -351,8 +289,6 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
       doc.setFontSize(7.5); doc.setFont('helvetica', 'italic'); doc.setTextColor(100);
       doc.text('Dr = amount receivable from client  ·  Cr = amount owed to client', marginL, y);
 
-      // ============== SIGNATURE + FOOTER ==============
-      // Signature block (right-aligned)
       y = Math.max(y + 15, 260);
       doc.setDrawColor(150); doc.line(marginR - 55, y, marginR - 2, y);
       doc.setFontSize(8); doc.setFont('helvetica', 'normal'); doc.setTextColor(80);
@@ -361,7 +297,7 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
 
       doc.setFontSize(7.5); doc.setFont('helvetica', 'italic'); doc.setTextColor(120);
       doc.text('Please review and confirm within 7 days. This is a computer-generated statement — no signature required.', pageW / 2, 285, { align: 'center' });
-      doc.text('Generated by ArthSutra', pageW / 2, 290, { align: 'center' });
+      doc.text('Generated by Arth-Sutra', pageW / 2, 290, { align: 'center' });
 
       doc.save(`statement-${clientName.replace(/[^\w]+/g, '-')}-${new Date().toISOString().split('T')[0]}.pdf`);
       toast('Statement PDF generated', 'success');
@@ -371,7 +307,6 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
     }
   };
 
-  // Group bills by client name
   const getClientBills = (clientName) => {
     return bills.filter(b => (b.clientName || '').toLowerCase() === clientName.toLowerCase())
       .sort((a, b) => new Date(b.invoiceDate) - new Date(a.invoiceDate));
@@ -382,32 +317,22 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
   const total = cBills.reduce((s, b) => s + (Number(b.totalAmount) || 0), 0);
   
   const paid = cBills.reduce((s, b) => {
-    // 1. If there are explicit payment records, trust those first
     const fromPayments = (b.payments || []).reduce((ps, p) => ps + (Number(p.amount) || 0), 0);
     if (fromPayments > 0) return s + fromPayments;
     
-    // 2. Strict status check to fix the "Unpaid showing as Paid" bug
     const status = String(b.status || '').toLowerCase().trim();
-    if (status === 'unpaid') return s + 0; // Force 0 addition
+    if (status === 'unpaid') return s + 0; 
     if (status === 'paid') return s + (Number(b.totalAmount) || 0);
     
-    // 3. Fallback for older Partial invoices
     if (typeof b.paidAmount === 'number' && b.paidAmount > 0) return s + b.paidAmount;
     
     return s;
   }, 0);
   
-  const unpaid = total - paid; // can be negative -> overpayment
+  const unpaid = total - paid; 
   return { total, paid, unpaid, count: cBills.length };
 };
 
-  // v1.10.22 — Aging analysis: bucket unpaid amounts by how long they've
-  // been outstanding. Age = today − dueDate (falls back to invoiceDate
-  // when a bill has no explicit due date, since most CA-billed invoices
-  // don't set one but are treated as due-on-issue).
-  //
-  // Buckets: current (0-30 days), 31-60, 61-90, 90+. Reported: "client
-  // aging / Statement of Account". Matches Vyapar / Zoho / Tally output.
   const bucketAge = (days) => {
     if (days <= 30) return 'current';
     if (days <= 60) return 'd31_60';
@@ -433,11 +358,6 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
     return { buckets, unpaidBills };
   };
 
-  // v1.10.22 — Aging Report PDF: single-page overdue-bucket breakdown
-  // (0-30, 31-60, 61-90, 90+ days) plus a per-invoice list showing
-  // outstanding + age. Distinct from generateClientStatement above,
-  // which is a full ledger with running balance — this is the "how
-  // overdue are they?" view accountants ask for during collection calls.
   const generateAgingReport = async (clientName) => {
     try {
       const { jsPDF } = await import('jspdf');
@@ -451,7 +371,6 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
       const marginL = 15, marginR = 195;
       let y = 20;
 
-      // Header
       doc.setFontSize(18); doc.setFont('helvetica', 'bold');
       doc.text('AGING REPORT', marginL, y); y += 8;
       doc.setFontSize(10); doc.setFont('helvetica', 'normal'); doc.setTextColor(100);
@@ -468,7 +387,6 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
       doc.setDrawColor(...getAccentRGB()); doc.setLineWidth(0.5);
       doc.line(marginL, y, marginR, y); y += 8;
 
-      // Column headers
       doc.setFontSize(9); doc.setFont('helvetica', 'bold');
       doc.text('Invoice #',   marginL,         y);
       doc.text('Date',        marginL + 40,    y);
@@ -480,7 +398,6 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
       doc.setLineWidth(0.2);
       doc.line(marginL, y - 2, marginR, y - 2);
 
-      // Rows
       doc.setFont('helvetica', 'normal');
       const fmt = (n) => (Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
       for (const { bill, ageDays, outstanding } of unpaidBills) {
@@ -498,7 +415,6 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
         y += 6;
       }
 
-      // Aging summary
       y += 6;
       doc.setDrawColor(...getAccentRGB()); doc.setLineWidth(0.5);
       doc.line(marginL, y, marginR, y); y += 8;
@@ -534,7 +450,6 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
     }
   };
 
-  // Get all unique client names from bills (includes unsaved clients)
   const allClientNames = [...new Set([
     ...clients.map(c => c.name),
     ...bills.map(b => b.clientName).filter(Boolean)
@@ -544,7 +459,6 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
     ? allClientNames.filter(name => name.toLowerCase().includes(search.toLowerCase()))
     : allClientNames;
 
-  // Sort by outstanding amount
   const sortedClients = [...filteredClients].sort((a, b) => {
     const sa = getClientStats(a);
     const sb = getClientStats(b);
@@ -706,10 +620,8 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
         </div>
       </div>
 
-      {/* Add/Edit Client Modal */}
       <ClientModal show={showForm} onClose={closeForm} onSave={handleModalSave} client={modalClient} isEditing={!!editingClientId} defaultCountry={profileCountry} />
 
-      {/* Search */}
       <div className="glass-panel p-4 mb-6">
         <div className="search-box" style={{ maxWidth: '400px' }}>
           <Search size={16} className="search-icon" />
@@ -719,7 +631,6 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
         </div>
       </div>
 
-      {/* Client cards */}
       {sortedClients.length === 0 ? (
         <div className="glass-panel p-6">
           <div className="empty-state">
@@ -740,7 +651,6 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
 
             return (
               <div key={clientName} className="glass-panel mb-4" style={{ overflow: 'hidden' }}>
-                {/* Client header */}
                 <div className="client-card-header" onClick={() => setExpandedClient(isExpanded ? null : clientName)}>
                   <div className="client-card-info">
                     <div className="client-avatar">
@@ -765,8 +675,6 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
                       <span className="client-stat-value" style={{ color: '#059669' }}>{formatCurrency(stats.paid)}</span>
                     </div>
                     <div className="client-stat">
-                      {/* v1.10.23 — surface overpayment explicitly (was
-                          hidden as "Outstanding: ₹0" when paid > total). */}
                       <span className="client-stat-label">
                         {stats.unpaid < -0.005 ? 'Overpaid' : 'Outstanding'}
                       </span>
@@ -780,17 +688,14 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
                   </div>
                 </div>
 
-                {/* Expanded: invoice list */}
                 {isExpanded && (
                   <div className="client-invoices">
-                    {/* Action bar (right-aligned) — Statement + Aging PDFs. */}
                     <div style={{ padding: '0.5rem 1.5rem', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', flexWrap: 'wrap' }}>
                       <button className="btn btn-secondary" style={{ fontSize: '0.78rem', padding: '0.35rem 0.75rem' }}
                         onClick={() => generateClientStatement(clientName)}
                         title="Account statement: every invoice, credit note, payment, and running balance in one PDF">
                         <Download size={14} /> Statement PDF
                       </button>
-                      {/* v1.10.22 — Aging breakdown (0-30 / 31-60 / 61-90 / 90+). */}
                       <button className="btn btn-secondary" style={{ fontSize: '0.78rem', padding: '0.35rem 0.75rem' }}
                         onClick={() => generateAgingReport(clientName)}
                         title="Aging report: outstanding invoices bucketed by how overdue they are">
@@ -798,9 +703,6 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
                       </button>
                     </div>
 
-                    {/* v1.10.22 — Aging summary strip: shows the four
-                        buckets inline so users get the answer without
-                        having to open the PDF. */}
                     {(() => {
                       const { buckets } = getClientAging(clientName);
                       if (buckets.total <= 0.01) return null;
@@ -824,7 +726,6 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
                       );
                     })()}
 
-                    {/* Client details */}
                     {savedClient && (savedClient.address || savedClient.city || savedClient.email || savedClient.phone) && (
                       <div style={{ padding: '0.75rem 1.5rem', borderBottom: '1px solid var(--border)', display: 'flex', gap: '1.5rem', flexWrap: 'wrap', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
                         {(savedClient.address || savedClient.city || savedClient.pin) && (

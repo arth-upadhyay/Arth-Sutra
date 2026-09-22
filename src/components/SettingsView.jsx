@@ -2,14 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { getProfile, saveProfile, exportAllData, importData, inspectBackup, getTermsTemplates, saveTermsTemplate, deleteTermsTemplate, getAllProfiles, saveBusinessProfile, deleteBusinessProfile, getInvoiceNumberSettings, saveInvoiceNumberSettings, getRegionMode, setRegionMode, getEnabledModules, setEnabledModules, getStockAlertSettings, saveStockAlertSettings, getInvoiceDisplayOptions, saveInvoiceDisplayOptions } from '../store';
 import { ensureToken, findOrCreateFolder, uploadJSON } from '../services/googleDrive';
 import { getCountryConfig, getStatesForCountry, validateTaxId, detectCountryFromBrowser, getCountriesForRegion, FEATURE_GROUPS, isModuleEnabled, getPaymentAccounts, createEmptyAccount, maskAccountNumber, reorderAccounts, setDefaultAccount, isValidUpiId } from '../utils';
-// v1.10.36 — lucide's `Image` icon was imported as `Image`, which
-// SHADOWED the browser's `HTMLImageElement` constructor. Reported:
-// "Uncaught TypeError: et is not a constructor at onChange" on logo
-// upload — the minified `et` was our imported React component, and
-// `new Image()` inside handleImageUpload was trying to construct a
-// React icon. Aliased to `ImageIcon` so `new Image()` resolves to
-// the browser primitive again.
-import { Save, Upload, Download, Plus, Trash2, Edit3, Image as ImageIcon, PenTool, Cloud, CloudOff, Building2, Hash, RefreshCw, Save as SaveIcon } from 'lucide-react';
+import { Save, Upload, Download, Plus, Trash2, Edit3, Image as ImageIcon, PenTool, Cloud, CloudOff, Building2, Hash, RefreshCw } from 'lucide-react';
 import { initGoogleDrive, isConnected, disconnect } from '../services/googleDrive';
 import { toast } from './Toast';
 import { confirmAction } from './ConfirmModal';
@@ -17,9 +10,6 @@ import PrintSettings from './PrintSettings';
 import HelpButton from './HelpButton';
 import { getBackupsList, restoreBackup, triggerBackup, deleteBackup, getTrashedBills, restoreTrashedBill, purgeTrashedBill } from '../store';
 
-// v1.10.36 — Section order for the jump-nav pill bar. Keeping this at
-// module scope so the scroll-spy effect below can reference it without
-// re-computing on every render.
 const JUMP_NAV_SECTIONS = [
   ['section-company',  'Company'],
   ['section-profiles', 'Profiles'],
@@ -34,40 +24,35 @@ const JUMP_NAV_SECTIONS = [
   ['section-updates',  'Updates'],
 ];
 
+const EMPTY_PROFILE = {
+  businessName: '', address: '', city: '', state: '', pin: '', country: '',
+  gstin: '', pan: '', email: '', phone: '', bankName: '', accountNumber: '', ifsc: '', swift: '',
+  logo: '', logoHeight: 48, signature: '', upiId: '', googleClientId: '', googleDriveFolder: 'GST Billing Invoices',
+  paymentAccounts: []
+};
+
 export default function SettingsView({ onSaved }) {
-  const [profile, setProfile] = useState({
-    businessName: '', address: '', state: '', gstin: '', pan: '',
-    email: '', phone: '', bankName: '', accountNumber: '', ifsc: '',
-    logo: '', logoHeight: 48, signature: '', upiId: '', googleClientId: '', googleDriveFolder: 'GST Billing Invoices',
-  });
-  // v1.10.36 — Scroll-spy: which section is currently in the viewport,
-  // so the corresponding pill lights up as the user scrolls. Cheap
-  // IntersectionObserver — a single observer watching all 11 sections;
-  // fires when any crosses the top-of-viewport band.
+  const [profile, setProfile] = useState({ ...EMPTY_PROFILE, country: detectCountryFromBrowser() });
   const [activeSection, setActiveSection] = useState(JUMP_NAV_SECTIONS[0][0]);
+  
   useEffect(() => {
     const els = JUMP_NAV_SECTIONS
       .map(([id]) => document.getElementById(id))
       .filter(Boolean);
     if (!els.length) return;
     const io = new IntersectionObserver((entries) => {
-      // Multiple sections may be in view at once. Pick the top-most
-      // one that's still intersecting so the highlight tracks the
-      // section the user is actually reading.
       const visible = entries
         .filter(e => e.isIntersecting)
         .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
       if (visible?.target?.id) setActiveSection(visible.target.id);
     }, {
-      // Fires when a section enters the top 40% band — feels natural
-      // while scrolling because the section header is usually the
-      // trigger point (not the entire panel).
       rootMargin: '-10% 0px -50% 0px',
       threshold: 0.01,
     });
     els.forEach(el => io.observe(el));
     return () => io.disconnect();
   }, []);
+  
   const [saving, setSaving] = useState(false);
   const [termsTemplates, setTermsTemplates] = useState([]);
   const [editingTemplate, setEditingTemplate] = useState(null);
@@ -125,20 +110,21 @@ export default function SettingsView({ onSaved }) {
     setProfile(prev => ({ ...prev, [name]: value }));
   };
 
-  // ---- Payment Accounts manager ----
-  // `editingAccount` = null ⇒ closed; an account object ⇒ form open for that
-  // account; a fresh `createEmptyAccount()` ⇒ Add new flow. Saving merges back
-  // into profile.paymentAccounts; profile.upiId/bankName/etc. are mirrored to
-  // the DEFAULT account on save so legacy code paths and v1.4.x backups keep
-  // working without a data migration.
   const [editingAccount, setEditingAccount] = useState(null);
   const [accountUpiWarning, setAccountUpiWarning] = useState('');
+  
+  const saveProfileTimer = useRef(null);
+  const pendingProfileSave = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      if (pendingProfileSave.current) {
+        saveProfile(pendingProfileSave.current).catch(() => {});
+      }
+    };
+  }, []);
 
   const updateAccounts = (nextAccounts) => {
-    // Mirror the default account's fields onto the profile's flat bank/UPI
-    // fields. Means: a v1.4.x reader of the same profile.json still sees the
-    // current default account's details, and the existing flat-field code
-    // paths (e.g. legacy fallback in InvoicePreview) continue to work.
     const def = nextAccounts.find(a => a.isDefault) || nextAccounts[0];
     setProfile(prev => {
       const next = {
@@ -152,16 +138,14 @@ export default function SettingsView({ onSaved }) {
           upiId: def.upiId || '',
         } : {}),
       };
-      // v1.10.16 — reported: "also set default is not working". Root cause:
-      // this function only updated React state via setProfile — the caller
-      // was expected to click the main "Save Profile" button afterwards to
-      // persist. Users clicked the ⭐ inline button, saw the star move, and
-      // assumed it was saved. Reloading the page reverted it. Now every
-      // account-level change (mark-default, add, delete, reorder, toggle
-      // active) auto-persists to the server without needing the main Save
-      // button. Fire-and-forget — the same handler that awaits saveProfile
-      // in handleSave already exists for the "save everything" path.
-      saveProfile(next).catch(() => { /* non-fatal — user can retry via Save */ });
+      
+      pendingProfileSave.current = next;
+      if (saveProfileTimer.current) clearTimeout(saveProfileTimer.current);
+      saveProfileTimer.current = setTimeout(() => {
+        saveProfile(pendingProfileSave.current).catch(() => {});
+        pendingProfileSave.current = null;
+      }, 500);
+      
       return next;
     });
   };
@@ -169,7 +153,6 @@ export default function SettingsView({ onSaved }) {
   const openAddAccount = () => {
     const fresh = createEmptyAccount();
     const existing = getPaymentAccounts(profile);
-    // First account auto-marks Primary so the user never sees a "no default" state.
     if (existing.length === 0) fresh.isDefault = true;
     setEditingAccount(fresh);
     setAccountUpiWarning('');
@@ -187,7 +170,6 @@ export default function SettingsView({ onSaved }) {
     const existing = getPaymentAccounts(profile).filter(a => a.id !== 'legacy');
     const idx = existing.findIndex(a => a.id === editingAccount.id);
     const next = idx >= 0 ? existing.map((a, i) => i === idx ? editingAccount : a) : [...existing, editingAccount];
-    // Enforce: exactly one default (or zero if list empty).
     if (editingAccount.isDefault) {
       next.forEach(a => { if (a.id !== editingAccount.id) a.isDefault = false; });
     } else if (!next.some(a => a.isDefault) && next.length > 0) {
@@ -245,46 +227,32 @@ export default function SettingsView({ onSaved }) {
 
   const handleImageUpload = (field, e) => {
     const file = e.target.files?.[0];
-    // v1.10.36 — Reset the input so re-selecting the SAME file re-fires
-    // onChange. Without this, if a user's upload silently failed once
-    // (browser can't decode HEIC etc.) they had to pick a DIFFERENT file
-    // to try again; picking the same file was a no-op.
     try { e.target.value = ''; } catch { /* ignore */ }
     if (!file) return;
 
-    // v1.10.36 — Reported "not able to set logo it show nothing".
-    // Previous strict MIME whitelist (png/jpeg/webp/svg) silently
-    // rejected HEIC/HEIF (iPhone default), GIF, BMP, TIFF with a
-    // one-line toast users often missed. Now: accept anything the
-    // browser can decode. The <img>.onerror fallback catches truly
-    // undecodable files with a clearer message. Non-image files are
-    // still caught by the .type prefix guard.
     if (!file.type.startsWith('image/') && file.type !== '') {
       toast(`This doesn't look like an image (type: ${file.type || 'unknown'}). Try a PNG or JPEG.`, 'warning', 6000);
       return;
     }
-    // Size ceiling relaxed to 5MB (server body limit) so a phone photo
-    // doesn't hit the arbitrary 2MB gate before downscaling gets to run.
     if (file.size > 5 * 1024 * 1024) {
       toast(`Image is ${(file.size / 1024 / 1024).toFixed(1)}MB — over the 5MB cap. Try compressing at tinypng.com.`, 'warning', 6000);
       return;
     }
 
-    // SVGs are vector — embed as-is (no canvas needed).
     if (file.type === 'image/svg+xml' || /\.svg$/i.test(file.name)) {
       const reader = new FileReader();
       reader.onload = (ev) => {
         setProfile(prev => ({ ...prev, [field]: ev.target.result }));
         toast(`${field === 'logo' ? 'Logo' : 'Signature'} uploaded — click Save Profile to keep it.`, 'success', 4000);
       };
-      reader.onerror = () => toast('Could not read the SVG file.', 'error');
+      reader.onerror = () => {
+        reader.abort();
+        toast('Could not read the SVG file.', 'error');
+      };
       reader.readAsDataURL(file);
       return;
     }
 
-    // Raster: load into an Image, downscale to max 1024px on the longer edge
-    // v1.10.36 — Explicit `window.Image` so a future import (e.g. lucide's
-    // `Image` icon) can't shadow the browser primitive again.
     const url = URL.createObjectURL(file);
     const img = new window.Image();
     img.onload = () => {
@@ -304,13 +272,9 @@ export default function SettingsView({ onSaved }) {
       canvas.width = width; canvas.height = height;
       const ctx = canvas.getContext('2d');
       ctx.imageSmoothingQuality = 'high';
-      // Fill white for JPEG so transparent PNGs don't come out with black
-      // backgrounds on printers that can't render alpha.
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, width, height);
       ctx.drawImage(img, 0, 0, width, height);
-      // Keep PNG for images that had alpha (so signature on transparent
-      // stays transparent when placed on invoice), JPEG otherwise.
       const preservesAlpha = /png|webp|svg/i.test(file.type) && field !== 'logo';
       const dataUrl = canvas.toDataURL(preservesAlpha ? 'image/png' : 'image/jpeg', 0.92);
       setProfile(prev => ({ ...prev, [field]: dataUrl }));
@@ -318,10 +282,6 @@ export default function SettingsView({ onSaved }) {
     };
     img.onerror = () => {
       URL.revokeObjectURL(url);
-      // v1.10.36 — better error message. Common cause of the silent
-      // "logo not showing" report on iOS: user uploads a HEIC file from
-      // Photos, Chrome/desktop Safari can't decode it, we ended up here
-      // with a generic error. Now the toast names likely fixes.
       toast(`Could not decode this image (type: ${file.type || 'unknown'}). If it's a HEIC from iPhone, share it as JPEG — in Photos: Share → Copy Photo → Files → paste, or set Camera Format = "Most Compatible".`, 'error', 10000);
     };
     img.src = url;
@@ -334,39 +294,28 @@ export default function SettingsView({ onSaved }) {
     try {
       setSaving(true);
       await saveProfile(profile);
-      // v1.10.16 — reported: "uploaded logo and saved but it's not showing on
-      // invoice". Root cause was a stale `freegstbill_invoiceOptions.showLogo`
-      // in localStorage from before the upload — DEFAULT_OPTIONS has it true,
-      // but a false persisted from an earlier state kept it hidden even after
-      // the upload. Now: whenever the user saves a profile that has a logo,
-      // we force `showLogo: true` in the persisted invoice options. Same for
-      // signature. Users who consciously want to hide the logo can still
-      // uncheck it in the Customize panel — this fix only rescues the
-      // silent-fail case.
-      //
-      // v1.10.36 — Reported again: "not able to set logo it show nothing
-      // after saving". Root cause of the recurrence: v1.10.16 only wrote
-      // to localStorage, but InvoiceGenerator fetches display options
-      // from the SERVER on mount (see line ~631) and merges those over
-      // the localStorage value. So a stale server-side `showLogo:false`
-      // kept overriding the local override. Fix: PUSH the updated
-      // display options to the server too — one API call keeps both
-      // stores in sync. Non-blocking (.catch()) so a slow server
-      // doesn't delay the "Profile saved" toast.
+      
       if (profile.logo || profile.signature) {
         try {
           const raw = localStorage.getItem('freegstbill_invoiceOptions');
           const opts = raw ? JSON.parse(raw) : {};
-          if (profile.logo) opts.showLogo = true;
-          if (profile.signature) opts.showSignature = true;
-          localStorage.setItem('freegstbill_invoiceOptions', JSON.stringify(opts));
-          // Also sync to server so InvoiceGenerator's mount-load doesn't
-          // overwrite our fix with a stale server-side value.
-          try {
-            const serverOpts = await getInvoiceDisplayOptions().catch(() => null);
+          const serverOpts = await getInvoiceDisplayOptions().catch(() => null);
+          
+          let changed = false;
+          if (profile.logo && opts.showLogo === undefined && (!serverOpts || serverOpts.showLogo === undefined)) {
+            opts.showLogo = true;
+            changed = true;
+          }
+          if (profile.signature && opts.showSignature === undefined && (!serverOpts || serverOpts.showSignature === undefined)) {
+            opts.showSignature = true;
+            changed = true;
+          }
+          
+          if (changed) {
+            localStorage.setItem('freegstbill_invoiceOptions', JSON.stringify(opts));
             const merged = { ...(serverOpts || {}), ...opts };
             saveInvoiceDisplayOptions(merged).catch(() => { /* non-blocking */ });
-          } catch { /* server unreachable — localStorage still updated */ }
+          }
         } catch { /* localStorage full or blocked — skip */ }
       }
       if (onSaved) onSaved(profile);
@@ -375,7 +324,6 @@ export default function SettingsView({ onSaved }) {
     finally { setSaving(false); }
   };
 
-  // Invoice Number Settings
   const handleInvNumChange = (field, value) => {
     setInvNumSettings(prev => ({ ...prev, [field]: value }));
   };
@@ -405,7 +353,6 @@ export default function SettingsView({ onSaved }) {
     return `${pfx}${sep}${padded}`;
   };
 
-  // Google Drive
   const handleConnectDrive = async () => {
     if (!profile.googleClientId.trim()) {
       toast('Enter your Google OAuth Client ID first', 'warning');
@@ -432,7 +379,6 @@ export default function SettingsView({ onSaved }) {
     toast('Disconnected from Google Drive', 'info');
   };
 
-  // Export / Import (granular)
   const ALL_BACKUP_PARTS = [
     { id: 'profile',        label: 'Active business profile',  hint: 'Name, address, GSTIN, bank, logo, signature' },
     { id: 'profiles',       label: 'All business profiles',    hint: 'Multi-business switcher entries' },
@@ -467,14 +413,12 @@ export default function SettingsView({ onSaved }) {
       const json = await exportAllData(exportSel);
       const fileName = `freegstbill-backup-${new Date().toISOString().split('T')[0]}.json`;
 
-      // Local download (always)
       const blob = new Blob([json], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url; a.download = fileName; a.click();
       URL.revokeObjectURL(url);
 
-      // Optional Google Drive copy
       if (exportToDrive) {
         if (!profile?.googleClientId) {
           toast('Google Drive not configured. Set Google Client ID in Settings to enable Drive backups.', 'warning');
@@ -510,7 +454,6 @@ export default function SettingsView({ onSaved }) {
       if (!inspection.valid) { toast("This file doesn't look like a Free GST Billing backup.", 'error'); return; }
       setImportInspection(inspection);
       setImportJsonText(text);
-      // Auto-tick only the parts that actually have data in the file
       const auto = {};
       ALL_BACKUP_PARTS.forEach(p => { auto[p.id] = (inspection.counts[p.id] || 0) > 0; });
       setImportSel(auto);
@@ -541,7 +484,6 @@ export default function SettingsView({ onSaved }) {
     }
   };
 
-  // Terms templates
   const handleSaveTemplate = async () => {
     if (!editingTemplate.name.trim()) { toast('Name required', 'warning'); return; }
     await saveTermsTemplate({ ...editingTemplate });
@@ -559,10 +501,8 @@ export default function SettingsView({ onSaved }) {
     })) { await deleteTermsTemplate(id); toast('Deleted', 'success'); loadTemplates(); }
   };
 
-  // Multi-business profiles
   const handleSaveAsProfile = async () => {
     if (!profile.businessName.trim()) { toast('Business name required', 'warning'); return; }
-    // Update existing profile with same name, or create new
     const existing = businessProfiles.find(bp => bp.businessName.trim().toLowerCase() === profile.businessName.trim().toLowerCase());
     await saveBusinessProfile({ ...profile, id: existing?.id || undefined });
     toast(existing ? 'Profile updated!' : 'Profile saved!', 'success');
@@ -570,7 +510,6 @@ export default function SettingsView({ onSaved }) {
   };
 
   const handleLoadProfile = async (bp) => {
-    // Auto-save current profile before switching (so it's not lost)
     if (profile.businessName?.trim()) {
       const existing = businessProfiles.find(p => p.businessName.trim().toLowerCase() === profile.businessName.trim().toLowerCase());
       await saveBusinessProfile({ ...profile, id: existing?.id || undefined });
@@ -597,11 +536,7 @@ export default function SettingsView({ onSaved }) {
   };
 
   const handleAddNewProfile = () => {
-    setProfile({
-      businessName: '', address: '', city: '', state: '', pin: '', country: detectCountryFromBrowser(),
-      gstin: '', pan: '', email: '', phone: '', bankName: '', accountNumber: '', ifsc: '', swift: '',
-      logo: '', logoHeight: 48, signature: '', upiId: '', googleClientId: '', googleDriveFolder: 'GST Billing Invoices',
-    });
+    setProfile({ ...EMPTY_PROFILE, country: detectCountryFromBrowser() });
     setTaxIdWarning('');
     companyFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
@@ -615,10 +550,6 @@ export default function SettingsView({ onSaved }) {
 
   return (
     <div className="settings-container">
-      {/* v1.10.36 — Header lifted with a soft primary-accent gradient
-           card, gear glyph in a rounded badge for visual identity, and
-           a subtle count chip showing how many sections there are so
-           the user has a scale expectation before diving in. */}
       <div className="page-header" style={{
         padding: '1.1rem 1.35rem',
         background: 'linear-gradient(135deg, rgba(var(--primary-rgb), 0.12), var(--card-bg))',
@@ -660,16 +591,6 @@ export default function SettingsView({ onSaved }) {
         </div>
       </div>
 
-      {/* v1.10.36 — Jump-nav pill bar with scroll-spy. Sticky at the
-           top of the panel, backdrop-blur so content beneath still
-           reads through, and the pill matching the currently-scrolled
-           section lights up. Chips are keyboard-focusable and use
-           smooth-scroll to their `id="section-*"` anchors.
-           v1.10.37 — Single-line horizontal scroll (was flex-wrap:
-           wrap breaking to two lines on narrow viewports). Reported:
-           "should look good not in two lines maybe you can fit in 1
-           line". Now: nowrap + overflow-x auto, thin custom
-           scrollbar, edge-fade masks so users know there's more. */}
       <nav className="settings-jumpnav" aria-label="Settings sections" style={{
         position: 'sticky', top: 0, zIndex: 20,
         background: 'rgba(var(--card-bg-rgb, 255, 255, 255), 0.82)',
@@ -730,209 +651,10 @@ export default function SettingsView({ onSaved }) {
         })}
       </nav>
 
-      {/* v1.10.37 — Flex-column wrapper for visual reordering. Each
-           section keeps its DOM position (safe for the anchor IDs +
-           scroll-spy IntersectionObserver + tab order for the primary
-           actions) but the CSS `order:` on each section root controls
-           the on-screen sequence. Reported: "if you click on first
-           Company it goes down then if you click on Profiles comes up
-           — should be sorted in a way the pages". Now the on-screen
-           order matches the jump-nav pill order exactly.
-           Target: Company → Profiles → Terms → Print & PDF → Features
-           → Stock → Region → Backups → Google Drive → Import/Export
-           → Updates. */}
       <div style={{ display: 'flex', flexDirection: 'column' }}>
 
-      {/* ---- Stock Alerts ---- */}
-      {/* v1.10.36 — Redesign: prior layout had an awkward grid with the
-           threshold input crammed next to inline "Common picks: 0, 3,
-           5, 10" text — hard to scan, hard to click. Now: master toggle
-           + one big Threshold row with clickable preset chips ABOVE the
-           input so users can pick a common value in one click, then a
-           number field for fine-tuning. Save button gets a subtle live
-           status text next to it. */}
-      <div id="section-stock" className="glass-panel p-6 mb-6" style={{ order: 6 }}>
-        <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.9rem', marginBottom: '0.9rem' }}>
-          <div style={{
-            width: 40, height: 40, flexShrink: 0,
-            borderRadius: 10,
-            background: 'rgba(245, 158, 11, 0.18)',
-            color: '#d97706',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: '1.15rem',
-          }}>🔔</div>
-          <div>
-            <h3 className="section-title" style={{ marginTop: 0, marginBottom: '0.25rem' }}>Low-stock alerts</h3>
-            <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: 0 }}>
-              Powers the 🔔 sidebar badge and the Dashboard low-stock list. The Inventory page colour-codes products against this threshold too.
-            </p>
-          </div>
-        </div>
-
-        {/* Master toggle row */}
-        <div style={{
-          padding: '0.75rem 0.9rem',
-          background: 'var(--bg-secondary)',
-          borderRadius: 8,
-          display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap',
-          marginBottom: stockAlerts.enabled ? '0.85rem' : 0,
-        }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', cursor: 'pointer', fontSize: '0.88rem', fontWeight: 600 }}>
-            <input type="checkbox" checked={!!stockAlerts.enabled}
-              onChange={e => setStockAlerts(prev => ({ ...prev, enabled: e.target.checked }))}
-              style={{ width: 18, height: 18, accentColor: 'var(--primary)' }} />
-            Show low-stock alerts
-          </label>
-          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', flex: 1, minWidth: 200 }}>
-            {stockAlerts.enabled
-              ? 'Notifications fire when a product\'s stock falls to or below the threshold.'
-              : 'Alerts are silenced. Inventory still tracks stock; it just doesn\'t nag you.'}
-          </span>
-        </div>
-
-        {/* Threshold — chip presets + fine-tune input, only shown when enabled */}
-        {stockAlerts.enabled && (
-          <div style={{ marginBottom: '0.85rem' }}>
-            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '0.55rem' }}>
-              <label style={{ fontSize: '0.85rem', fontWeight: 600 }}>Threshold</label>
-              <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                Alert when stock ≤ <strong style={{ color: 'var(--text)' }}>{stockAlerts.threshold}</strong>
-              </span>
-            </div>
-            <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
-              {[
-                { val: 0, label: '0', hint: 'Only when fully out' },
-                { val: 3, label: '3', hint: 'Very tight' },
-                { val: 5, label: '5', hint: 'Recommended' },
-                { val: 10, label: '10', hint: 'Loose' },
-              ].map(p => {
-                const active = stockAlerts.threshold === p.val;
-                return (
-                  <button key={p.val} type="button"
-                    onClick={() => setStockAlerts(prev => ({ ...prev, threshold: p.val }))}
-                    title={p.hint}
-                    style={{
-                      padding: '0.45rem 0.85rem',
-                      borderRadius: 999,
-                      background: active
-                        ? 'linear-gradient(135deg, var(--primary), var(--primary-darker))'
-                        : 'var(--bg-secondary)',
-                      color: active ? '#fff' : 'var(--text)',
-                      border: active ? '1px solid transparent' : '1px solid var(--border)',
-                      fontSize: '0.85rem', fontWeight: 700,
-                      cursor: 'pointer',
-                      transition: 'all 0.15s',
-                      minWidth: 44,
-                      boxShadow: active ? '0 4px 10px rgba(var(--primary-rgb), 0.35)' : 'none',
-                    }}>
-                    {p.label}
-                    <span style={{ display: 'block', fontSize: '0.6rem', fontWeight: 500, opacity: 0.85, marginTop: 1 }}>{p.hint}</span>
-                  </button>
-                );
-              })}
-              <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginLeft: '0.4rem' }}>or</span>
-              <input type="number" min="0" max="9999" step="1"
-                className="form-input" style={{ width: 90 }}
-                value={stockAlerts.threshold}
-                onChange={e => setStockAlerts(prev => ({ ...prev, threshold: Math.max(0, parseInt(e.target.value, 10) || 0) }))} />
-            </div>
-          </div>
-        )}
-
-        <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '0.75rem' }}>
-          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-            Changes take effect after saving
-          </span>
-          <button type="button" className="btn btn-primary"
-            disabled={stockAlertsSaving}
-            onClick={async () => {
-              setStockAlertsSaving(true);
-              try {
-                await saveStockAlertSettings(stockAlerts);
-                toast('Low-stock alert settings saved', 'success');
-              } catch { toast('Failed to save', 'error'); }
-              setStockAlertsSaving(false);
-            }}>
-            <Save size={16} /> {stockAlertsSaving ? 'Saving…' : 'Save'}
-          </button>
-        </div>
-      </div>
-
-      {/* ---- Thermal Printer Settings ---- */}
-      <div id="section-print" style={{ order: 4 }}><PrintSettings /></div>
-
-      {/* v1.9.5 — Backup Management + Trash Bin */}
-      <div id="section-backups" style={{ order: 8 }}><BackupAndTrashPanel /></div>
-
-      {/* ---- Modules / Features ---- */}
-      <div id="section-modules" className="glass-panel p-6 mb-6" style={{ order: 5 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
-          <div>
-            <h3 className="section-title" style={{ marginTop: 0, marginBottom: '0.25rem' }}>Modules</h3>
-            <p style={{ fontSize: '0.8rem', color: '#64748b', margin: 0 }}>
-              Turn off the features you don't need. They disappear from the sidebar and forms — your data stays untouched.
-            </p>
-          </div>
-          <button type="button" className="btn btn-secondary" onClick={resetModules} style={{ fontSize: '0.78rem', padding: '0.35rem 0.7rem' }}>
-            Reset to default
-          </button>
-        </div>
-        <div style={{ marginTop: '1rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '0.75rem' }}>
-          {FEATURE_GROUPS.map(group => (
-            <div key={group.id} className="surface-card">
-              <div style={{ fontWeight: 600, fontSize: '0.85rem', color: 'var(--text-primary)', marginBottom: '0.15rem' }}>{group.label}</div>
-              <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', margin: '0 0 0.6rem' }}>{group.description}</p>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                {group.modules.map(mod => {
-                  const enabled = isModuleEnabled(mod.id, enabledModules);
-                  // Hide India-only modules entirely when region is "international" — toggling
-                  // them on wouldn't have any effect.
-                  if (mod.indiaOnly && regionMode === 'international') return null;
-                  return (
-                    <label key={mod.id} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', fontSize: '0.78rem', cursor: mod.core ? 'not-allowed' : 'pointer', opacity: mod.core ? 0.55 : 1 }}>
-                      <input type="checkbox" checked={enabled} disabled={mod.core}
-                        onChange={() => !mod.core && toggleModule(mod.id)}
-                        style={{ width: 15, height: 15, accentColor: 'var(--primary)', marginTop: '2px' }} />
-                      <span style={{ lineHeight: 1.35 }}>
-                        {mod.label}
-                        {mod.core && <span style={{ fontSize: '0.65rem', color: '#94a3b8', marginLeft: '0.4rem' }}>(always on)</span>}
-                        {mod.indiaOnly && <span style={{ fontSize: '0.65rem', color: '#94a3b8', marginLeft: '0.4rem' }} title="India-only feature">🇮🇳</span>}
-                      </span>
-                    </label>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* ---- Region Preference ---- */}
-      <div id="section-region" className="glass-panel p-6 mb-6" style={{ order: 7 }}>
-        <h3 className="section-title" style={{ marginTop: 0 }}>Region Preference</h3>
-        <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '0.85rem' }}>
-          Choose how the app behaves. You can change this any time without losing data.
-        </p>
-        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-          {[
-            { id: 'india', label: '🇮🇳 India only', desc: 'GST flows, INR-first, GSTR-1/3B, E-Way Bill, UPI QR' },
-            { id: 'international', label: '🌍 International', desc: 'VAT/SST/TVA labels, multi-currency, no India-only flows' },
-            { id: 'both', label: '🌐 Both / Auto', desc: 'Show all countries — pick per invoice (default)' },
-          ].map(opt => (
-            <button key={opt.id} type="button"
-              onClick={() => handleRegionChange(opt.id)}
-              className={`type-chip ${regionMode === opt.id ? 'type-chip-active' : ''}`}
-              title={opt.desc}
-              style={{ flex: '1 1 200px', minWidth: '200px', textAlign: 'left', padding: '0.6rem 0.85rem', display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '0.2rem' }}>
-              <span style={{ fontWeight: 600 }}>{opt.label}</span>
-              <span style={{ fontSize: '0.72rem', color: regionMode === opt.id ? 'inherit' : '#94a3b8', fontWeight: 400 }}>{opt.desc}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* ---- Business Profile ---- */}
-      <form id="section-company" onSubmit={handleSave} className="glass-panel p-6 mb-6" ref={companyFormRef} style={{ order: 1 }}>
+      {/* ---- Company Details ---- */}
+      <form id="section-company" onSubmit={handleSave} className="glass-panel p-6 mb-6" ref={companyFormRef}>
         <h3 className="section-title">Company Details</h3>
         {(() => {
           const cc = getCountryConfig(profile.country);
@@ -945,7 +667,6 @@ export default function SettingsView({ onSaved }) {
               <div className="form-group">
                 <label className="form-label">Country</label>
                 <select name="country" className="form-input" value={profile.country || 'India'} onChange={handleChange}>
-                  {/* If the saved country is filtered out by the region toggle, keep it visible. */}
                   {profile.country && !visibleCountries.some(c => c.name === profile.country) && (
                     <option value={profile.country}>{profile.country}</option>
                   )}
@@ -996,10 +717,6 @@ export default function SettingsView({ onSaved }) {
                 <label className="form-label">Phone</label>
                 <input type="text" name="phone" className="form-input" value={profile.phone} onChange={handleChange} />
               </div>
-              {/* v1.10.43 — GST-specific fields: AATO band + turnover
-                  numbers. Drive the GSTR-1 export's HSN digit-length
-                  gate + the gt/cur_gt root fields the offline utility
-                  requires. India-only. */}
               {(profile.country || 'India') === 'India' && (
                 <div className="form-group full-width" style={{ background: 'var(--bg-secondary)', padding: '0.85rem 1rem', borderRadius: 8, border: '1px solid var(--border)' }}>
                   <label className="form-label" style={{ marginBottom: 6 }}>GSTR filing details (used only for GSTR-1 / GSTR-3B JSON export)</label>
@@ -1039,12 +756,9 @@ export default function SettingsView({ onSaved }) {
           );
         })()}
 
-        {/* ---- Payment Accounts ---- */}
         {(() => {
           const bankCC = getCountryConfig(profile.country);
           const isIndia = (profile.country || 'India') === 'India';
-          // Show real accounts only — never the synthesised legacy entry, since this
-          // panel is for editing the persistent array.
           const accounts = (profile.paymentAccounts || []).filter(a => a && a.id !== 'legacy');
           const hasLegacyFlat = !accounts.length && (profile.bankName || profile.accountNumber || profile.ifsc || profile.swift || profile.upiId);
           return (
@@ -1062,7 +776,6 @@ export default function SettingsView({ onSaved }) {
                 </button>
               </div>
 
-              {/* Migration banner — one-time prompt to lift the legacy flat fields into the new array. */}
               {hasLegacyFlat && (
                 <div className="notice notice-warn" style={{ marginTop: '0.85rem' }}>
                   <span className="notice-icon">📋</span>
@@ -1077,7 +790,6 @@ export default function SettingsView({ onSaved }) {
                 </div>
               )}
 
-              {/* Empty state — no accounts AND no legacy fields */}
               {accounts.length === 0 && !hasLegacyFlat && (
                 <div className="surface-card" style={{ marginTop: '0.85rem', textAlign: 'center', padding: '1.5rem' }}>
                   <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: 0 }}>
@@ -1086,7 +798,6 @@ export default function SettingsView({ onSaved }) {
                 </div>
               )}
 
-              {/* Account list */}
               {accounts.length > 0 && (
                 <div style={{ marginTop: '0.85rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                   {accounts.map((a, idx) => (
@@ -1122,7 +833,6 @@ export default function SettingsView({ onSaved }) {
                 </div>
               )}
 
-              {/* PAN sits OUTSIDE the accounts list because it's profile-level, not per-account */}
               {isIndia && (
                 <div className="form-group" style={{ marginTop: '1rem', maxWidth: '300px' }}>
                   <label className="form-label">PAN Number (business-level)</label>
@@ -1130,7 +840,6 @@ export default function SettingsView({ onSaved }) {
                 </div>
               )}
 
-              {/* Add/Edit modal */}
               {editingAccount && (
                 <div className="modal-overlay" onClick={cancelAccount}>
                   <div className="modal-content" style={{ maxWidth: '560px' }} onClick={e => e.stopPropagation()}>
@@ -1142,13 +851,6 @@ export default function SettingsView({ onSaved }) {
                           onChange={e => setEditingAccount(a => ({ ...a, label: e.target.value }))}
                           placeholder="e.g. HDFC Current — 1234" />
                       </div>
-                      {/* v1.10.37 — Account Holder Name + Account Type
-                          added. Reported: clients get "beneficiary name
-                          mismatch" errors on NEFT/RTGS when the account
-                          name differs from the trading name (common for
-                          proprietorships, HUFs, abbreviated Pvt Ltd
-                          names). Both fields are optional and print on
-                          the invoice PDF when filled. */}
                       <div className="form-group" style={{ gridColumn: 'span 2' }}>
                         <label className="form-label">Account Holder Name <span style={{ fontWeight: 400, color: 'var(--text-muted)', fontSize: '0.72rem' }}>(name printed on the cheque / registered with the bank)</span></label>
                         <input type="text" className="form-input" value={editingAccount.accountHolderName || ''}
@@ -1231,7 +933,6 @@ export default function SettingsView({ onSaved }) {
           );
         })()}
 
-        {/* Invoice Number Format */}
         <h3 className="section-title mt-8"><Hash size={18} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 6 }} />Invoice Number Format</h3>
         <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, padding: '1rem 1.25rem', marginBottom: '1rem' }}>
           <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: '0 0 0.5rem' }}>Preview:</p>
@@ -1261,13 +962,6 @@ export default function SettingsView({ onSaved }) {
           </div>
         </div>
 
-        {/* v1.10.36 — Progressive disclosure. Prior UI showed 5 fields
-             unconditionally (format + prefix + separator + fin-year +
-             padding). For 95% of users the branded-sequential + `/` +
-             4-digit + fin-year default is fine — most never need to
-             touch these. Wrapped in <details> so the form loads clean
-             and users open the drawer only if they want custom prefix
-             (e.g. their brand initials) or different padding. */}
         <details style={{ marginTop: '0.5rem', border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg-secondary)' }}>
           <summary style={{ padding: '0.65rem 0.85rem', cursor: 'pointer', fontSize: '0.82rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
             ⚙ Customize prefix, separator & padding
@@ -1329,7 +1023,6 @@ export default function SettingsView({ onSaved }) {
           </button>
         </div>
 
-        {/* Logo & Signature */}
         <h3 className="section-title mt-8">Branding</h3>
         <div className="grid grid-cols-2 gap-4">
           <div className="form-group">
@@ -1386,12 +1079,7 @@ export default function SettingsView({ onSaved }) {
       </form>
 
       {/* ---- Multi-Business Profiles ---- */}
-      {/* v1.10.36 — Moved from ~line 1300 (was 500+ lines below the
-           Company Details form) to sit immediately after it. Natural
-           flow: fill Company Details → Save as Profile → see it in the
-           switcher below. Prior placement forced users to scroll past
-           9 sections to find the switcher. */}
-      <div id="section-profiles" className="glass-panel p-6 mb-6" style={{ order: 2 }}>
+      <div id="section-profiles" className="glass-panel p-6 mb-6">
         <div className="flex justify-between items-center mb-4">
           <h3 className="section-title" style={{ margin: 0 }}>Business Profiles</h3>
           <div className="flex gap-2">
@@ -1442,83 +1130,8 @@ export default function SettingsView({ onSaved }) {
         )}
       </div>
 
-      {/* ---- Cloud Backup ---- */}
-      <div id="section-cloud" className="glass-panel p-6 mb-6" style={{ order: 9 }}>
-        <h3 className="section-title">Cloud Backup (Google Drive)</h3>
-        <p className="page-subtitle mb-4">
-          Auto-sync your invoices to Google Drive — no coding or API setup needed.
-        </p>
-
-        {/* Easy method */}
-        <div style={{ background: 'var(--bg-secondary, #f8fafc)', borderRadius: '10px', padding: '1.25rem', marginBottom: '1rem', border: '1px solid var(--border)' }}>
-          <h4 style={{ fontSize: '0.95rem', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <Cloud size={18} color="var(--primary)" /> Easiest Way — Google Drive for Desktop (Recommended)
-          </h4>
-          <ol style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: 1.8, paddingLeft: '1.25rem', margin: 0 }}>
-            <li>
-              <a href="https://www.google.com/drive/download/" target="_blank" rel="noopener noreferrer"
-                style={{ color: 'var(--primary)', fontWeight: 600 }}>
-                Download Google Drive for Desktop
-              </a> (free from Google) and install it
-            </li>
-            <li>Sign in with your Google account — a <strong>Google Drive (G:)</strong> folder appears on your PC</li>
-            <li>Move your app's <strong>Saved Invoices</strong> folder into Google Drive, or set Windows to sync it</li>
-            <li>Done! All PDFs automatically sync to your Google Drive cloud</li>
-          </ol>
-          <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.75rem', marginBottom: 0 }}>
-            Your invoices will be accessible from any device, phone, or computer via drive.google.com. No API key needed.
-          </p>
-        </div>
-
-        {/* Advanced API method - collapsible */}
-        <details style={{ fontSize: '0.85rem' }}>
-          <summary style={{ cursor: 'pointer', color: 'var(--text-muted)', fontSize: '0.82rem', padding: '0.5rem 0' }}>
-            Advanced: Direct API Upload (for developers)
-          </summary>
-          <div style={{ paddingTop: '0.75rem' }}>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="form-group full-width">
-                <label className="form-label">Google OAuth Client ID</label>
-                <input type="text" name="googleClientId" className="form-input" value={profile.googleClientId} onChange={handleChange}
-                  placeholder="xxxx.apps.googleusercontent.com" />
-                <p className="field-hint">
-                  <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer"
-                    style={{ color: 'var(--primary)' }}>Open Google Cloud Console</a> &rarr; Create Project &rarr; Enable Drive API &rarr; Create OAuth Client ID (Web app) &rarr; Add <code>http://localhost:5173</code> as origin.
-                </p>
-              </div>
-              <div className="form-group">
-                <label className="form-label">Drive Folder Name</label>
-                <input type="text" name="googleDriveFolder" className="form-input" value={profile.googleDriveFolder} onChange={handleChange}
-                  placeholder="GST Billing Invoices" />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Status</label>
-                <div className="flex gap-2 mt-2">
-                  {driveConnected ? (
-                    <>
-                      <span className="status-badge" style={{ background: 'var(--info-bg)', color: 'var(--info-text)' }}>
-                        <Cloud size={14} /> Connected
-                      </span>
-                      <button type="button" className="btn btn-secondary" style={{ padding: '0.4rem 0.75rem', fontSize: '0.8rem' }}
-                        onClick={handleDisconnectDrive}>
-                        <CloudOff size={14} /> Disconnect
-                      </button>
-                    </>
-                  ) : (
-                    <button type="button" className="btn btn-primary" style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
-                      onClick={handleConnectDrive} disabled={connecting}>
-                      <Cloud size={16} /> {connecting ? 'Connecting...' : 'Connect Google Drive'}
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-        </details>
-      </div>
-
       {/* ---- Terms Templates ---- */}
-      <div id="section-terms" className="glass-panel p-6 mb-6" style={{ order: 3 }}>
+      <div id="section-terms" className="glass-panel p-6 mb-6">
         <div className="flex justify-between items-center mb-4">
           <h3 className="section-title" style={{ margin: 0 }}>Terms & Conditions Templates</h3>
           <button type="button" className="btn btn-secondary" onClick={() => setEditingTemplate({ id: '', name: '', content: '' })}>
@@ -1527,7 +1140,6 @@ export default function SettingsView({ onSaved }) {
         </div>
         <p className="page-subtitle mb-4">Create reusable templates or pick from ready-made ones below.</p>
 
-        {/* Quick Templates */}
         {!editingTemplate && (
           <div className="quick-templates-section">
             <p className="form-label" style={{ marginBottom: '0.5rem' }}>Quick Start — Pick a template for your business:</p>
@@ -1592,13 +1204,285 @@ export default function SettingsView({ onSaved }) {
         )}
       </div>
 
-      {/* v1.10.36 — Multi-Business Profiles block relocated above,
-           immediately after the Company Details form. Placeholder here
-           kept as a comment so a code search for "Multi-Business
-           Profiles" still lands somewhere sensible. */}
+      {/* ---- Thermal Printer Settings ---- */}
+      <div id="section-print"><PrintSettings /></div>
 
+      {/* ---- Modules / Features ---- */}
+      <div id="section-modules" className="glass-panel p-6 mb-6">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
+          <div>
+            <h3 className="section-title" style={{ marginTop: 0, marginBottom: '0.25rem' }}>Modules</h3>
+            <p style={{ fontSize: '0.8rem', color: '#64748b', margin: 0 }}>
+              Turn off the features you don't need. They disappear from the sidebar and forms — your data stays untouched.
+            </p>
+          </div>
+          <button type="button" className="btn btn-secondary" onClick={resetModules} style={{ fontSize: '0.78rem', padding: '0.35rem 0.7rem' }}>
+            Reset to default
+          </button>
+        </div>
+        <div style={{ marginTop: '1rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '0.75rem' }}>
+          {FEATURE_GROUPS.map(group => (
+            <div key={group.id} className="surface-card">
+              <div style={{ fontWeight: 600, fontSize: '0.85rem', color: 'var(--text-primary)', marginBottom: '0.15rem' }}>{group.label}</div>
+              <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', margin: '0 0 0.6rem' }}>{group.description}</p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                {group.modules.map(mod => {
+                  const enabled = isModuleEnabled(mod.id, enabledModules);
+                  if (mod.indiaOnly && regionMode === 'international') return null;
+                  return (
+                    <label key={mod.id} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', fontSize: '0.78rem', cursor: mod.core ? 'not-allowed' : 'pointer', opacity: mod.core ? 0.55 : 1 }}>
+                      <input type="checkbox" checked={enabled} disabled={mod.core}
+                        onChange={() => !mod.core && toggleModule(mod.id)}
+                        style={{ width: 15, height: 15, accentColor: 'var(--primary)', marginTop: '2px' }} />
+                      <span style={{ lineHeight: 1.35 }}>
+                        {mod.label}
+                        {mod.core && <span style={{ fontSize: '0.65rem', color: '#94a3b8', marginLeft: '0.4rem' }}>(always on)</span>}
+                        {mod.indiaOnly && <span style={{ fontSize: '0.65rem', color: '#94a3b8', marginLeft: '0.4rem' }} title="India-only feature">🇮🇳</span>}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* ---- Stock Alerts ---- */}
+      <div id="section-stock" className="glass-panel p-6 mb-6">
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.9rem', marginBottom: '0.9rem' }}>
+          <div style={{
+            width: 40, height: 40, flexShrink: 0,
+            borderRadius: 10,
+            background: 'rgba(245, 158, 11, 0.18)',
+            color: '#d97706',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: '1.15rem',
+          }}>🔔</div>
+          <div>
+            <h3 className="section-title" style={{ marginTop: 0, marginBottom: '0.25rem' }}>Low-stock alerts</h3>
+            <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: 0 }}>
+              Powers the 🔔 sidebar badge and the Dashboard low-stock list. The Inventory page colour-codes products against this threshold too.
+            </p>
+          </div>
+        </div>
+
+        <div style={{
+          padding: '0.75rem 0.9rem',
+          background: 'var(--bg-secondary)',
+          borderRadius: 8,
+          display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap',
+          marginBottom: stockAlerts.enabled ? '0.85rem' : 0,
+        }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', cursor: 'pointer', fontSize: '0.88rem', fontWeight: 600 }}>
+            <input type="checkbox" checked={!!stockAlerts.enabled}
+              onChange={e => setStockAlerts(prev => ({ ...prev, enabled: e.target.checked }))}
+              style={{ width: 18, height: 18, accentColor: 'var(--primary)' }} />
+            Show low-stock alerts
+          </label>
+          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', flex: 1, minWidth: 200 }}>
+            {stockAlerts.enabled
+              ? 'Notifications fire when a product\'s stock falls to or below the threshold.'
+              : 'Alerts are silenced. Inventory still tracks stock; it just doesn\'t nag you.'}
+          </span>
+        </div>
+
+        {stockAlerts.enabled && (
+          <div style={{ marginBottom: '0.85rem' }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '0.55rem' }}>
+              <label style={{ fontSize: '0.85rem', fontWeight: 600 }}>Threshold</label>
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                Alert when stock ≤ <strong style={{ color: 'var(--text)' }}>{stockAlerts.threshold}</strong>
+              </span>
+            </div>
+            <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
+              {[
+                { val: 0, label: '0', hint: 'Only when fully out' },
+                { val: 3, label: '3', hint: 'Very tight' },
+                { val: 5, label: '5', hint: 'Recommended' },
+                { val: 10, label: '10', hint: 'Loose' },
+              ].map(p => {
+                const active = stockAlerts.threshold === p.val;
+                return (
+                  <button key={p.val} type="button"
+                    onClick={() => setStockAlerts(prev => ({ ...prev, threshold: p.val }))}
+                    title={p.hint}
+                    style={{
+                      padding: '0.45rem 0.85rem',
+                      borderRadius: 999,
+                      background: active
+                        ? 'linear-gradient(135deg, var(--primary), var(--primary-darker))'
+                        : 'var(--bg-secondary)',
+                      color: active ? '#fff' : 'var(--text)',
+                      border: active ? '1px solid transparent' : '1px solid var(--border)',
+                      fontSize: '0.85rem', fontWeight: 700,
+                      cursor: 'pointer',
+                      transition: 'all 0.15s',
+                      minWidth: 44,
+                      boxShadow: active ? '0 4px 10px rgba(var(--primary-rgb), 0.35)' : 'none',
+                    }}>
+                    {p.label}
+                    <span style={{ display: 'block', fontSize: '0.6rem', fontWeight: 500, opacity: 0.85, marginTop: 1 }}>{p.hint}</span>
+                  </button>
+                );
+              })}
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginLeft: '0.4rem' }}>or</span>
+              <input type="number" min="0" max="9999" step="1"
+                className="form-input" style={{ width: 90 }}
+                value={stockAlerts.threshold}
+                onChange={e => setStockAlerts(prev => ({ ...prev, threshold: Math.max(0, parseInt(e.target.value, 10) || 0) }))} />
+            </div>
+          </div>
+        )}
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '0.75rem' }}>
+          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+            Changes take effect after saving
+          </span>
+          <button type="button" className="btn btn-primary"
+            disabled={stockAlertsSaving}
+            onClick={async () => {
+              setStockAlertsSaving(true);
+              try {
+                await saveStockAlertSettings(stockAlerts);
+                toast('Low-stock alert settings saved', 'success');
+              } catch { toast('Failed to save', 'error'); }
+              setStockAlertsSaving(false);
+            }}>
+            <Save size={16} /> {stockAlertsSaving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+
+      {/* ---- Region Preference ---- */}
+      <div id="section-region" className="glass-panel p-6 mb-6">
+        <h3 className="section-title" style={{ marginTop: 0 }}>Region Preference</h3>
+        <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '0.85rem' }}>
+          Choose how the app behaves. You can change this any time without losing data.
+        </p>
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+          {[
+            { id: 'india', label: '🇮🇳 India only', desc: 'GST flows, INR-first, GSTR-1/3B, E-Way Bill, UPI QR' },
+            { id: 'international', label: '🌍 International', desc: 'VAT/SST/TVA labels, multi-currency, no India-only flows' },
+            { id: 'both', label: '🌐 Both / Auto', desc: 'Show all countries — pick per invoice (default)' },
+          ].map(opt => (
+            <button key={opt.id} type="button"
+              onClick={() => handleRegionChange(opt.id)}
+              className={`type-chip ${regionMode === opt.id ? 'type-chip-active' : ''}`}
+              title={opt.desc}
+              style={{ flex: '1 1 200px', minWidth: '200px', textAlign: 'left', padding: '0.6rem 0.85rem', display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '0.2rem' }}>
+              <span style={{ fontWeight: 600 }}>{opt.label}</span>
+              <span style={{ fontSize: '0.72rem', color: regionMode === opt.id ? 'inherit' : '#94a3b8', fontWeight: 400 }}>{opt.desc}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ---- Backup Management + Trash Bin ---- */}
+      <div id="section-backups"><BackupAndTrashPanel /></div>
+
+      {/* ---- Cloud Backup ---- */}
+      <div id="section-cloud" className="glass-panel p-6 mb-6">
+        <h3 className="section-title">Cloud Backup (Google Drive)</h3>
+        <p className="page-subtitle mb-4">
+          Auto-sync your invoices to Google Drive — no coding or API setup needed.
+        </p>
+
+        <div style={{ background: 'var(--bg-secondary, #f8fafc)', borderRadius: '10px', padding: '1.25rem', marginBottom: '1rem', border: '1px solid var(--border)' }}>
+          <h4 style={{ fontSize: '0.95rem', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <Cloud size={18} color="var(--primary)" /> Easiest Way — Google Drive for Desktop (Recommended)
+          </h4>
+          <ol style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: 1.8, paddingLeft: '1.25rem', margin: 0 }}>
+            <li>
+              <a href="https://www.google.com/drive/download/" target="_blank" rel="noopener noreferrer"
+                style={{ color: 'var(--primary)', fontWeight: 600 }}>
+                Download Google Drive for Desktop
+              </a> (free from Google) and install it
+            </li>
+            <li>Sign in with your Google account — a <strong>Google Drive (G:)</strong> folder appears on your PC</li>
+            <li>Move your app's <strong>Saved Invoices</strong> folder into Google Drive, or set Windows to sync it</li>
+            <li>Done! All PDFs automatically sync to your Google Drive cloud</li>
+          </ol>
+          <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.75rem', marginBottom: 0 }}>
+            Your invoices will be accessible from any device, phone, or computer via drive.google.com. No API key needed.
+          </p>
+        </div>
+
+        <details style={{ fontSize: '0.85rem' }}>
+          <summary style={{ cursor: 'pointer', color: 'var(--text-muted)', fontSize: '0.82rem', padding: '0.5rem 0' }}>
+            Advanced: Direct API Upload (for developers)
+          </summary>
+          <div style={{ paddingTop: '0.75rem' }}>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="form-group full-width">
+                <label className="form-label">Google OAuth Client ID</label>
+                <input type="text" name="googleClientId" className="form-input" value={profile.googleClientId} onChange={handleChange}
+                  placeholder="xxxx.apps.googleusercontent.com" />
+                <p className="field-hint">
+                  <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer"
+                    style={{ color: 'var(--primary)' }}>Open Google Cloud Console</a> &rarr; Create Project &rarr; Enable Drive API &rarr; Create OAuth Client ID (Web app) &rarr; Add <code>http://localhost:5173</code> as origin.
+                </p>
+              </div>
+              <div className="form-group">
+                <label className="form-label">Drive Folder Name</label>
+                <input type="text" name="googleDriveFolder" className="form-input" value={profile.googleDriveFolder} onChange={handleChange}
+                  placeholder="GST Billing Invoices" />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Status</label>
+                <div className="flex gap-2 mt-2">
+                  {driveConnected ? (
+                    <>
+                      <span className="status-badge" style={{ background: 'var(--info-bg)', color: 'var(--info-text)' }}>
+                        <Cloud size={14} /> Connected
+                      </span>
+                      <button type="button" className="btn btn-secondary" style={{ padding: '0.4rem 0.75rem', fontSize: '0.8rem' }}
+                        onClick={handleDisconnectDrive}>
+                        <CloudOff size={14} /> Disconnect
+                      </button>
+                    </>
+                  ) : (
+                    <button type="button" className="btn btn-primary" style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
+                      onClick={handleConnectDrive} disabled={connecting}>
+                      <Cloud size={16} /> {connecting ? 'Connecting...' : 'Connect Google Drive'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </details>
+      </div>
+
+      {/* ---- Data Management ---- */}
+      <div id="section-data" className="glass-panel p-6 mb-6">
+        <h3 className="section-title">Data Management</h3>
+
+        <div className="notice notice-info" style={{ marginBottom: '1rem' }}>
+          <span className="notice-icon">🔒</span>
+          <div>
+            <strong>Your data is on this computer only.</strong> Nothing is uploaded to
+            us, our servers, or any third party — not invoices, not clients, not
+            settings. The only time anything leaves your machine is if you explicitly
+            click <em>Save to Drive</em> below (uploads to <strong>your own</strong>
+            Google Drive account).
+            Files live under <code>data/</code> and <code>Saved Invoices/</code> next to the app.
+          </div>
+        </div>
+
+        <p className="page-subtitle mb-6">
+          Choose what to back up or restore — invoices, clients, products, settings, custom units, or just specific parts.
+          Backup files are plain JSON you can keep on a USB drive, OneDrive, or your own Google Drive.
+        </p>
+        <div className="flex gap-4" style={{ flexWrap: 'wrap' }}>
+          <button type="button" className="btn btn-primary" onClick={() => setShowExportModal(true)}><Download size={18} /> Export Backup…</button>
+          <button type="button" className="btn btn-secondary" onClick={() => fileInputRef.current?.click()}><Upload size={18} /> Import Backup…</button>
+          <input ref={fileInputRef} type="file" accept=".json" onChange={handleImportPick} style={{ display: 'none' }} />
+        </div>
+      </div>
+      
       {/* ---- App Updates ---- */}
-      <div id="section-updates" className="glass-panel p-6 mb-6" style={{ order: 11 }}>
+      <div id="section-updates" className="glass-panel p-6 mb-6">
         <h3 className="section-title">App Updates</h3>
         <p className="page-subtitle mb-4">Check if a newer version is available.</p>
         <div className="flex gap-4 items-center">
@@ -1639,34 +1523,8 @@ export default function SettingsView({ onSaved }) {
         )}
       </div>
 
-      <div id="section-data" className="glass-panel p-6 mb-6" style={{ order: 10 }}>
-        <h3 className="section-title">Data Management</h3>
-
-        {/* Privacy notice — uses the global .notice .notice-info utility so dark/light look identical to every other info card. */}
-        <div className="notice notice-info" style={{ marginBottom: '1rem' }}>
-          <span className="notice-icon">🔒</span>
-          <div>
-            <strong>Your data is on this computer only.</strong> Nothing is uploaded to
-            us, our servers, or any third party — not invoices, not clients, not
-            settings. The only time anything leaves your machine is if you explicitly
-            click <em>Save to Drive</em> below (uploads to <strong>your own</strong>
-            Google Drive account).
-            Files live under <code>data/</code> and <code>Saved Invoices/</code> next to the app.
-          </div>
-        </div>
-
-        <p className="page-subtitle mb-6">
-          Choose what to back up or restore — invoices, clients, products, settings, custom units, or just specific parts.
-          Backup files are plain JSON you can keep on a USB drive, OneDrive, or your own Google Drive.
-        </p>
-        <div className="flex gap-4" style={{ flexWrap: 'wrap' }}>
-          <button type="button" className="btn btn-primary" onClick={() => setShowExportModal(true)}><Download size={18} /> Export Backup…</button>
-          <button type="button" className="btn btn-secondary" onClick={() => fileInputRef.current?.click()}><Upload size={18} /> Import Backup…</button>
-          <input ref={fileInputRef} type="file" accept=".json" onChange={handleImportPick} style={{ display: 'none' }} />
-        </div>
       </div>
 
-      {/* ----------------------- Export modal ----------------------- */}
       {showExportModal && (
         <div className="modal-overlay" onClick={() => !drivePending && setShowExportModal(false)}>
           <div className="modal-content" style={{ maxWidth: '600px' }} onClick={e => e.stopPropagation()}>
@@ -1690,7 +1548,6 @@ export default function SettingsView({ onSaved }) {
               ))}
             </div>
 
-            {/* Optional: Google Drive copy. Uses global cbx-row utility — identical dark/light. */}
             <label className="cbx-row" style={{ marginTop: '0.5rem' }}>
               <input type="checkbox" checked={exportToDrive} onChange={e => setExportToDrive(e.target.checked)} />
               <span>
@@ -1711,12 +1568,6 @@ export default function SettingsView({ onSaved }) {
         </div>
       )}
 
-      {/* v1.10.37 — end of flex-column reorder wrapper (opened after the
-           jump-nav). Modal below stays outside so its z-index isn't
-           captured by the flex context. */}
-      </div>
-
-      {/* ----------------------- Import modal ----------------------- */}
       {showImportModal && importInspection && (
         <div className="modal-overlay" onClick={() => setShowImportModal(false)}>
           <div className="modal-content" style={{ maxWidth: '600px' }} onClick={e => e.stopPropagation()}>
@@ -1775,9 +1626,6 @@ function EditIcon({ size }) {
   );
 }
 
-// ============================================================
-// v1.9.5 — Backup Management + Trash Bin
-// ============================================================
 function BackupAndTrashPanel() {
   const [backups, setBackups] = useState([]);
   const [trash, setTrash] = useState([]);
@@ -1840,8 +1688,6 @@ function BackupAndTrashPanel() {
     }
   };
 
-  // v1.10.22 — reported: "add here delete option i know u added 30 days
-  // auto delete but manual delete also u add". Individual backup delete.
   const handleDeleteBackup = async (date) => {
     if (!await confirmAction({
       title: `Delete backup ${date}?`,
@@ -1875,12 +1721,11 @@ function BackupAndTrashPanel() {
             toast('Manual backup triggered', 'success');
             loadAll();
           }}>
-          <SaveIcon size={14} /> Backup now
+          <Save size={14} /> Backup now
         </button>
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1rem', marginTop: '1rem' }}>
-        {/* Backups list */}
         <div style={{ padding: '0.85rem', background: 'var(--bg-secondary)', borderRadius: 8 }}>
           <h4 style={{ margin: '0 0 0.5rem', fontSize: '0.9rem' }}>📅 Daily backups ({backups.length})</h4>
           {loading && backups.length === 0 && <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>Loading…</p>}
@@ -1913,7 +1758,6 @@ function BackupAndTrashPanel() {
           </div>
         </div>
 
-        {/* Trash bin */}
         <div style={{ padding: '0.85rem', background: 'var(--bg-secondary)', borderRadius: 8 }}>
           <h4 style={{ margin: '0 0 0.5rem', fontSize: '0.9rem' }}>🗑 Trash bin ({trash.length})</h4>
           {loading && trash.length === 0 && <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>Loading…</p>}

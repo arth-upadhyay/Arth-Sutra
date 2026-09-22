@@ -1,41 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { AlertTriangle, Trash2, HelpCircle } from 'lucide-react';
 
-// v1.10.34 — In-app replacement for `window.confirm()` and `window.prompt()`.
-// The native dialogs look like OS chrome (title bar with the URL, generic
-// OK/Cancel buttons, no branding, no icon), which broke the product's
-// visual identity every time the user hit Delete on an invoice. Now every
-// destructive / decision-requiring action opens a proper themed modal that
-// matches the rest of the app.
-//
-// API mirrors the native calls so replacement is mechanical:
-//   BEFORE:  if (!confirm('Delete this invoice?')) return;
-//   AFTER:   if (!await confirmAction({ title: 'Delete invoice?', ... })) return;
-//
-//   BEFORE:  const v = window.prompt('Custom rate (%)', '12');
-//   AFTER:   const v = await promptAction({ title: 'Custom rate (%)', defaultValue: '12' });
-//
-// The container mounts once at App root. All active calls are queued; only
-// one modal shows at a time so the visual flow stays clean.
-
 let dispatchFn = null;
 
-/**
- * Open an in-app confirmation modal.
- *
- * @param {Object} options
- * @param {string} options.title - Bold headline of the modal
- * @param {string} [options.message] - Optional detail below the title
- * @param {string} [options.confirmLabel='Confirm'] - Text on the primary action button
- * @param {string} [options.cancelLabel='Cancel'] - Text on the secondary/dismiss button
- * @param {'danger'|'warning'|'default'} [options.tone='default'] - Colour scheme
- * @returns {Promise<boolean>} - true if user confirmed, false if cancelled or dismissed
- */
 export function confirmAction(options) {
   return new Promise((resolve) => {
     if (typeof dispatchFn !== 'function') {
-      // Container not mounted yet — fall back to native so calls made
-      // pre-mount don't silently return undefined.
       resolve(window.confirm(options?.message || options?.title || 'Are you sure?'));
       return;
     }
@@ -43,19 +13,6 @@ export function confirmAction(options) {
   });
 }
 
-/**
- * Open an in-app text-prompt modal.
- *
- * @param {Object} options
- * @param {string} options.title - Bold headline of the modal (what to enter)
- * @param {string} [options.message] - Optional hint below the title
- * @param {string} [options.defaultValue] - Prefilled input value
- * @param {string} [options.placeholder] - Input placeholder text
- * @param {string} [options.confirmLabel='OK'] - Text on the primary button
- * @param {string} [options.cancelLabel='Cancel'] - Text on the dismiss button
- * @param {'text'|'number'} [options.inputType='text'] - HTML input type
- * @returns {Promise<string|null>} - the entered string, or null on cancel
- */
 export function promptAction(options) {
   return new Promise((resolve) => {
     if (typeof dispatchFn !== 'function') {
@@ -82,22 +39,18 @@ export default function ConfirmModalContainer() {
     return () => { dispatchFn = null; };
   }, [dispatch]);
 
-  // Autofocus the input on prompt, or the confirm button on confirm.
   useEffect(() => {
     if (!modal) {
-      // Return focus to whatever was focused before the modal opened.
       previousActiveElement.current?.focus?.();
       previousActiveElement.current = null;
       return;
     }
     previousActiveElement.current = document.activeElement;
-    // Wait a tick so the modal is in the DOM before focusing.
     const t = setTimeout(() => {
       if (modal.kind === 'prompt' && inputRef.current) {
         inputRef.current.focus();
         inputRef.current.select();
       } else {
-        // Confirm modal — focus the primary button.
         const btn = document.querySelector('.confirm-modal-primary');
         btn?.focus?.();
       }
@@ -105,20 +58,17 @@ export default function ConfirmModalContainer() {
     return () => clearTimeout(t);
   }, [modal]);
 
-  // Keyboard: Enter → confirm, Esc → cancel.
   useEffect(() => {
     if (!modal) return;
     const onKey = (e) => {
       if (e.key === 'Escape') { e.preventDefault(); cancel(); }
       else if (e.key === 'Enter' && modal.kind === 'confirm') {
-        // Prompt handles Enter via its own form submit.
         e.preventDefault();
         confirm();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modal]);
 
   const cancel = useCallback(() => {

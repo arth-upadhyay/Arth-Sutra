@@ -5,16 +5,6 @@ import { formatCurrency, getFYOptions } from '../utils';
 import { toast } from './Toast';
 import { confirmAction } from './ConfirmModal';
 
-// Each category is tagged with its ITR (Income Tax Return) head so the
-// v1.7.0+ ITR Filing Summary can auto-aggregate expenses under the correct
-// P&L line. Users don't have to think about heads — they pick the category
-// they already understand.
-//   - 'business'      → deductible business expense under section 37
-//   - 'depreciation'  → section 32 (asset purchases, capitalised then
-//                       depreciated per Rule 5)
-//   - 'salary'        → separately tracked; declared under section 40A(2)(b)
-//                       for related parties
-//   - 'notDeductible' → personal / drawings / capital / non-business
 const EXPENSE_CATEGORIES = [
   { name: 'Office Rent',            itrHead: 'business' },
   { name: 'Utilities',              itrHead: 'business' },
@@ -47,10 +37,6 @@ const emptyForm = {
   amount: '',
   gstAmount: '',
   gstPercent: '',
-  // P1 #15: interstate flag. When on, ITC on GST paid routes to IGST in
-  // GSTR-3B Table 4(A) instead of splitting 50/50 into CGST + SGST. Real
-  // scenario: AWS / Google / Adobe / SaaS bills from out-of-state offices.
-  // Off = intrastate = supplier and buyer in the same state.
   interstate: false,
   vendorName: '',
   vendorGstin: '',
@@ -58,8 +44,6 @@ const emptyForm = {
   paymentMode: 'Bank Transfer',
   note: '',
 };
-
-// v1.10.6 — audit L4: local copy removed, imported from utils above.
 
 export default function ExpenseTracker() {
   const [expenses, setExpenses] = useState([]);
@@ -221,7 +205,6 @@ export default function ExpenseTracker() {
         </div>
       </div>
 
-      {/* Stats */}
       <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
         <div className="stat-card">
           <div className="stat-icon stat-icon-purple"><Wallet size={22} /></div>
@@ -237,7 +220,6 @@ export default function ExpenseTracker() {
         </div>
       </div>
 
-      {/* Filters */}
       <div className="glass-panel p-4 mb-6">
         <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
           <div className="search-box" style={{ maxWidth: '300px' }}>
@@ -258,7 +240,6 @@ export default function ExpenseTracker() {
         </div>
       </div>
 
-      {/* Add/Edit Modal */}
       {showForm && (
         <div className="modal-overlay" onClick={closeForm}>
           <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: '620px' }}>
@@ -339,7 +320,6 @@ export default function ExpenseTracker() {
         </div>
       )}
 
-      {/* Expense Table */}
       <div className="glass-panel">
         <div className="table-header"><h3>Expense Records</h3></div>
         {filtered.length === 0 ? (

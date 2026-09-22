@@ -130,7 +130,7 @@ body {
 }
 
 .sidebar-brand { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 2.5rem; padding: 0 0.5rem; }
-.sidebar-logo { width: 40px; height: 40px; border-radius: 10px; background: #4D7C0F; display: flex; align-items: center; justify-content: center; flex-shrink: 0; color: #FFFFFF; }
+.sidebar-logo { width: 40px; height: 40px; border-radius: 10px; background: var(--primary); display: flex; align-items: center; justify-content: center; flex-shrink: 0; color: #FFFFFF; }
 .sidebar-title { font-size: 1.15rem; font-weight: 700; margin: 0; color: #F8FAFC; letter-spacing: -0.02em; }
 .sidebar-subtitle { font-size: 0.7rem; color: #94a3b8; margin: 0; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 500; }
 .sidebar-nav { display: flex; flex-direction: column; gap: 0.25rem; flex: 1; }
@@ -208,7 +208,7 @@ body {
   cursor: pointer; transition: all 0.15s ease; text-align: left; font-family: inherit;
 }
 .nav-btn:hover { background: rgba(248, 250, 252, 0.08); color: #F8FAFC; }
-.nav-btn-active { background: #4D7C0F !important; color: #FFFFFF !important; box-shadow: 0 4px 12px rgba(77, 124, 15, 0.25); }
+.nav-btn-active { background: var(--primary) !important; color: #FFFFFF !important; box-shadow: 0 4px 12px rgba(var(--primary-rgb), 0.25); }
 .nav-btn-bottom { margin-top: auto; }
 
 .main-content { flex: 1; overflow-y: auto; padding: 2rem 2.5rem; display: flex; flex-direction: column; }
@@ -833,37 +833,31 @@ kbd {
 
 /* ========= Lock Screen — emerald theme + visible password ========= */
 
-/* Emerald gradient page background, applied only when the lock screen is
-   on screen. `:has()` matches when a password input exists anywhere in
-   the DOM — that's only the lock screen. */
-body:has(input[type="password"]) {
-  background: linear-gradient(135deg, #064e3b 0%, #047857 45%, #10b981 100%) !important;
+body:has(.lock-screen-active) {
+  background: linear-gradient(135deg, #064e3b 0%, #047857 45%, #10b981 100%);
 }
 
-/* Password field — dark text on white background so typing is visible.
-   Explicit caret-color so the blinking cursor shows too. */
-input[type="password"] {
-  background: #ffffff !important;
-  color: #0f172a !important;
-  border: 2px solid #10b981 !important;
+.lock-screen-active input[type="password"] {
+  background: #ffffff;
+  color: #0f172a;
+  border: 2px solid #10b981;
   caret-color: #059669;
   outline: none;
   font-size: 1rem;
   letter-spacing: 0.05em;
 }
-input[type="password"]::placeholder {
-  color: #94a3b8 !important;
+.lock-screen-active input[type="password"]::placeholder {
+  color: #94a3b8;
   letter-spacing: normal;
 }
-input[type="password"]:focus {
-  border-color: #059669 !important;
-  box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.22) !important;
+.lock-screen-active input[type="password"]:focus {
+  border-color: #059669;
+  box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.22);
 }
 
-/* The white card gets a stronger shadow so it pops on the emerald gradient */
-body:has(input[type="password"]) .modal-content,
-body:has(input[type="password"]) .lock-card,
-body:has(input[type="password"]) .lock-screen-card {
+body:has(.lock-screen-active) .modal-content,
+body:has(.lock-screen-active) .lock-card,
+body:has(.lock-screen-active) .lock-screen-card {
   background: #ffffff;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.1);
 }
@@ -992,7 +986,7 @@ body:has(input[type="password"]) .lock-screen-card {
 
 .invoice-preview-container {
   background: white;
-  min-height: 297mm; width: 210mm; margin: 0 auto;
+  margin: 0 auto;
   font-family: 'Inter', sans-serif; font-size: 12.5px; line-height: 1.45;
   color: #1a1a2e; position: relative;
   border: 1px solid #e5e7eb; border-radius: 4px;
@@ -1106,7 +1100,7 @@ body:has(input[type="password"]) .lock-screen-card {
   .print-settings-preview-pane { position: relative !important; top: auto !important; max-height: 600px !important; }
 }
 .print-settings-body { min-width: 0; }
-.print-settings-body * { overflow-wrap: anywhere; word-break: normal; }
+.print-settings-body p, .print-settings-body .field-hint { overflow-wrap: anywhere; word-break: normal; }
 .print-settings-body label,
 .print-settings-body select,
 .print-settings-body input { max-width: 100%; box-sizing: border-box; }
@@ -1203,8 +1197,7 @@ a:focus-visible { outline: 2px solid var(--primary) !important; outline-offset: 
 .paper-a5 table { font-size: 8.5px !important; }
 .paper-a5 th, .paper-a5 td { padding: 2px 4px !important; }
 .paper-a5 tr { line-height: 1.2 !important; }
-.paper-a5 .inv-table[style*="margin: 0 2rem"],
-.paper-a5 table[style*="margin: 0 2rem"] { margin: 0 6px !important; width: calc(100% - 12px) !important; }
+.paper-a5 .inv-table { margin: 0 6px !important; width: calc(100% - 12px) !important; }
 .paper-a5 .invoice-header-modern,
 .paper-a5 .invoice-header-classic,
 .paper-a5 .invoice-header-minimal { padding: 8px 12px !important; }

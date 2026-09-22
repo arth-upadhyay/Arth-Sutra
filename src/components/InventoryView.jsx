@@ -1,16 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
 import { Package, Search, Plus, Edit3, Trash2, X, Save, Upload } from 'lucide-react';
-import { getAllProducts, saveProduct, deleteProduct, getProfile, getStockAlertSettings } from '../store';
-import { getAllUnits, getCountryConfig, formatCurrency } from '../utils';
+import { getAllProducts, saveProduct, deleteProduct, getStockAlertSettings } from '../store';
+import { getAllUnits, formatCurrency } from '../utils';
 import { toast } from './Toast';
 import { confirmAction } from './ConfirmModal';
 
-// v1.10.29 — reported: "here purchase price and selling price need".
-// Product now carries BOTH: `purchasePrice` (what we paid the supplier) and
-// `sellingPrice` (what we charge the customer). Legacy `rate` field is
-// still written on save (mirrors sellingPrice) so any pre-v1.10.29 reader
-// still gets a valid number, but the form no longer edits it directly —
-// dead state removed for clarity.
 const emptyForm = {
   name: '', hsn: '', purchasePrice: '', sellingPrice: '', taxPercent: '', unit: 'Nos', stock: '', description: '',
 };
@@ -22,13 +16,6 @@ export default function InventoryView() {
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState({ ...emptyForm });
   const [units, setUnits] = useState(getAllUnits());
-  const [profileCountry, setProfileCountry] = useState('India');
-  const profileCurrency = getCountryConfig(profileCountry).currency;
-  // The colour-coded stock badge in the table respects the user's threshold
-  // — defaults to 5 if no setting saved yet. When alerts are disabled
-  // entirely, items at or below threshold render in the same plain colour
-  // as everything else (still "Out of Stock" red for 0 — that's a hard fact,
-  // not an alert preference).
   const [stockAlerts, setStockAlerts] = useState({ enabled: true, threshold: 5 });
 
   const loadProducts = async () => {
@@ -43,7 +30,6 @@ export default function InventoryView() {
   useEffect(() => {
     loadProducts();
     setUnits(getAllUnits());
-    getProfile().then(p => { if (p?.country) setProfileCountry(p.country); }).catch(() => {});
     getStockAlertSettings().then(setStockAlerts).catch(() => {});
   }, []);
 
@@ -61,13 +47,11 @@ export default function InventoryView() {
   };
 
   const openEdit = (product) => {
-    // v1.10.29 — Backward-compat: pre-v1.10.29 products only had `rate`.
-    // Read `sellingPrice` if set, else fall back to `rate`. `purchasePrice`
-    // is new — starts empty for legacy products until the user fills it.
     setForm({
       name: product.name || '',
       hsn: product.hsn || '',
       purchasePrice: product.purchasePrice ?? '',
+      // Legacy products only had `rate` — treat it as selling price.
       sellingPrice: product.sellingPrice ?? product.rate ?? '',
       taxPercent: product.taxPercent || '',
       unit: product.unit || 'Nos',
@@ -90,8 +74,6 @@ export default function InventoryView() {
       return;
     }
     try {
-      // v1.10.29 — Persist both prices. `rate` mirrors sellingPrice so any
-      // old caller reading .rate still gets the right number.
       const sellingPrice = form.sellingPrice ? parseFloat(form.sellingPrice) : 0;
       const purchasePrice = form.purchasePrice ? parseFloat(form.purchasePrice) : 0;
       const product = {
@@ -100,7 +82,7 @@ export default function InventoryView() {
         hsn: form.hsn.trim(),
         purchasePrice,
         sellingPrice,
-        rate: sellingPrice, // mirror for legacy readers
+        rate: sellingPrice, // legacy mirror
         taxPercent: form.taxPercent ? parseFloat(form.taxPercent) : 0,
         unit: form.unit,
         stock: form.stock ? parseFloat(form.stock) : 0,
@@ -168,13 +150,19 @@ export default function InventoryView() {
         headers.forEach((h, idx) => { row[h] = (values[idx] || '').trim(); });
         const name = row.name || row.product || row['product name'] || '';
         if (!name) continue;
+        const num = (v) => v ? parseFloat(v) || 0 : 0;
+        const sellingPrice = num(row.sellingprice || row['selling price'] || row.rate || row.price);
+        const purchasePrice = num(row.purchaseprice || row['purchase price'] || row.cost);
+        const taxPercent = num(row.taxpercent || row['tax%'] || row['gst%'] || row.tax);
         await saveProduct({
           name,
-          hsn: row.hsn || row['hsn code'] || row['sac'] || '',
-          rate: row.rate || row.price ? parseFloat(row.rate || row.price) || 0 : 0,
-          taxPercent: row.taxpercent || row['tax%'] || row['gst%'] || row['tax'] ? parseFloat(row.taxpercent || row['tax%'] || row['gst%'] || row['tax']) || 0 : 0,
+          hsn: row.hsn || row['hsn code'] || row.sac || '',
+          purchasePrice,
+          sellingPrice,
+          rate: sellingPrice, // legacy mirror
+          taxPercent,
           unit: row.unit || 'Nos',
-          stock: row.stock || row.quantity ? parseFloat(row.stock || row.quantity) || 0 : 0,
+          stock: num(row.stock || row.quantity),
           description: row.description || '',
         });
         imported++;
@@ -231,10 +219,6 @@ export default function InventoryView() {
                 <input type="text" className="form-input" value={form.hsn}
                   onChange={e => updateField('hsn', e.target.value)} placeholder="e.g. 998314" />
               </div>
-              {/* v1.10.29 — Purchase price + selling price side by side.
-                  Selling price seeds the invoice rate; purchase price seeds
-                  the purchase-bill rate. Legacy `rate` field kept invisible
-                  for backward compat — writes through to sellingPrice. */}
               <div className="form-group">
                 <label className="form-label">Purchase Price</label>
                 <input type="number" className="form-input" value={form.purchasePrice}
@@ -315,7 +299,12 @@ export default function InventoryView() {
                   <tr key={product.id}>
                     <td className="font-medium" title={product.description || ''}>{product.name}</td>
                     <td className="text-muted">{product.hsn || '-'}</td>
-                    <td className="font-bold">{product.rate ? formatCurrency(product.rate, profileCurrency) : '-'}</td>
+                    <td className="font-bold">{
+                      (() => {
+                        const r = product.sellingPrice ?? product.rate;
+                        return r ? formatCurrency(r) : '-';
+                      })()
+                    }</td>
                     <td>{product.taxPercent ? `${product.taxPercent}%` : '-'}</td>
                     <td className="text-muted">{product.unit || 'Nos'}</td>
                     <td>

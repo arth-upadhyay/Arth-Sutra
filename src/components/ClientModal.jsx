@@ -4,17 +4,13 @@ import { getCountryConfig, getStatesForCountry, validateTaxId, detectCountryFrom
 import { getRegionMode } from '../store';
 
 export default function ClientModal({ show, onClose, onSave, client, isEditing, defaultCountry }) {
-  // Country defaults: explicit prop (active business profile) → browser locale → 'India'.
   const fallbackCountry = defaultCountry || detectCountryFromBrowser();
   const emptyForm = {
     name: '', address: '', city: '', pin: '', state: '', gstin: '', email: '', phone: '',
     country: fallbackCountry, isSEZ: false,
-    // v1.9.1 — per-client print preferences. When set, they auto-populate
-    // invoiceOptions when the user creates a new invoice for this client.
-    // Left blank = use app-wide defaults.
-    preferredPaperSize: '',   // '' | 'a4' | 'a5' | 'thermal80' | ...
-    preferredCurrency: '',    // '' | 'INR' | 'USD' | ...
-    autoPrint: false,          // per-client auto-print override
+    preferredPaperSize: '',   
+    preferredCurrency: '',    
+    autoPrint: false,          
   };
   const [form, setForm] = useState({ ...emptyForm });
   const [taxIdWarning, setTaxIdWarning] = useState('');
@@ -34,7 +30,6 @@ export default function ClientModal({ show, onClose, onSave, client, isEditing, 
       setForm({ ...emptyForm });
     }
     setTaxIdWarning('');
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [show, client]);
 
   if (!show) return null;
@@ -129,9 +124,6 @@ export default function ClientModal({ show, onClose, onSave, client, isEditing, 
             </div>
           )}
 
-          {/* v1.9.1 — per-client print preferences. All optional; leave blank
-              to use the app-wide defaults from Settings. When set, they
-              auto-apply the next time an invoice is created for this client. */}
           <div className="form-group" style={{ gridColumn: 'span 2', paddingTop: '0.5rem', borderTop: '1px solid var(--border)', marginTop: '0.5rem' }}>
             <div style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.35rem' }}>
               Print preferences (optional)

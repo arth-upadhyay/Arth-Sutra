@@ -3,29 +3,15 @@ import { X, Printer, Download, Loader } from 'lucide-react';
 import InvoicePreview from './InvoicePreview';
 import { getPaperSize } from '../utils';
 
-// v1.10.36 — Portal-based print preview modal.
-//
-// Design decision (per user report on v1.10.35): DO NOT re-serialize
-// the receipt HTML into an iframe. The v1.10.35 approach did that
-// (clone outerHTML + copy document.styleSheets → iframe.srcdoc →
-// iframe.print()) and shrank the QR + degraded print quality because
-// CSS max-width caps beat inline widths, cross-origin fonts were
-// dropped, and CSS var(--*) inheritance broke.
-//
-// This modal is PURELY VISUAL. It renders <InvoicePreview> with the
-// EXACT SAME props the parent passes into the main on-screen preview
-// — same component, same code path, guaranteed identical output. When
-// the user clicks Print inside the modal, we DON'T print the modal's
-// DOM: we close the modal and call the parent's `onPrint` callback,
-// which triggers the existing directPrint → buildPDF → printViaIframe
-// pipeline. That path uses the parent's `printRef` (the ORIGINAL
-// on-screen preview) and has been the working, reliable path all along.
-//
-// So: the modal is what the user LOOKS at, and the parent's existing
-// on-screen preview is what the printer receives. Since both are
-// rendered by the same React component with the same props, the pixels
-// are the same. No CSS drift risk.
-
+/**
+ * Print preview modal.
+ *
+ * Renders <InvoicePreview> with the same props the parent passes to the
+ * on-screen preview — same component, same output. When the user clicks
+ * Print, the modal closes and calls the parent's `onPrint` callback,
+ * which runs the existing print pipeline against the on-screen preview
+ * via `printRef`.
+ */
 export default function PrintPreviewModal({
   isOpen, onClose, onPrint, onDownloadPdf,
   profile, client, details, items, totals, invoiceType,
@@ -34,7 +20,6 @@ export default function PrintPreviewModal({
   const [printing, setPrinting] = useState(false);
   const modalRef = useRef(null);
 
-  // Esc-to-close keyboard shortcut, matching every other modal in the app.
   useEffect(() => {
     if (!isOpen) return;
     const onKey = (e) => {
@@ -48,21 +33,12 @@ export default function PrintPreviewModal({
 
   const paperCfg = getPaperSize(invoiceOptions.paperSize, invoiceOptions);
   const paperLabel = paperCfg.label || `${paperCfg.widthMm}mm`;
-  const isThermal = paperCfg.kind === 'thermal';
 
   const handlePrint = async () => {
     if (printing) return;
     setPrinting(true);
     try {
-      // Close the modal BEFORE the print pipeline starts. The pipeline
-      // uses the parent's existing on-screen preview via printRef, so
-      // the modal doesn't need to stay open to keep the DOM alive.
-      // Closing first also lets the browser's native print dialog
-      // appear over a clean editor view instead of layered over our
-      // modal.
       onClose?.();
-      // Small tick so React commits the close before onPrint kicks off
-      // its own layout / html2canvas work.
       await new Promise(r => requestAnimationFrame(() => setTimeout(r, 20)));
       await onPrint?.();
     } finally {
@@ -82,11 +58,7 @@ export default function PrintPreviewModal({
     }
   };
 
-  // For thermal the preview scales to fit the modal since the receipt
-  // is very narrow (48-104mm) — a 1:1 view would show a strip that's
-  // dwarfed by the modal chrome. For A4 we show at ~70% so the whole
-  // page fits without scrolling on typical laptop viewports.
-  const previewScale = isThermal ? 1.6 : 0.72;
+  const previewScale = 0.72;
 
   return (
     <div className="modal-overlay print-preview-overlay"
@@ -96,13 +68,12 @@ export default function PrintPreviewModal({
       <div ref={modalRef} className="modal-content print-preview-content"
         onClick={(e) => e.stopPropagation()}
         style={{
-          maxWidth: isThermal ? 'min(520px, 96vw)' : 'min(900px, 96vw)',
+          maxWidth: 'min(900px, 96vw)',
           maxHeight: '92vh',
           padding: 0,
           display: 'flex', flexDirection: 'column',
           overflow: 'hidden',
         }}>
-        {/* Header */}
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           padding: '0.9rem 1.25rem',
@@ -125,10 +96,6 @@ export default function PrintPreviewModal({
           </button>
         </div>
 
-        {/* Preview area — the SAME InvoicePreview component + SAME props
-            as the main on-screen preview. React re-uses the render, so
-            what the user sees here is bit-for-bit what the print pipeline
-            will rasterize. */}
         <div style={{
           flex: 1, minHeight: 0,
           overflow: 'auto',
@@ -143,8 +110,6 @@ export default function PrintPreviewModal({
             borderRadius: 4,
             transform: `scale(${previewScale})`,
             transformOrigin: 'top center',
-            /* Compensate for the visual shrink of the scaled child so
-               the scrollable area matches the visible receipt height. */
             marginBottom: `${Math.round((1 - previewScale) * -400)}px`,
           }}>
             <InvoicePreview
@@ -157,7 +122,6 @@ export default function PrintPreviewModal({
           </div>
         </div>
 
-        {/* Actions */}
         <div style={{
           padding: '0.85rem 1.25rem',
           borderTop: '1px solid var(--border)',
@@ -166,9 +130,7 @@ export default function PrintPreviewModal({
           justifyContent: 'flex-end', alignItems: 'center',
         }}>
           <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginRight: 'auto' }}>
-            {isThermal
-              ? 'Preview is scaled 160% — actual print matches your paper roll width'
-              : 'Preview is scaled — actual print will be full-size on the selected paper'}
+            Preview is scaled — actual print will be full-size on A4
           </span>
           {onDownloadPdf && (
             <button type="button" className="btn btn-secondary"

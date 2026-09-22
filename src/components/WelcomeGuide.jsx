@@ -1,37 +1,43 @@
 import { useState } from 'react';
 import { Building2, FileText, BarChart3, Shield, ChevronRight, ChevronLeft, Check, ArrowRight, Image, PenTool, Lock } from 'lucide-react';
 import { saveProfile, setRegionMode } from '../store';
-import { getStatesForCountry, getCountryConfig, detectCountryFromBrowser, createEmptyAccount } from '../utils';
+import { getStatesForCountry, getCountryConfig, createEmptyAccount } from '../utils';
 import { toast } from './Toast';
 
 const STEPS = [
-  { id: 'welcome', title: 'Welcome', icon: FileText },
+  { id: 'welcome',  title: 'Welcome',          icon: FileText },
   { id: 'business', title: 'Business Details', icon: Building2 },
-  { id: 'bank', title: 'Bank & UPI', icon: Shield },
-  { id: 'security', title: 'Security', icon: Lock },
-  { id: 'ready', title: 'You\'re Ready!', icon: BarChart3 },
+  { id: 'bank',     title: 'Bank & UPI',       icon: Shield },
+  { id: 'security', title: 'Security',         icon: Lock },
+  { id: 'ready',    title: "You're Ready",     icon: BarChart3 },
 ];
 
+/**
+ * First-run onboarding guide.
+ *
+ * Five steps: welcome → business details → bank/UPI → security PIN → ready.
+ * Saves the profile with `appPasswordHash` (SHA-256) and marks the app
+ * onboarded. Skip is available from step 0.
+ */
 export default function WelcomeGuide({ onComplete }) {
   const [step, setStep] = useState(0);
-  const detectedCountry = detectCountryFromBrowser();
   const [profile, setProfile] = useState({
-    businessName: '', address: '', city: '', pin: '', state: '', country: detectedCountry, gstin: '', pan: '',
+    businessName: '', address: '', city: '', pin: '', state: '',
+    country: 'India',
+    gstin: '', pan: '',
     email: '', phone: '', bankName: '', accountNumber: '', ifsc: '', swift: '',
     logo: '', signature: '', upiId: '', googleClientId: '', googleDriveFolder: 'GST Billing Invoices',
   });
-  
-  // Security State
+
   const [appPin, setAppPin] = useState('');
   const [confirmPin, setConfirmPin] = useState('');
-
-  const [region, setRegion] = useState(detectedCountry === 'India' ? 'india' : 'international');
   const [saving, setSaving] = useState(false);
+
   const cc = getCountryConfig(profile.country);
   const stateOptions = getStatesForCountry(profile.country);
 
   const handleChange = (e) => {
-    setProfile({ ...profile, [e.target.name]: e.target.value });
+    setProfile(prev => ({ ...prev, [e.target.name]: e.target.value }));
   };
 
   const handleFileUpload = (field) => {
@@ -39,7 +45,7 @@ export default function WelcomeGuide({ onComplete }) {
     input.type = 'file';
     input.accept = 'image/*';
     input.onchange = (e) => {
-      const file = e.target.files[0];
+      const file = e.target.files?.[0];
       if (!file) return;
       if (file.size > 500 * 1024) {
         toast('Image must be under 500KB', 'warning');
@@ -55,9 +61,8 @@ export default function WelcomeGuide({ onComplete }) {
   const handleFinish = async () => {
     setSaving(true);
     try {
-      setRegionMode(region);
+      setRegionMode('india');
 
-      // Hash the PIN using SHA-256 for secure local storage
       let hashedPin = '';
       if (appPin) {
         const msgBuffer = new TextEncoder().encode(appPin);
@@ -81,12 +86,12 @@ export default function WelcomeGuide({ onComplete }) {
             isActive: true,
           }],
         } : profile),
-        appPasswordHash: hashedPin // Store the secure hash, never the plain text
+        appPasswordHash: hashedPin,
       };
 
       await saveProfile(profileToSave);
       localStorage.setItem('freegstbill_onboarded', 'true');
-      toast('Setup complete! Start creating invoices.', 'success');
+      toast('Setup complete. Start creating invoices.', 'success');
       onComplete(profileToSave);
     } catch {
       toast('Failed to save. Try again.', 'error');
@@ -108,7 +113,7 @@ export default function WelcomeGuide({ onComplete }) {
   return (
     <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem', background: 'var(--bg-primary)' }}>
       <div style={{ maxWidth: '640px', width: '100%' }}>
-        {/* Progress */}
+
         <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '2rem', justifyContent: 'center' }}>
           {STEPS.map((s, i) => (
             <div key={s.id} style={{
@@ -127,52 +132,26 @@ export default function WelcomeGuide({ onComplete }) {
               <div style={{ width: '64px', height: '64px', borderRadius: '16px', background: 'var(--primary)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 1.5rem' }}>
                 <FileText size={32} color="white" />
               </div>
-              <h1 style={{ fontSize: '1.75rem', fontWeight: 700, marginBottom: '0.75rem', color: 'var(--text-primary)' }}>Welcome to ArthSutra</h1>
-              
-              <p style={{ color: 'var(--text-secondary)', marginBottom: '0.75rem', lineHeight: 1.6 }}>
-                Free, open-source GST billing software that runs 100% on your computer. Your data never leaves your machine.
-              </p>
-              
-              <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '2rem' }}>
-                Created by <strong>Arth Upadhyay</strong> || ph:9425877961<br/>
-                <a href="https://github.com/arthupadhyay/Arth-Sutra" target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', textDecoration: 'none' }}>github.com/arthupadhyay/Arth-Sutra</a>
+              <h1 style={{ fontSize: '1.75rem', fontWeight: 700, marginBottom: '0.75rem', color: 'var(--text-primary)' }}>
+                Welcome to ArthSutra
+              </h1>
+
+              <p style={{ color: 'var(--text-secondary)', marginBottom: '2rem', lineHeight: 1.6 }}>
+                GST billing software that runs 100% on your computer. Your data never leaves your machine.
               </p>
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '2rem', textAlign: 'left' }}>
                 {[
-                  { title: 'Create Invoices', desc: 'Tax Invoice, Proforma, Credit Note, Bill of Supply, Delivery Challan' },
-                  { title: 'Auto GST Calculation', desc: 'CGST/SGST for same state, IGST for different state — automatic' },
-                  { title: 'GST Filing Ready', desc: 'GSTR-1, GSTR-3B, HSN reports auto-generated. Download CSVs for portal.' },
-                  { title: '100% Private', desc: 'All data stored locally as files. No cloud, no signup, no tracking.' },
-                ].map((item, i) => (
-                  <div key={i} style={{ padding: '1rem', borderRadius: '8px', background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}>
+                  { title: 'Create Invoices',      desc: 'Tax Invoice, Proforma, Credit Note, Bill of Supply, Delivery Challan' },
+                  { title: 'Auto Tax Calculation', desc: 'CGST / SGST for same state, IGST for different state — automatic' },
+                  { title: 'GST Filing Ready',     desc: 'GSTR-1, GSTR-3B, HSN reports auto-generated. Download CSVs for portal.' },
+                  { title: '100% Private',         desc: 'All data stored locally as files. No cloud, no signup, no tracking.' },
+                ].map(item => (
+                  <div key={item.title} style={{ padding: '1rem', borderRadius: '8px', background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}>
                     <div style={{ fontWeight: 600, fontSize: '0.85rem', marginBottom: '0.25rem', color: 'var(--text-primary)' }}>{item.title}</div>
                     <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>{item.desc}</div>
                   </div>
                 ))}
-              </div>
-
-              <div style={{ marginTop: '1rem', padding: '1rem', borderRadius: '10px', background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', textAlign: 'left' }}>
-                <p style={{ fontWeight: 600, fontSize: '0.9rem', marginBottom: '0.6rem', color: 'var(--text-primary)' }}>Where will you be invoicing from?</p>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.5rem' }}>
-                  {[
-                    { id: 'india', label: '🇮🇳 India', desc: 'GST, GSTR-1/3B, UPI' },
-                    { id: 'international', label: '🌍 Outside India', desc: 'VAT/SST/MwSt' },
-                    { id: 'both', label: '🌐 Both', desc: 'India + foreign clients' },
-                  ].map(opt => (
-                    <button key={opt.id} type="button"
-                      onClick={() => {
-                        setRegion(opt.id);
-                        if (opt.id === 'india') setProfile(p => ({ ...p, country: 'India' }));
-                        else if (opt.id === 'international' && profile.country === 'India') setProfile(p => ({ ...p, country: detectCountryFromBrowser() === 'India' ? 'United States' : detectCountryFromBrowser() }));
-                      }}
-                      className={`type-chip ${region === opt.id ? 'type-chip-active' : ''}`}
-                      style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', padding: '0.55rem 0.7rem', gap: '0.15rem' }}>
-                      <span style={{ fontWeight: 600 }}>{opt.label}</span>
-                      <span style={{ fontSize: '0.68rem', color: region === opt.id ? 'inherit' : 'var(--text-muted)', fontWeight: 400 }}>{opt.desc}</span>
-                    </button>
-                  ))}
-                </div>
               </div>
             </div>
           )}
@@ -191,7 +170,7 @@ export default function WelcomeGuide({ onComplete }) {
                 </div>
                 <div className="form-group">
                   <label className="form-label">Address</label>
-                  <textarea name="address" className="form-input" rows={2} value={profile.address} onChange={handleChange} placeholder="e.g. 42, MG Road, Sector 15, Gurugram 122001" />
+                  <textarea name="address" className="form-input" rows={2} value={profile.address} onChange={handleChange} placeholder="Street address, locality" />
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
                   <div className="form-group">
@@ -227,7 +206,7 @@ export default function WelcomeGuide({ onComplete }) {
           {/* Step 2: Bank & UPI */}
           {step === 2 && (
             <div>
-              <h2 style={{ fontSize: '1.25rem', fontWeight: 700, marginBottom: '0.5rem', color: 'var(--text-primary)' }}>Bank & UPI Details</h2>
+              <h2 style={{ fontSize: '1.25rem', fontWeight: 700, marginBottom: '0.5rem', color: 'var(--text-primary)' }}>Bank &amp; UPI Details</h2>
               <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1.5rem' }}>
                 Shown on your invoices so clients know where to pay. Optional — you can add this later.
               </p>
@@ -282,27 +261,25 @@ export default function WelcomeGuide({ onComplete }) {
               <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1.5rem' }}>
                 Protect your local financial data. Enter a 4-6 digit PIN or password to lock ArthSutra.
               </p>
-              
+
               <div style={{ display: 'grid', gap: '1rem', maxWidth: '300px' }}>
                 <div className="form-group">
                   <label className="form-label">Create PIN / Password *</label>
-                  <input type="password" name="appPin" className="form-input" 
-                    value={appPin} onChange={(e) => setAppPin(e.target.value)} 
+                  <input type="password" name="appPin" className="form-input"
+                    value={appPin} onChange={e => setAppPin(e.target.value)}
                     placeholder="Enter new PIN" />
                 </div>
-                
                 <div className="form-group">
                   <label className="form-label">Confirm PIN *</label>
-                  <input type="password" name="confirmPin" className="form-input" 
-                    value={confirmPin} onChange={(e) => setConfirmPin(e.target.value)} 
+                  <input type="password" name="confirmPin" className="form-input"
+                    value={confirmPin} onChange={e => setConfirmPin(e.target.value)}
                     placeholder="Re-enter PIN" />
                 </div>
-                
                 {appPin && confirmPin && appPin !== confirmPin && (
-                  <p style={{ color: '#dc2626', fontSize: '0.75rem', marginTop: '-0.5rem' }}>PINs do not match.</p>
+                  <p style={{ color: 'var(--danger)', fontSize: '0.75rem', marginTop: '-0.5rem' }}>PINs do not match.</p>
                 )}
                 {appPin && appPin.length < 4 && (
-                  <p style={{ color: '#dc2626', fontSize: '0.75rem', marginTop: '-0.5rem' }}>PIN must be at least 4 characters.</p>
+                  <p style={{ color: 'var(--danger)', fontSize: '0.75rem', marginTop: '-0.5rem' }}>PIN must be at least 4 characters.</p>
                 )}
               </div>
             </div>
@@ -311,19 +288,19 @@ export default function WelcomeGuide({ onComplete }) {
           {/* Step 4: Ready */}
           {step === 4 && (
             <div style={{ textAlign: 'center' }}>
-              <div style={{ width: '64px', height: '64px', borderRadius: '50%', background: '#059669', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 1.5rem' }}>
+              <div style={{ width: '64px', height: '64px', borderRadius: '50%', background: 'var(--success)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 1.5rem' }}>
                 <Check size={32} color="white" />
               </div>
-              <h2 style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '0.75rem', color: 'var(--text-primary)' }}>You're All Set!</h2>
+              <h2 style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '0.75rem', color: 'var(--text-primary)' }}>You're All Set</h2>
               <p style={{ color: 'var(--text-secondary)', marginBottom: '2rem', lineHeight: 1.6 }}>
                 Your business profile is ready. Here's what to do next:
               </p>
               <div style={{ textAlign: 'left', marginBottom: '2rem' }}>
                 {[
                   { num: '1', title: 'Create your first invoice', desc: 'Click "New Invoice" in the sidebar.' },
-                  { num: '2', title: 'Download or share', desc: 'Generate PDF, share via WhatsApp or email.' },
-                  { num: '3', title: 'Check GST reports', desc: 'GSTR-1, GSTR-3B, and HSN data is auto-generated.' },
-                ].map((item) => (
+                  { num: '2', title: 'Download or share',         desc: 'Generate PDF, share via WhatsApp or email.' },
+                  { num: '3', title: 'Check GST reports',         desc: 'GSTR-1, GSTR-3B, and HSN data is auto-generated.' },
+                ].map(item => (
                   <div key={item.num} style={{ display: 'flex', gap: '1rem', padding: '0.75rem 0', borderBottom: '1px solid var(--border-color)' }}>
                     <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: 'var(--primary)', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.8rem', fontWeight: 700, flexShrink: 0 }}>
                       {item.num}
@@ -345,7 +322,9 @@ export default function WelcomeGuide({ onComplete }) {
                 <button className="btn btn-secondary" onClick={handleSkip} style={{ fontSize: '0.85rem' }}>Skip Setup</button>
               )}
               {step > 0 && step < 4 && (
-                <button className="btn btn-secondary" onClick={() => setStep(step - 1)}><ChevronLeft size={16} /> Back</button>
+                <button className="btn btn-secondary" onClick={() => setStep(step - 1)}>
+                  <ChevronLeft size={16} /> Back
+                </button>
               )}
             </div>
 
@@ -362,17 +341,21 @@ export default function WelcomeGuide({ onComplete }) {
               )}
               {step === 4 && (
                 <button className="btn btn-primary" onClick={handleFinish} disabled={saving}>
-                  {saving ? 'Saving...' : 'Start Billing'} <ArrowRight size={16} />
+                  {saving ? 'Saving…' : 'Start Billing'} <ArrowRight size={16} />
                 </button>
               )}
             </div>
           </div>
         </div>
 
-        {/* Step labels */}
         <div style={{ display: 'flex', justifyContent: 'center', gap: '1.5rem', marginTop: '1rem' }}>
           {STEPS.map((s, i) => (
-            <div key={s.id} style={{ fontSize: '0.7rem', color: i === step ? 'var(--primary)' : 'var(--text-muted)', fontWeight: i === step ? 600 : 400, transition: 'all 0.3s' }}>
+            <div key={s.id} style={{
+              fontSize: '0.7rem',
+              color: i === step ? 'var(--primary)' : 'var(--text-muted)',
+              fontWeight: i === step ? 600 : 400,
+              transition: 'all 0.3s',
+            }}>
               {s.title}
             </div>
           ))}

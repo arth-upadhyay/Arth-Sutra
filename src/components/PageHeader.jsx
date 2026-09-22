@@ -1,18 +1,13 @@
-// v1.10.37 — Reusable page-header card. Reported: "I like the heading
-// that you gave into this page — I want you to do in all the pages,
-// that looks better". Extracted from the SettingsView v1.10.36 header
-// so every page gets a consistent visual identity: gradient card +
-// icon badge + title + subtitle + optional meta chip + right-side
-// action slot.
-//
-// Props:
-//   icon        emoji / string / element rendered inside the 44px badge
-//   title       page title (h1)
-//   subtitle    one-line description shown below the title
-//   meta        optional short string rendered as a pill next to the
-//               subtitle (e.g. "231 invoices", "11 sections", "FY 2025-26")
-//   children    right-hand slot for action buttons, HelpButton, etc.
-
+/**
+ * Reusable page-header card.
+ *
+ * Props:
+ *   icon      emoji / string / element rendered inside the 44px badge
+ *   title     page title (h1)
+ *   subtitle  one-line description shown below the title
+ *   meta      optional short string rendered as a pill next to the subtitle
+ *   children  right-hand slot for action buttons, HelpButton, etc.
+ */
 export default function PageHeader({ icon, title, subtitle, meta, children }) {
   return (
     <div className="page-header" style={{
