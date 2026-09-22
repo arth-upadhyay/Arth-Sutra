@@ -1,14 +1,14 @@
 
-```markdown
+
 # ArthSutra bascally means arth's system in sanskrit 
 
 **ARTH's SYSTEM** — a free, open-source, offline-first GST billing & invoicing application built for Indian small and medium businesses.
 
 Built by [@arth-upadhyay](https://github.com/arth-upadhyay) originally for a family business, now maintained as a public alternative to commercial ERP software like Marg, Tally, Vyapar, and myBillBook.
 
+# note:
 
----
-
+**the first time you open the arthsutra it will ask for the password enter-(ARTH) as its only one time after that you will get a option to  enter your open password and that password will be till forever**
 
 ## Why this exists
 my father needed a erp for billiing inventory mangment etc like marg erp or tally etc but they charge way too much and its bloated for his needs 
@@ -239,14 +239,14 @@ Fixes
 · RecurringInvoices.generateNow() now populates data.totals on the generated bill so downstream reports don't crash.
 · Currency column removed from Reports (India-only → always INR).
 · ClientModal.jsx no longer carries per-client paper size / currency / auto-print preferences.
----
+
 Security notes
 
 · All data stays on the local machine. The only outbound network calls are: Google Drive upload (opt-in), GitHub release check, and the optional Google Fonts stylesheet.
 · The local Express daemon binds to 127.0.0.1 only.
 · The Content Security Policy in index.html blocks all inline <script> tags, restricts connect-src to localhost and Google APIs, and disables object-src.
 · The invoice template still uses dangerouslySetInnerHTML for the Terms & Conditions field. Until that is sanitised, do not paste untrusted content into Terms.
----
+
 **for any bugs or issues** 
 Open an issue at github.com/arth-upadhyay/Arth-Sutra/issues with:
 
@@ -257,6 +257,4 @@ Open an issue at github.com/arth-upadhyay/Arth-Sutra/issues with:
 
 Email: arth14deepak@gmail.com 
 
----
-License
-Apache License 2.0 — see LICENSE.
+Apache License 2.0
