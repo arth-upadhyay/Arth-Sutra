@@ -4,14 +4,12 @@
 
 **ARTH's SYSTEM** — a free, open-source, offline-first GST billing & invoicing application built for Indian small and medium businesses.
 
-Built by [@arth-upadhyay](https://github.com/arth-upadhyay) originally for a family business, now maintained as a public alternative to commercial ERP software like Marg, Tally, Vyapar, and myBillBook.
-
 # note:
 
 **the first time you open the arthsutra it will ask for the password enter-(ARTH) as its only one time after that you will get a option to  enter your open password and that password will be till forever**
 
 ## Why this exists
-my father needed a erp for billiing inventory mangment etc like marg erp or tally etc but they charge way too much and its bloated for his needs 
+my father needed a erp for billiing inventory mangment etc like marg erp or tally etc but they charge way too much and they are too much bloated for his needs and charges yearly or monthly 
 
 
 ---
