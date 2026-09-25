@@ -32,7 +32,6 @@ my father needed a erp for billiing inventory mangment etc like marg erp or tall
 - Batch + expiry tracking on line items
 - Custom units (Carat, Bundle, Bushel, …) saved per device
 - Multi-business profile switcher
-- Multi-payment-account per profile with UPI QR
 - Client directory with statement PDF (running Dr/Cr ledger)
 - Expense tracker with ITC classification
 - Purchase bills with automated stock ledger updates
@@ -46,7 +45,6 @@ my father needed a erp for billiing inventory mangment etc like marg erp or tall
 - Auto-backup rotation (last 30 days) + 30-day soft-delete Trash Bin
 - PWA install (Windows / macOS / Linux)
 - Light + dark mode
-- Command palette (`Ctrl + K`)
 - 100% offline. No telemetry, no analytics, no external calls.
 
 ---
