@@ -24,7 +24,7 @@ const BillOCR = lazy(() => import('./BillOCR'));
 
 const PAYMENT_STATUSES = ['Unpaid', 'Paid', 'Partial'];
 
-const emptyItem = { name: '', hsn: '', quantity: 1, rate: 0, taxPercent: 18, cessPercent: 0, batch: '', expiry: '' };
+const emptyItem = { name: '', hsn: '', quantity: 1, rate: 0, taxPercent: 18, cessPercent: 0, batch: '', expiry: '', mrp: '' };
 
 const emptyForm = {
   date: new Date().toISOString().split('T')[0],
@@ -71,20 +71,10 @@ function calcPurchaseTotal(items, applyRoundOff = false) {
 //          'revert'   — used on delete. Reverts `purchase.items` only (the bill
 //            being deleted); never creates new products.
 //
-// Stock rules (see bugs #1/#3):
-//   - Batched lines only ever touch wProd.batches.
-//   - A batchless line on a product that has NEVER used batches adds/subtracts
-//     wProd.stock directly.
-//   - A batchless line on a product that DOES have batches is the "mixing"
-//     case: rather than silently merging into a batch or being dropped, it's
-//     kept as its own batchless bucket (__batchlessBucket) so it survives the
-//     final stock = sum(batches) recompute below. (Chosen over rejecting the
-//     line outright, since OCR/manual entry can legitimately omit a batch.)
-//
-// Selling-price rule (see bug #2): a product's sellingPrice is only defaulted
-// to purchasePrice × 1.3 when it's brand new, or when it existed but never had
-// a price set (sellingPrice === 0). Any manually-set sellingPrice (from
-// InventoryView) is left untouched; purchasePrice is still always refreshed.
+// Batch/MRP capture: a line item's `batch`, `expiry`, and `mrp` are written to
+// the matching entry inside `wProd.batches[]`, so the invoice-side FEFO picker
+// can auto-fill them next time. Product-level `mrp` is also mirrored from the
+// latest non-zero MRP seen across the purchase lines.
 async function syncProductsFromPurchase({ purchase, editingId, purchases, direction }) {
   const warnings = [];
   try {
@@ -96,8 +86,6 @@ async function syncProductsFromPurchase({ purchase, editingId, purchases, direct
     const getWorkingProd = (prod) => {
       if (!modifiedProducts.has(prod.id)) {
         const clone = JSON.parse(JSON.stringify(prod));
-        // Captured once, from the untouched original — decides whether price
-        // updates below are allowed to overwrite sellingPrice.
         clone.__hadManualPrice = Number(prod.sellingPrice) > 0;
         clone.__batchlessBucket = 0;
         modifiedProducts.set(prod.id, clone);
@@ -110,23 +98,40 @@ async function syncProductsFromPurchase({ purchase, editingId, purchases, direct
       return item.productId ? byId.get(item.productId) : byName.get(searchName);
     };
 
+    // Extracts an MRP from a purchase line, if one is set.
+    const extractMrp = (item) => {
+      const v = Number(item?.mrp);
+      return Number.isFinite(v) && v > 0 ? v : null;
+    };
+
     const applyLineToProduct = (wProd, item) => {
       const qty = Number(item.quantity) || 0;
+      const lineMrp = extractMrp(item);
       const hasBatches = Array.isArray(wProd.batches) && wProd.batches.length > 0;
+
       if (item.batch) {
         if (!Array.isArray(wProd.batches)) wProd.batches = [];
         const bIdx = wProd.batches.findIndex(b => b.batchNo === item.batch);
         if (bIdx >= 0) {
-          wProd.batches[bIdx].quantity += qty;
+          wProd.batches[bIdx].quantity = (Number(wProd.batches[bIdx].quantity) || 0) + qty;
           if (item.expiry) wProd.batches[bIdx].expiry = item.expiry;
+          if (lineMrp !== null) wProd.batches[bIdx].mrp = lineMrp;
         } else {
-          wProd.batches.push({ batchNo: item.batch, expiry: item.expiry || '', quantity: qty });
+          wProd.batches.push({
+            batchNo: item.batch,
+            expiry: item.expiry || '',
+            quantity: qty,
+            mrp: lineMrp !== null ? lineMrp : (Number(wProd.mrp) || 0),
+          });
         }
       } else if (hasBatches) {
         wProd.__batchlessBucket = (wProd.__batchlessBucket || 0) + qty;
       } else {
         wProd.stock = (wProd.stock || 0) + qty;
       }
+
+      // Product-level MRP default — first/latest non-zero MRP wins.
+      if (lineMrp !== null) wProd.mrp = lineMrp;
     };
 
     const revertLineFromProduct = (wProd, item) => {
@@ -154,7 +159,7 @@ async function syncProductsFromPurchase({ purchase, editingId, purchases, direct
         wProd.sellingPrice = Number(item.rate) * 1.30;
         wProd.rate = Number(item.rate) * 1.30;
       } else {
-        wProd.rate = wProd.sellingPrice; // legacy mirror follows the real selling price, not a fixed multiplier
+        wProd.rate = wProd.sellingPrice;
       }
     };
 
@@ -168,7 +173,6 @@ async function syncProductsFromPurchase({ purchase, editingId, purchases, direct
         revertLineFromProduct(getWorkingProd(existing), item);
       }
     } else {
-      // direction === 'apply'
       if (editingId) {
         const oldPurchase = (purchases || []).find(p => p.id === editingId);
         if (oldPurchase && Array.isArray(oldPurchase.items)) {
@@ -189,12 +193,14 @@ async function syncProductsFromPurchase({ purchase, editingId, purchases, direct
         } else {
           let wProd = modifiedProducts.get(`__new__::${searchName}`);
           if (!wProd) {
+            const lineMrp = extractMrp(item);
             wProd = {
               name: item.name.trim(),
               hsn: item.hsn || '',
               purchasePrice: item.rate,
               sellingPrice: Number(item.rate) * 1.30,
               rate: Number(item.rate) * 1.30,
+              mrp: lineMrp || 0,
               taxPercent: item.taxPercent || 0,
               cessPercent: item.cessPercent || 0,
               unit: 'Nos',
@@ -246,17 +252,16 @@ export default function PurchaseBills() {
     let items;
     let usedRealLineItems = false;
     if (Array.isArray(extracted.items) && extracted.items.length > 0) {
-      // Minimal guards on OCR-extracted line items: the extractor's output shape
-      // isn't trustworthy, so sanitize/default each field and drop lines that
-      // are pure noise (no name AND no rate) before capping to a sane ceiling.
       items = extracted.items
-        .slice(0, 200) // sanity ceiling — never load more than 200 lines from OCR
+        .slice(0, 200)
         .map(it => {
           const name = typeof it.name === 'string' ? it.name.trim() : '';
           let quantity = Number(it.quantity);
           if (!Number.isFinite(quantity) || quantity <= 0) quantity = 1;
           let rate = Number(it.rate);
           if (!Number.isFinite(rate) || rate < 0) rate = 0;
+          let mrp = Number(it.mrp);
+          if (!Number.isFinite(mrp) || mrp < 0) mrp = '';
           return {
             name,
             hsn: it.hsn || '',
@@ -265,13 +270,13 @@ export default function PurchaseBills() {
             taxPercent: Number(it.taxPercent) || 0,
             cessPercent: 0,
             batch: '',
-            expiry: ''
+            expiry: '',
+            mrp,
           };
         })
-        .filter(it => !(it.name === '' && it.rate === 0)); // drop rows that are blank name + zero rate
+        .filter(it => !(it.name === '' && it.rate === 0));
 
       if (items.length === 0) {
-        // Everything got filtered out as noise — fall back to the grand-total path below.
         items = null;
       } else {
         usedRealLineItems = true;
@@ -279,7 +284,7 @@ export default function PurchaseBills() {
     }
     if (!items) {
       if (extracted.grandTotal > 0) {
-        items = [{ name: 'From OCR — split into real items', hsn: '', quantity: 1, rate: extracted.grandTotal, taxPercent: 0, cessPercent: 0, batch: '', expiry: '' }];
+        items = [{ name: 'From OCR — split into real items', hsn: '', quantity: 1, rate: extracted.grandTotal, taxPercent: 0, cessPercent: 0, batch: '', expiry: '', mrp: '' }];
       } else {
         items = [{ ...emptyItem }];
       }
@@ -348,13 +353,11 @@ export default function PurchaseBills() {
       supplierAddress: purchase.supplierAddress || '',
       supplierGstin: purchase.supplierGstin || '',
       invoiceNumber: purchase.invoiceNumber || '',
-      items: purchase.items && purchase.items.length > 0 ? purchase.items.map(i => ({ ...i, batch: i.batch || '', expiry: i.expiry || '' })) : [{ ...emptyItem }],
+      items: purchase.items && purchase.items.length > 0
+        ? purchase.items.map(i => ({ ...i, batch: i.batch || '', expiry: i.expiry || '', mrp: i.mrp ?? '' }))
+        : [{ ...emptyItem }],
       paymentStatus: purchase.paymentStatus || 'Unpaid',
       interstate: !!purchase.interstate,
-      // Only infer applyRoundOff from the stored flag itself. A stored `roundOff`
-      // value is the *result* of the toggle having been on, not evidence of its
-      // state — inferring from it silently re-enables round-off for legacy
-      // records whose stored roundOff was a fluke (e.g. imported/edited data).
       applyRoundOff: !!purchase.applyRoundOff,
       note: purchase.note || '',
     });
@@ -475,6 +478,7 @@ export default function PurchaseBills() {
           cessPercent: parseFloat(i.cessPercent) || 0,
           batch: (i.batch || '').trim(),
           expiry: (i.expiry || '').trim(),
+          mrp: i.mrp !== '' && i.mrp !== undefined && i.mrp !== null ? (parseFloat(i.mrp) || 0) : '',
         })),
         totalAmount: totals.finalTotal,
         totalTax: totals.tax,
@@ -488,8 +492,6 @@ export default function PurchaseBills() {
       
       await savePurchase(purchase);
 
-      // BATCH-AWARE PRODUCT UPSERT — apply/revert logic lives in the shared
-      // syncProductsFromPurchase helper so this stays symmetric with delete.
       try {
         const { upserts, warnings } = await syncProductsFromPurchase({
           purchase,
@@ -527,17 +529,12 @@ export default function PurchaseBills() {
             purchases,
             direction: 'revert',
           });
-          // Promise.allSettled: one product failing to save should not stop the
-          // others from reverting, and should not block the delete below either.
           const results = await Promise.allSettled(upserts.map(p => saveProduct(p)));
           const failedCount = results.filter(r => r.status === 'rejected').length;
           if (failedCount > 0 || warnings.length > 0) {
             console.warn('Stock revert on delete had issues:', warnings, results.filter(r => r.status === 'rejected'));
           }
         }
-        // deletePurchase runs only after the revert attempt has settled (success
-        // or failure) — the bill record isn't removed before we've tried to give
-        // its stock back, but a stock-save hiccup still won't block the delete.
         await deletePurchase(id);
         toast('Purchase deleted', 'success');
         loadPurchases();
@@ -601,9 +598,9 @@ export default function PurchaseBills() {
           <HelpButton title="Purchase Bills — how to use">
             <ul style={{ paddingLeft: '1.1rem', margin: 0 }}>
               <li><strong>Add Purchase</strong> — record every supplier tax invoice you receive. The GST paid becomes your ITC (input tax credit) in GSTR-3B.</li>
-              <li><strong>Import from image (OCR)</strong> — snap the supplier's invoice with your phone. The app extracts supplier GSTIN, invoice number, date, and grand total. Line items still need manual entry (bill layouts vary too much for reliable auto-parsing).</li>
-              <li><strong>Interstate toggle</strong> — flip ON when the supplier is in a different state (they charged IGST) so ITC routes correctly.</li>
-              <li><strong>Payment status</strong> — Unpaid / Partial / Paid drives the "amount payable to suppliers" report.</li>
+              <li><strong>Batch No. + Exp + MRP</strong> — enter these per line so products auto-fill them on future invoices.</li>
+              <li><strong>Import from image (OCR)</strong> — snap the supplier's invoice with your phone.</li>
+              <li><strong>Interstate toggle</strong> — flip ON when the supplier is in a different state (they charged IGST).</li>
               <li><strong>Export CSV</strong> — hand to your CA at return time.</li>
             </ul>
           </HelpButton>
@@ -643,15 +640,17 @@ export default function PurchaseBills() {
                 {p.supplierGstin && <div style={{ fontSize: '0.82rem' }}>GSTIN: <strong>{p.supplierGstin}</strong></div>}
               </div>
               <div style={{ overflowX: 'auto', maxHeight: 260, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 6, marginBottom: '1rem' }}>
-                <table className="data-table" style={{ fontSize: '0.82rem', width: '100%', minWidth: 500 }}>
+                <table className="data-table" style={{ fontSize: '0.82rem', width: '100%', minWidth: 560 }}>
                   <thead>
                     <tr>
                       <th>#</th>
                       <th>Description</th>
                       <th>HSN</th>
                       <th>Batch</th>
+                      <th>Exp</th>
                       <th style={{ textAlign: 'right' }}>Qty</th>
                       <th style={{ textAlign: 'right' }}>Rate</th>
+                      <th style={{ textAlign: 'right' }}>MRP</th>
                       <th style={{ textAlign: 'right' }}>GST%</th>
                       <th style={{ textAlign: 'right' }}>Amount</th>
                     </tr>
@@ -666,8 +665,10 @@ export default function PurchaseBills() {
                           <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{it.name || '—'}</td>
                           <td style={{ color: 'var(--text-muted)' }}>{it.hsn || '—'}</td>
                           <td style={{ color: 'var(--text-muted)' }}>{it.batch || '—'}</td>
+                          <td style={{ color: 'var(--text-muted)' }}>{it.expiry || '—'}</td>
                           <td style={{ textAlign: 'right' }}>{it.quantity || 0}</td>
                           <td style={{ textAlign: 'right' }}>{formatCurrency(it.rate || 0)}</td>
+                          <td style={{ textAlign: 'right' }}>{it.mrp ? formatCurrency(it.mrp) : '—'}</td>
                           <td style={{ textAlign: 'right' }}>{it.taxPercent || 0}%</td>
                           <td style={{ textAlign: 'right', fontWeight: 600 }}>{formatCurrency(withTax)}</td>
                         </tr>
@@ -730,7 +731,7 @@ export default function PurchaseBills() {
 
       {showForm && (
         <div className="modal-overlay" onClick={closeForm}>
-          <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: '820px' }}>
+          <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: '960px' }}>
             <h3 className="section-title">{editingId ? 'Edit Purchase Bill' : 'Add Purchase Bill'}</h3>
             <div className="grid grid-cols-2 gap-4">
               <div className="form-group">
@@ -786,40 +787,43 @@ export default function PurchaseBills() {
 
             <h4 style={{ marginTop: '1rem', marginBottom: '0.5rem', fontWeight: 600, fontSize: '0.9rem' }}>Items</h4>
             {form.items.map((item, idx) => (
-              <div key={idx} data-focus-key={item._focusKey} style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem', flexWrap: 'wrap', alignItems: 'flex-end' }}>
-                <div className="form-group" style={{ flex: 2, margin: 0 }}>
+              <div key={idx} data-focus-key={item._focusKey} style={{ display: 'flex', gap: '0.4rem', marginBottom: '0.5rem', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                <div className="form-group" style={{ flex: 2, margin: 0, minWidth: 160 }}>
                   {idx === 0 && <label className="form-label">Name</label>}
                   <input type="text" className="form-input" value={item.name}
                     onChange={e => updateItem(idx, 'name', e.target.value)} placeholder="Item name" />
                 </div>
-                <div className="form-group" style={{ flex: 1, margin: 0 }}>
+                <div className="form-group" style={{ flex: 1, margin: 0, minWidth: 80 }}>
                   {idx === 0 && <label className="form-label">HSN</label>}
                   <input type="text" className="form-input" value={item.hsn}
                     onChange={e => updateItem(idx, 'hsn', e.target.value)} placeholder="HSN" />
                 </div>
-                
-                <div className="form-group" style={{ flex: 1, margin: 0 }}>
+                <div className="form-group" style={{ flex: 1, margin: 0, minWidth: 100 }}>
                   {idx === 0 && <label className="form-label">Batch No.</label>}
                   <input type="text" className="form-input" value={item.batch || ''}
                     onChange={e => updateItem(idx, 'batch', e.target.value)} placeholder="Batch" />
                 </div>
-                <div className="form-group" style={{ flex: 0.8, margin: 0 }}>
+                <div className="form-group" style={{ flex: 0.8, margin: 0, minWidth: 70 }}>
                   {idx === 0 && <label className="form-label">Exp (MM/YY)</label>}
                   <input type="text" className="form-input" value={item.expiry || ''}
                     onChange={e => updateItem(idx, 'expiry', e.target.value)} placeholder="MM/YY" />
                 </div>
-
-                <div className="form-group" style={{ flex: 0.7, margin: 0 }}>
+                <div className="form-group" style={{ flex: 0.7, margin: 0, minWidth: 70 }}>
                   {idx === 0 && <label className="form-label">Qty</label>}
                   <input type="number" className="form-input" value={item.quantity} min="0" step="any"
                     onChange={e => updateItem(idx, 'quantity', e.target.value)} />
                 </div>
-                <div className="form-group" style={{ flex: 1, margin: 0 }}>
+                <div className="form-group" style={{ flex: 0.9, margin: 0, minWidth: 80 }}>
                   {idx === 0 && <label className="form-label">Rate</label>}
                   <input type="number" className="form-input" value={item.rate} min="0" step="any"
                     onChange={e => updateItem(idx, 'rate', e.target.value)} />
                 </div>
-                <div className="form-group" style={{ flex: 0.75, margin: 0 }}>
+                <div className="form-group" style={{ flex: 0.9, margin: 0, minWidth: 80 }}>
+                  {idx === 0 && <label className="form-label">MRP</label>}
+                  <input type="number" className="form-input" value={item.mrp ?? ''} min="0" step="any"
+                    onChange={e => updateItem(idx, 'mrp', e.target.value)} placeholder="MRP" />
+                </div>
+                <div className="form-group" style={{ flex: 0.7, margin: 0, minWidth: 70 }}>
                   {idx === 0 && <label className="form-label">Tax %</label>}
                   <select className="form-input" value={
                     ['0','0.1','0.25','3','5','12','18','28'].includes(String(item.taxPercent)) ? String(item.taxPercent) : '__custom__'
@@ -850,7 +854,7 @@ export default function PurchaseBills() {
                     <option value="__custom__">Other…{['0','0.1','0.25','3','5','12','18','28'].includes(String(item.taxPercent)) ? '' : ` (${item.taxPercent}%)`}</option>
                   </select>
                 </div>
-                <div style={{ flex: '0 0 auto', marginBottom: idx === 0 ? 0 : 0 }}>
+                <div style={{ flex: '0 0 auto' }}>
                   {form.items.length > 1 && (
                     <button className="icon-btn icon-btn-red" onClick={() => removeItem(idx)} title="Remove"><Trash2 size={15} /></button>
                   )}

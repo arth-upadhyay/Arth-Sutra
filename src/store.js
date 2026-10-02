@@ -3,6 +3,37 @@
 
 const API = '/api';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// v1.11.0 — Rebrand migration: Free GST Billing → ArthSutra
+//
+// Every legacy `freegstbill_*` localStorage key is copied once to its new
+// `arthsutra_*` equivalent. Old keys are left in place (they're inert and
+// cost nothing) so users who roll back to a pre-rebrand build still find
+// their settings. Runs at module load, before any getter reads localStorage.
+// ─────────────────────────────────────────────────────────────────────────────
+const REBRAND_MIGRATION_FLAG = 'arthsutra_rebrand_migrated_v1';
+(() => {
+  try {
+    if (localStorage.getItem(REBRAND_MIGRATION_FLAG) === '1') return;
+    const OLD_PREFIX = 'freegstbill_';
+    const NEW_PREFIX = 'arthsutra_';
+    const toCopy = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith(OLD_PREFIX)) continue;
+      const newKey = NEW_PREFIX + k.slice(OLD_PREFIX.length);
+      if (localStorage.getItem(newKey) === null) {
+        const v = localStorage.getItem(k);
+        if (v !== null) toCopy.push([newKey, v]);
+      }
+    }
+    toCopy.forEach(([k, v]) => {
+      try { localStorage.setItem(k, v); } catch { /* quota / sandbox */ }
+    });
+    localStorage.setItem(REBRAND_MIGRATION_FLAG, '1');
+  } catch { /* sandboxed / private mode — silently skip */ }
+})();
+
 async function apiFetch(url, options = {}) {
   const res = await fetch(url, {
     headers: { 'Content-Type': 'application/json' },
@@ -324,11 +355,11 @@ const EXPORTABLE_LOCALSTORAGE_KEYS = [
   'gst_itrPresumptive',              // v1.8.0 — presumptive taxation state
   'gst_itrAdvanceTax',               // v1.8.0 — advance tax state
   'gst_stockAlertSettings',          // v1.6.3 — low-stock threshold + on/off
-  'freegstbill_invoiceOptions',      // per-invoice display preference defaults
-  'freegstbill_theme',               // light/dark (was written as 'theme' in the old whitelist — typo)
-  'freegstbill_onboarded',           // skip welcome wizard on next launch
-  'freegstbill_dismissedUpdate',     // version the user dismissed the update banner for
-  'freegstbill_pwa_dismissed_at',    // 14-day PWA-install-banner cooldown timestamp
+  'arthsutra_invoiceOptions',        // per-invoice display preference defaults
+  'arthsutra_theme',                 // light/dark (was written as 'theme' in the old whitelist — typo)
+  'arthsutra_onboarded',             // skip welcome wizard on next launch
+  'arthsutra_dismissedUpdate',       // version the user dismissed the update banner for
+  'arthsutra_pwa_dismissed_at',      // 14-day PWA-install-banner cooldown timestamp
 ];
 
 // Keys matched by prefix. Currently used for per-profile last-used payment
@@ -390,7 +421,7 @@ export const exportAllData = async (selection) => {
   const [all, version] = await Promise.all([apiFetch(`${API}/export`), getAppVersion()]);
   const sel = selection || { profile: true, profiles: true, bills: true, clients: true, products: true, expenses: true, purchases: true, recurring: true, receipts: true, termsTemplates: true, meta: true, localStorage: true };
 
-  const data = { exportedAt: new Date().toISOString(), version, __freegstbill_backup: true };
+  const data = { exportedAt: new Date().toISOString(), version, __arthsutra_backup: true };
   if (sel.profile)        data.profile = all.profile;
   if (sel.profiles)       data.profiles = all.profiles;
   if (sel.bills)          data.bills = all.bills;
@@ -409,12 +440,16 @@ export const exportAllData = async (selection) => {
 
 // Inspect a backup file without committing — returns counts so the UI can show
 // what's in it before the user picks what to restore.
+//
+// Accepts BOTH the new __arthsutra_backup marker and the legacy
+// __freegstbill_backup marker, so backups made before the rebrand still
+// restore cleanly.
 export const inspectBackup = (jsonString) => {
   let data;
   try { data = JSON.parse(jsonString); }
   catch { throw new Error('Not a valid JSON file'); }
   return {
-    valid: !!data && (data.__freegstbill_backup || data.bills || data.profile),
+    valid: !!data && (data.__arthsutra_backup || data.__freegstbill_backup || data.bills || data.profile),
     exportedAt: data.exportedAt || null,
     version: data.version || null,
     counts: {

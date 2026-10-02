@@ -1,14 +1,12 @@
 import LockScreen from './components/LockScreen';
 import { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react';
-import { Home, FileText, Settings, Plus, Users, Package, BarChart3, Wallet, RefreshCw, Receipt, BookOpen, Moon, Sun, Download, X, ShoppingCart, ChevronDown, Building2, Pencil, HelpCircle, Search, Command, Bell, Calculator } from 'lucide-react';
+import { Home, FileText, Settings, Plus, Users, Package, BarChart3, Wallet, RefreshCw, Receipt, BookOpen, Download, X, ShoppingCart, ChevronDown, Building2, Pencil, HelpCircle, Search, Command, Bell, Calculator } from 'lucide-react';
 import { getAllProfiles, saveProfile, getEnabledModules, getAllBills, getAllProducts, getStockAlertSettings, getAllClients } from './store';
 import { isModuleEnabled, getUpcomingFilings } from './utils';
 import Dashboard from './components/Dashboard';
 import InvoiceGenerator from './components/InvoiceGenerator';
-import SetupWizard from './components/SetupWizard';
 import ToastContainer from './components/Toast';
 import ConfirmModalContainer from './components/ConfirmModal';
-import WelcomeGuide from './components/WelcomeGuide';
 const SettingsView = lazy(() => import('./components/SettingsView'));
 const ClientsView = lazy(() => import('./components/ClientsView'));
 const InventoryView = lazy(() => import('./components/InventoryView'));
@@ -20,7 +18,6 @@ const GSTReturns = lazy(() => import('./components/GSTReturns'));
 const IncomeTax = lazy(() => import('./components/IncomeTax'));
 const PurchaseBills = lazy(() => import('./components/PurchaseBills'));
 const UserGuideView = lazy(() => import('./components/UserGuideView'));
-import { getPrintSettings } from './utils/printSettings';
 
 function ViewLoading() {
   return (
@@ -37,45 +34,9 @@ function ViewLoading() {
   );
 }
 
-// ============================================================================
-// v1.10.44 — Rules-of-Hooks fix + reactivity improvements.
-//
-// BUG THAT DROVE THIS REWRITE:
-//   The old App() called `useState(isUnlocked)` at the top, then
-//   `if (!isUnlocked) return <LockScreen/>` — and 20+ more hooks AFTER
-//   that early return. On first render (locked) React saw 1 hook. On
-//   the render after unlock React saw ~25. "Rendered more hooks than
-//   during the previous render" → hard crash. This was the #1 reported
-//   white-screen-on-unlock bug.
-//
-// FIX: every hook now runs unconditionally at the top of App(). The
-// three legitimate early-return states (locked / server-down / welcome
-// wizard) sit BELOW all hooks. Hooks inside the main body are gated by
-// `if (!isUnlocked) return;` INSIDE the effect, not by an outer return.
-//
-// ALSO FIXED:
-//   • enabledModules is now React state (was re-read from localStorage
-//     on every render with no re-render trigger — toggling a module in
-//     Settings didn't update the sidebar until full reload).
-//   • navItems is memoised and its handler deps are useCallback'd, so
-//     the paletteActions useMemo actually fires only when relevant.
-//   • Ctrl+S / Ctrl+P now dispatch 'fgsb-save-invoice' / 'fgsb-print-invoice'
-//     custom events. InvoiceGenerator needs to listen for these
-//     (follow-up); the shortcuts table reflects that they only work
-//     when the invoice form is open.
-// ============================================================================
-
 function App() {
-  // ═══════════════════════════════════════════════════════════════════════
-  // 1. STATE  (every hook, no exceptions, before any conditional return)
-  // ═══════════════════════════════════════════════════════════════════════
-
   const [isUnlocked, setIsUnlocked] = useState(() => {
     return sessionStorage.getItem('fgsb_unlocked') === 'true';
-  });
-
-  const [showWizard, setShowWizard] = useState(() => {
-    try { return !getPrintSettings().onboardingComplete; } catch { return false; }
   });
 
   const [currentView, setCurrentView] = useState(() => {
@@ -100,11 +61,6 @@ function App() {
     } catch { return null; }
   });
 
-  const [darkMode, setDarkMode] = useState(() => {
-    return localStorage.getItem('freegstbill_theme') === 'dark';
-  });
-
-  const [showWelcome, setShowWelcome] = useState(false);
   const [showInstallBanner, setShowInstallBanner] = useState(false);
   const [serverDown, setServerDown] = useState(false);
   const [serverStatus, setServerStatus] = useState('checking');
@@ -124,27 +80,13 @@ function App() {
   const [searchCorpus, setSearchCorpus] = useState({ bills: [], clients: [], products: [] });
   const [showShortcutsHelp, setShowShortcutsHelp] = useState(false);
 
-  // Enabled feature modules — stateful so toggling in Settings reflects
-  // in the sidebar. Refreshed by 'fgsb-modules-changed' custom event
-  // (fired by SettingsView when a toggle is flipped) OR on view change
-  // as a fallback if the event isn't wired yet.
   const [enabledModules, setEnabledModulesState] = useState(() => getEnabledModules());
-
-  // ═══════════════════════════════════════════════════════════════════════
-  // 2. REFS
-  // ═══════════════════════════════════════════════════════════════════════
 
   const deferredPrompt = useRef(null);
   const retryTimer = useRef(null);
   const profileLoaded = useRef(false);
   const profileMenuRef = useRef(null);
-  // Ref mirror of showPalette so the global Esc handler (mounted once)
-  // can see the current value without needing to re-subscribe.
   const showPaletteRef = useRef(showPalette);
-
-  // ═══════════════════════════════════════════════════════════════════════
-  // 3. CALLBACKS  (stable references for props + effect deps)
-  // ═══════════════════════════════════════════════════════════════════════
 
   const handleUnlock = useCallback(() => {
     setIsUnlocked(true);
@@ -215,10 +157,6 @@ function App() {
     [enabledModules]
   );
 
-  // ═══════════════════════════════════════════════════════════════════════
-  // 4. MEMOISED DERIVED VALUES
-  // ═══════════════════════════════════════════════════════════════════════
-
   const updateBannerVisible = useMemo(() => {
     if (!updateInfo?.updateAvailable) return false;
     try {
@@ -263,7 +201,6 @@ function App() {
       });
     });
     acts.push({ label: 'Go to Settings', hint: '', category: 'nav', run: () => setCurrentView('settings') });
-    acts.push({ label: 'Toggle dark mode', hint: '', category: 'action', run: () => setDarkMode(d => !d) });
     acts.push({ label: 'Show keyboard shortcuts', hint: 'Ctrl+/', category: 'help', run: () => setShowShortcutsHelp(true) });
     if (updateInfo?.updateAvailable) {
       acts.push({ label: `View update — v${updateInfo.latest}`, hint: '', category: 'update', run: () => setShowUpdateModal(true) });
@@ -311,18 +248,6 @@ function App() {
     [paletteActions, paletteQuery]
   );
 
-  const showResumeSetupPill = useMemo(() => {
-    try {
-      const ps = getPrintSettings();
-      return !showWizard && ps.onboardingComplete === true && ps.onboardingSkipped === true;
-    } catch { return false; }
-  }, [showWizard]);
-
-  // ═══════════════════════════════════════════════════════════════════════
-  // 5. EFFECTS
-  // ═══════════════════════════════════════════════════════════════════════
-
-  // -- Update check (runs regardless of lock state; harmless) --
   useEffect(() => {
     let cancelled = false;
     const check = async () => {
@@ -337,7 +262,6 @@ function App() {
     return () => { cancelled = true; clearTimeout(initial); clearInterval(interval); };
   }, []);
 
-  // -- Notifications (only meaningful once unlocked) --
   useEffect(() => {
     if (!isUnlocked) return;
     let cancelled = false;
@@ -381,7 +305,6 @@ function App() {
     return () => { cancelled = true; clearInterval(interval); };
   }, [isUnlocked, currentView]);
 
-  // -- Command palette search corpus --
   useEffect(() => {
     if (!isUnlocked || !showPalette) return;
     Promise.all([
@@ -397,7 +320,6 @@ function App() {
     });
   }, [isUnlocked, showPalette]);
 
-  // -- Server health check --
   useEffect(() => {
     let cancelled = false;
 
@@ -412,9 +334,6 @@ function App() {
             profileLoaded.current = true;
             const p = await res.json();
             setProfile(p);
-            if (!p.businessName && !localStorage.getItem('freegstbill_onboarded')) {
-              setShowWelcome(true);
-            }
           }
           return;
         }
@@ -436,7 +355,6 @@ function App() {
     };
   }, []);
 
-  // -- PWA install banner --
   useEffect(() => {
     const dismissedAt = localStorage.getItem('freegstbill_pwa_dismissed_at');
     const isStandalone = window.matchMedia('(display-mode: standalone)').matches
@@ -456,12 +374,10 @@ function App() {
     return () => window.removeEventListener('beforeinstallprompt', handler);
   }, []);
 
-  // -- Persist current view --
   useEffect(() => {
     sessionStorage.setItem('gst_currentView', currentView);
   }, [currentView]);
 
-  // -- Persist editing bill --
   useEffect(() => {
     if (editingBill) {
       sessionStorage.setItem('gst_editingBill', JSON.stringify(editingBill));
@@ -470,13 +386,6 @@ function App() {
     }
   }, [editingBill]);
 
-  // -- Theme --
-  useEffect(() => {
-    document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light');
-    localStorage.setItem('freegstbill_theme', darkMode ? 'dark' : 'light');
-  }, [darkMode]);
-
-  // -- Saved profiles list --
   useEffect(() => {
     if (!isUnlocked) return;
     if (serverStatus === 'online') {
@@ -484,7 +393,6 @@ function App() {
     }
   }, [isUnlocked, serverStatus]);
 
-  // -- Profile menu outside-click --
   useEffect(() => {
     if (!showProfileMenu) return;
     const handler = (e) => {
@@ -496,13 +404,6 @@ function App() {
     return () => document.removeEventListener('mousedown', handler);
   }, [showProfileMenu]);
 
-  // -- Enabled-modules reactivity --
-  // Two triggers: (1) the custom event SettingsView fires on toggle,
-  // (2) the storage event (cross-tab). The current tab can't listen to
-  // its own localStorage writes, hence the custom event.
-  // NOTE: SettingsView should dispatch `fgsb-modules-changed` after
-  // calling setEnabledModules(). Until that's wired, module toggles
-  // still apply on next full page load — same as before this fix.
   useEffect(() => {
     const refresh = () => setEnabledModulesState(getEnabledModules());
     window.addEventListener('fgsb-modules-changed', refresh);
@@ -513,7 +414,6 @@ function App() {
     };
   }, []);
 
-  // -- Redirect if current view's module is disabled --
   useEffect(() => {
     const map = {
       new: 'invoicing',
@@ -532,9 +432,6 @@ function App() {
     }
   }, [currentView, enabledModules]);
 
-  // -- Global keyboard shortcuts --
-  // Ctrl+K palette, Ctrl+/ help, Ctrl+N new invoice, Ctrl+S save
-  // (custom event → InvoiceGenerator), Ctrl+P print (custom event).
   useEffect(() => {
     const onKey = (e) => {
       const mod = e.ctrlKey || e.metaKey;
@@ -554,9 +451,6 @@ function App() {
         e.preventDefault();
         handleNewInvoice();
       } else if (key === 's') {
-        // Only meaningful when the invoice form is open; InvoiceGenerator
-        // listens for this event and saves. Prevents the browser's
-        // "Save page as…" dialog either way.
         e.preventDefault();
         window.dispatchEvent(new CustomEvent('fgsb-save-invoice'));
       } else if (key === 'p') {
@@ -568,13 +462,10 @@ function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [handleNewInvoice]);
 
-  // -- Keep the palette ref in sync for the global Esc handler --
   useEffect(() => {
     showPaletteRef.current = showPalette;
   }, [showPalette]);
 
-  // -- aria-label mirror + global Esc-to-close-modal --
-  // Mounted once. Uses showPaletteRef to avoid re-subscribing on palette toggle.
   useEffect(() => {
     const mirrorTitleToAria = (root = document) => {
       root.querySelectorAll('button.icon-btn[title]:not([aria-label])').forEach(btn => {
@@ -600,7 +491,6 @@ function App() {
 
     const onEsc = (e) => {
       if (e.key !== 'Escape') return;
-      // Palette has its own Esc handler; skip so we don't double-close.
       if (showPaletteRef.current) return;
       const overlays = Array.from(document.querySelectorAll('.modal-overlay'));
       const top = overlays[overlays.length - 1];
@@ -611,7 +501,6 @@ function App() {
     return () => { observer.disconnect(); window.removeEventListener('keydown', onEsc); };
   }, []);
 
-  // -- Command palette keyboard navigation --
   useEffect(() => {
     if (!showPalette) return;
     const onKey = (e) => {
@@ -627,10 +516,6 @@ function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [showPalette, paletteIdx, filteredPalette]);
-
-  // ═══════════════════════════════════════════════════════════════════════
-  // 6. CONDITIONAL RENDERS  (below ALL hooks — this is the critical fix)
-  // ═══════════════════════════════════════════════════════════════════════
 
   if (!isUnlocked) {
     return <LockScreen onUnlock={handleUnlock} />;
@@ -666,49 +551,16 @@ function App() {
     );
   }
 
-  if (showWelcome) {
-    return (
-      <>
-        <WelcomeGuide onComplete={(p) => {
-          if (p) setProfile(p);
-          setShowWelcome(false);
-        }} />
-        <ToastContainer />
-        <ConfirmModalContainer />
-      </>
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════
-  // 7. MAIN RENDER
-  // ═══════════════════════════════════════════════════════════════════════
-
   return (
     <div className="app-layout">
-      {showWizard && <SetupWizard onClose={() => setShowWizard(false)} />}
-      {showResumeSetupPill && (
-        <button type="button"
-          onClick={() => setShowWizard(true)}
-          title="Come back to the setup wizard — pick a business type, paper size, and language."
-          style={{
-            position: 'fixed', bottom: '1.25rem', right: '1.25rem', zIndex: 9998,
-            padding: '0.6rem 1rem', borderRadius: 999,
-            background: 'var(--primary)', color: '#fff', border: 'none',
-            fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer',
-            boxShadow: '0 6px 20px rgba(30,41,59,0.35), 0 2px 4px rgba(0,0,0,0.15)',
-            display: 'flex', alignItems: 'center', gap: '0.4rem',
-          }}>
-          ✨ Finish setup
-        </button>
-      )}
       <div className="sidebar">
         <div className="sidebar-brand">
           <div className="sidebar-logo">
             <FileText size={22} />
           </div>
           <div>
-            <h2 className="sidebar-title">GST Billing</h2>
-            <p className="sidebar-subtitle">by ARTH </p>
+            <h2 className="sidebar-title">Arth Sutra</h2>
+            <p className="sidebar-subtitle">by ARTH</p>
           </div>
         </div>
 
@@ -783,7 +635,7 @@ function App() {
                 </span>
                 <span style={{
                   width: 8, height: 8, borderRadius: '50%',
-                  background: '#f59e0b', boxShadow: '0 0 0 3px rgba(245,158,11,0.25)',
+                  background: '#dcc766', boxShadow: '0 0 0 3px rgba(220,199,102,0.25)',
                   flexShrink: 0,
                 }} />
               </button>
@@ -807,14 +659,6 @@ function App() {
               )}
             </button>
             <button
-              className="nav-btn"
-              onClick={() => setDarkMode(!darkMode)}
-              title={darkMode ? 'Light Mode' : 'Dark Mode'}
-            >
-              {darkMode ? <Sun size={18} /> : <Moon size={18} />}
-              {darkMode ? 'Light Mode' : 'Dark Mode'}
-            </button>
-            <button
               className={`nav-btn ${currentView === 'settings' ? 'nav-btn-active' : ''}`}
               onClick={() => setCurrentView('settings')}
               style={updateBannerVisible ? { position: 'relative' } : undefined}
@@ -824,7 +668,7 @@ function App() {
                 <span style={{
                   position: 'absolute', top: '8px', right: '12px',
                   width: 8, height: 8, borderRadius: '50%',
-                  background: '#f59e0b',
+                  background: '#dcc766',
                 }} title="Update available" />
               )}
             </button>

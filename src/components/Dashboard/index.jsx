@@ -1,10 +1,11 @@
-import React, { useState, useMemo } from 'react';
-import { FileText, Trash2, Plus, IndianRupee, Receipt, Edit3, Search, Copy, X, CheckCircle, Clock, AlertTriangle, MessageCircle, Mail, Send, Package, Download, ChevronRight, Users } from 'lucide-react';
+import React, { useState, useMemo, useEffect } from 'react';
+import { FileText, Trash2, Plus, IndianRupee, Receipt, Edit3, Search, Copy, X, CheckCircle, Clock, AlertTriangle, MessageCircle, Mail, Send, Package, Download, ChevronRight, Users, TrendingUp } from 'lucide-react';
 
 // Shared global components & utilities
 import HelpButton from '../HelpButton';
 import { formatCurrency, INVOICE_TYPES, getFYOptions } from '../../utils';
 import { toast } from '../Toast';
+import { getAllProducts } from '../../store';
 
 // Local Dashboard components & constants
 import ReceiptModal from './ReceiptModal';
@@ -18,131 +19,257 @@ import { useDashboardAlerts } from './hooks/useDashboardAlerts';
 import { useReceiptModal } from './hooks/useReceiptModal';
 
 // ---------------------------------------------------------------------------
-// ERP-style UI stylesheet (Injected dynamically)
+// Sepia / parchment palette — scoped to the dashboard only.
 // ---------------------------------------------------------------------------
-if (typeof document !== 'undefined' && !document.getElementById('erp-dashboard-css')) {
+if (typeof document !== 'undefined' && !document.getElementById('erp-dashboard-sepia-css')) {
   const s = document.createElement('style');
-  s.id = 'erp-dashboard-css';
+  s.id = 'erp-dashboard-sepia-css';
   s.textContent = `
-    .erp-page { font-size: 0.875rem; background: transparent; color: var(--text-primary); --text-muted: var(--text-secondary); padding:0.25rem; border-radius:10px; }
-    .erp-page h1, .erp-page h2, .erp-page h3, .erp-page h4 { color: var(--text-primary); }
+    /* ---------- Scoped palette variables ---------- */
+    .erp-page {
+      --sepia-body:        #e6dcc1;
+      --sepia-card:        #d9cfb4;
+      --sepia-card-alt:    #e8dfc5;
+      --sepia-border:      #b8a988;
+      --sepia-border-dark: #a4967a;
+      --sepia-text:        #2a2418;
+      --sepia-muted:       #5c5040;
+      --sepia-olive:       #b6b677;
+      --sepia-olive-dark:  #9a9a5a;
+      --sepia-sage:        #a8c58a;
+      --sepia-sage-dark:   #7a9a5a;
+      --sepia-terracotta:  #d99a78;
+      --sepia-terracotta-dark: #b0724a;
+      --sepia-mustard:     #dcc766;
+      --sepia-mustard-dark: #b8a340;
+      --sepia-light-sage:  #bcd6a4;
+      --sepia-btn-green:   #4a7a4a;
+      --sepia-btn-green-hov: #3a6a3a;
+      --sepia-danger:      #a8442e;
+
+      /* Override the app-wide tokens so every nested rule picks up the sepia look */
+      --card-bg:      var(--sepia-card);
+      --border:       var(--sepia-border);
+      --text-primary: var(--sepia-text);
+      --text-secondary: var(--sepia-muted);
+      --text-muted:   var(--sepia-muted);
+      --bg-secondary: var(--sepia-card-alt);
+      --bg-tertiary:  var(--sepia-card);
+      --hover:        rgba(92, 80, 64, 0.10);
+      --hover-strong: rgba(92, 80, 64, 0.18);
+      --primary:      var(--sepia-btn-green);
+      --primary-light: rgba(74, 122, 74, 0.16);
+      --danger:       var(--sepia-danger);
+      --danger-light: rgba(168, 68, 46, 0.18);
+      --success:      #3a6a3a;
+      --warn-text:    #8a6020;
+      --warn-bg:      rgba(220, 200, 100, 0.45);
+      --warn-border:  #b88830;
+    }
+
+    /* ---------- Page shell ---------- */
+    .erp-page {
+      font-size: 0.875rem;
+      background: var(--sepia-body);
+      color: var(--sepia-text);
+      padding: 1rem 1rem 1.25rem;
+      border-radius: 14px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+    .erp-page h1, .erp-page h2, .erp-page h3, .erp-page h4 { color: var(--sepia-text); }
     .erp-header { display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; margin-bottom:1.1rem; flex-wrap:wrap; }
-    .erp-crumb { font-size:0.72rem; color:var(--text-muted); margin-bottom:2px; display:flex; align-items:center; gap:4px; }
-    .erp-title { font-size:1.3rem; font-weight:700; margin:0; letter-spacing:-0.01em; color: var(--text-primary); }
-    .erp-title .hi, .erp-hi { font-weight:500; opacity:0.8; font-size:0.85em; }
-    .erp-subtitle { color:var(--text-muted); font-size:0.8rem; margin-top:3px; }
+    .erp-crumb { font-size:0.72rem; color:var(--sepia-muted); margin-bottom:2px; display:flex; align-items:center; gap:4px; }
+    .erp-title { font-size:1.3rem; font-weight:700; margin:0; letter-spacing:-0.01em; color: var(--sepia-text); }
+    .erp-title .hi, .erp-hi { font-weight:500; opacity:0.75; font-size:0.85em; }
+    .erp-subtitle { color:var(--sepia-muted); font-size:0.8rem; margin-top:3px; }
 
-    .erp-kpi-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:0.75rem; margin-bottom:1rem; }
-    @media (max-width:1100px){ .erp-kpi-grid{ grid-template-columns:repeat(2,1fr); } }
-    @media (max-width:560px){ .erp-kpi-grid{ grid-template-columns:1fr; } }
-    .erp-kpi { background: var(--card-bg); border:1px solid var(--border); border-radius:8px; padding:0.85rem 1rem; display:flex; gap:0.75rem; align-items:flex-start; backdrop-filter: blur(12px); }
-    .erp-kpi-icon { width:36px; height:36px; border-radius:8px; display:flex; align-items:center; justify-content:center; flex-shrink:0; background: var(--bg-secondary); }
-    .erp-kpi-label { font-size:0.7rem; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.05em; }
-    .erp-kpi-label .hi { text-transform:none; letter-spacing:0; font-weight:500; }
-    .erp-kpi-value { font-size:1.22rem; font-weight:700; margin-top:2px; font-variant-numeric:tabular-nums; line-height:1.2; color: var(--text-primary); }
-    .erp-kpi-value.sm { font-size:1rem; }
-    .erp-kpi-sub { font-size:0.72rem; color:var(--text-muted); margin-top:3px; }
-
+    /* ---------- Alerts ---------- */
     .erp-alert { display:flex; align-items:center; gap:0.75rem; border-radius:8px; padding:0.7rem 1rem; margin-bottom:0.85rem; font-size:0.84rem; flex-wrap:wrap; }
-    .erp-alert.danger { background: rgba(239, 68, 68, 0.18); border:1px solid rgba(239, 68, 68, 0.4); }
-    .erp-alert.warn { background: rgba(245, 158, 11, 0.18); border:1px solid rgba(245, 158, 11, 0.4); }
+    .erp-alert.danger { background: rgba(168, 68, 46, 0.15); border:1px solid rgba(168, 68, 46, 0.4); }
+    .erp-alert.warn   { background: rgba(200, 165, 55, 0.22); border:1px solid rgba(184, 136, 48, 0.5); }
 
-    .erp-panel { background: var(--card-bg); border:1px solid var(--border); border-radius:12px; overflow:hidden; backdrop-filter: blur(12px); }
-    .erp-panel-head { display:flex; align-items:center; justify-content:space-between; gap:0.75rem; padding:0.7rem 1rem; border-bottom:1px solid var(--border); flex-wrap:wrap; background: transparent; }
-    .erp-panel-title { margin:0; font-size:0.95rem; font-weight:700; color: var(--text-primary); }
-    .erp-filters { display:flex; flex-wrap:wrap; gap:0.5rem; padding:0.65rem 1rem; border-bottom:1px solid var(--border); align-items:center; background: var(--bg-tertiary); }
+    /* ---------- Panels (Invoices table etc.) ---------- */
+    .erp-panel { background: var(--sepia-card-alt); border:1px solid var(--sepia-border); border-radius:12px; overflow:hidden; }
+    .erp-panel-head { display:flex; align-items:center; justify-content:space-between; gap:0.75rem; padding:0.7rem 1rem; border-bottom:1px solid var(--sepia-border); flex-wrap:wrap; background: transparent; }
+    .erp-panel-title { margin:0; font-size:0.95rem; font-weight:700; color: var(--sepia-text); }
+    .erp-filters { display:flex; flex-wrap:wrap; gap:0.5rem; padding:0.65rem 1rem; border-bottom:1px solid var(--sepia-border); align-items:center; background: var(--sepia-card); }
 
-    .erp-input, select.erp-input { background: var(--bg-secondary); border:1px solid var(--border); color: var(--text-primary); border-radius:6px; padding:0.38rem 0.6rem; font-size:0.8rem; outline:none; }
-    select.erp-input option { background: var(--card-bg); color: var(--text-primary); }
-    .erp-input:focus { border-color: var(--primary); }
+    .erp-input, select.erp-input {
+      background: var(--sepia-card-alt);
+      border:1px solid var(--sepia-border);
+      color: var(--sepia-text);
+      border-radius:6px; padding:0.38rem 0.6rem; font-size:0.8rem; outline:none;
+    }
+    select.erp-input option { background: var(--sepia-card-alt); color: var(--sepia-text); }
+    .erp-input:focus { border-color: var(--sepia-btn-green); }
 
-    .erp-search { display:flex; align-items:center; gap:0.4rem; background: var(--bg-secondary); border:1px solid var(--border); border-radius:6px; padding: 0 0.6rem; flex:1; min-width:180px; max-width:320px; }
-    .erp-search input { border:none; background:transparent; color: var(--text-primary); padding:0.4rem 0; font-size:0.8rem; width:100%; outline:none; }
-    .erp-search input::placeholder { color: var(--text-muted); }
+    .erp-search { display:flex; align-items:center; gap:0.4rem; background: var(--sepia-card-alt); border:1px solid var(--sepia-border); border-radius:6px; padding: 0 0.6rem; flex:1; min-width:180px; max-width:320px; }
+    .erp-search input { border:none; background:transparent; color: var(--sepia-text); padding:0.4rem 0; font-size:0.8rem; width:100%; outline:none; }
+    .erp-search input::placeholder { color: var(--sepia-muted); }
 
-    .erp-mini-btn { display:inline-flex; align-items:center; gap:0.3rem; border:1px solid var(--border); background: var(--bg-secondary); color: var(--text-primary); border-radius:6px; padding:0.28rem 0.6rem; font-size:0.72rem; cursor:pointer; white-space:nowrap; }
-    .erp-mini-btn:hover { background: var(--hover); }
+    .erp-mini-btn {
+      display:inline-flex; align-items:center; gap:0.3rem;
+      border:1px solid var(--sepia-border);
+      background: var(--sepia-card-alt);
+      color: var(--sepia-text);
+      border-radius:6px; padding:0.28rem 0.6rem; font-size:0.72rem; cursor:pointer; white-space:nowrap;
+    }
+    .erp-mini-btn:hover { background: var(--sepia-card); }
     .erp-mini-btn:disabled { opacity:0.5; cursor:not-allowed; }
-    .erp-mini-btn.danger { color: var(--danger); border-color: var(--danger); }
+    .erp-mini-btn.danger { color: var(--sepia-danger); border-color: var(--sepia-danger); }
 
     .erp-table-scroll { overflow-x:auto; background: transparent; }
     .erp-table { width:100%; border-collapse:collapse; font-size:0.82rem; }
-    .erp-table thead th { position:sticky; top:0; background: var(--bg-tertiary); color: var(--text-primary); text-align:left; font-size:0.68rem; text-transform:uppercase; letter-spacing:0.05em; font-weight:700; padding:0.55rem 0.6rem; border-bottom:1px solid var(--border); white-space:nowrap; z-index:1; }
-    .erp-table thead th .hi { text-transform:none; letter-spacing:0; font-weight:500; opacity:0.8; }
-    .erp-table tbody td { padding:0.5rem 0.6rem; border-bottom:1px solid var(--border); vertical-align:middle; color: var(--text-primary); }
-    .erp-table tbody tr:hover { background: var(--hover); }
+    .erp-table thead th {
+      position:sticky; top:0;
+      background: var(--sepia-card);
+      color: var(--sepia-text);
+      text-align:left; font-size:0.68rem; text-transform:uppercase; letter-spacing:0.05em; font-weight:700;
+      padding:0.55rem 0.6rem; border-bottom:1px solid var(--sepia-border); white-space:nowrap; z-index:1;
+    }
+    .erp-table thead th .hi { text-transform:none; letter-spacing:0; font-weight:500; opacity:0.75; }
+    .erp-table tbody td { padding:0.5rem 0.6rem; border-bottom:1px solid var(--sepia-border); vertical-align:middle; color: var(--sepia-text); }
+    .erp-table tbody tr:hover { background: rgba(92, 80, 64, 0.06); }
     .erp-table .num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
-    .erp-table .muted { color: var(--text-muted); }
+    .erp-table .muted { color: var(--sepia-muted); }
 
-    .erp-badge { display:inline-block; font-size:0.72rem; font-weight:600; color: var(--text-primary); background: var(--bg-secondary); border:1px solid var(--border); padding:0.12rem 0.5rem; border-radius:4px; white-space:nowrap; }
-    .erp-type { display:inline-block; font-size:0.7rem; color: var(--text-muted); white-space:nowrap; }
-    .erp-status-select { border-radius:999px; font-size:0.72rem; font-weight:600; padding:0.14rem 0.4rem; border:1px solid; cursor:pointer; background: var(--bg-secondary); color: var(--text-primary); }
-    .erp-status-select option { background: var(--card-bg); color: var(--text-primary); }
+    .erp-badge { display:inline-block; font-size:0.72rem; font-weight:600; color: var(--sepia-text); background: var(--sepia-card-alt); border:1px solid var(--sepia-border); padding:0.12rem 0.5rem; border-radius:4px; white-space:nowrap; }
+    .erp-type { display:inline-block; font-size:0.7rem; color: var(--sepia-muted); white-space:nowrap; }
+    .erp-status-select { border-radius:999px; font-size:0.72rem; font-weight:600; padding:0.14rem 0.4rem; border:1px solid; cursor:pointer; background: var(--sepia-card-alt); color: var(--sepia-text); }
+    .erp-status-select option { background: var(--sepia-card-alt); color: var(--sepia-text); }
 
     .erp-actions { display:flex; gap:0.15rem; justify-content:flex-end; flex-wrap:nowrap; }
-    .erp-actions .icon-btn { width:26px; height:26px; color: var(--text-primary); }
-    .erp-actions .icon-btn:hover { background: var(--hover); }
+    .erp-actions .icon-btn { width:26px; height:26px; color: var(--sepia-text); }
+    .erp-actions .icon-btn:hover { background: rgba(92, 80, 64, 0.10); }
 
-    .erp-foot { display:flex; justify-content:space-between; gap:0.75rem; padding:0.55rem 1rem; font-size:0.75rem; color: var(--text-muted); border-top:1px solid var(--border); flex-wrap:wrap; background: var(--bg-tertiary); }
-    .erp-foot strong { color: var(--text-primary); font-variant-numeric:tabular-nums; }
-    .erp-empty { padding:3rem 1rem; text-align:center; color: var(--text-muted); display:flex; flex-direction:column; align-items:center; gap:0.6rem; }
+    .erp-foot { display:flex; justify-content:space-between; gap:0.75rem; padding:0.55rem 1rem; font-size:0.75rem; color: var(--sepia-muted); border-top:1px solid var(--sepia-border); flex-wrap:wrap; background: var(--sepia-card); }
+    .erp-foot strong { color: var(--sepia-text); font-variant-numeric:tabular-nums; }
+    .erp-empty { padding:3rem 1rem; text-align:center; color: var(--sepia-muted); display:flex; flex-direction:column; align-items:center; gap:0.6rem; }
     .erp-stock-pill { padding:0.35rem 0.7rem; border-radius:6px; font-size:0.78rem; border:1px solid; }
-    .erp-bulkbar { display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap; padding:0.6rem 1rem; margin:0.65rem 1rem; background: var(--primary-light); border:1px solid var(--border); border-radius:8px; }
-  `;
-  document.head.appendChild(s);
-}
+    .erp-bulkbar { display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap; padding:0.6rem 1rem; margin:0.65rem 1rem; background: rgba(74, 122, 74, 0.16); border:1px solid var(--sepia-border); border-radius:8px; }
 
-if (typeof document !== 'undefined' && !document.getElementById('erp-dash-v2-css')) {
-  const s2 = document.createElement('style');
-  s2.id = 'erp-dash-v2-css';
-  s2.textContent = `
+    /* ---------- Top / mid grids ---------- */
     .dash-top-grid { display:grid; grid-template-columns:1.6fr 1fr; gap:0.9rem; margin-bottom:0.9rem; }
     .dash-mid-grid { display:grid; grid-template-columns:1.5fr 1fr; gap:0.9rem; margin-bottom:0.9rem; }
     @media (max-width:1000px){ .dash-top-grid, .dash-mid-grid { grid-template-columns:1fr; } }
 
-    .dash-card { background: var(--card-bg); border:1px solid var(--border); border-radius:14px; padding:1rem 1.15rem; box-shadow: 0 4px 12px rgba(0,0,0,0.10); backdrop-filter: blur(12px); color: var(--text-primary); }
+    .dash-card {
+      background: var(--sepia-card-alt);
+      border:1px solid var(--sepia-border);
+      border-radius:14px;
+      padding:1rem 1.15rem;
+      box-shadow: 0 2px 8px rgba(60, 48, 32, 0.10);
+      color: var(--sepia-text);
+    }
     .dash-card-head { display:flex; justify-content:space-between; align-items:center; gap:0.5rem; margin-bottom:0.75rem; }
-    .dash-card-title { margin:0; font-size:0.92rem; font-weight:600; color: var(--text-primary); }
-    .dash-card-title .hi { font-weight:500; opacity:0.8; font-size:0.82em; }
-    .dash-chip { font-size:0.7rem; padding:0.22rem 0.6rem; border-radius:999px; border:1px solid var(--border); color: var(--text-primary); background: var(--bg-secondary); white-space:nowrap; }
+    .dash-card-title { margin:0; font-size:0.92rem; font-weight:700; color: var(--sepia-text); }
+    .dash-card-title .hi { font-weight:500; opacity:0.75; font-size:0.82em; }
+    .dash-chip { font-size:0.7rem; padding:0.22rem 0.6rem; border-radius:999px; border:1px solid var(--sepia-border); color: var(--sepia-text); background: var(--sepia-card-alt); white-space:nowrap; }
 
-    .dash-chart-legend { display:flex; gap:1rem; margin-top:0.5rem; font-size:0.72rem; color: var(--text-muted); flex-wrap:wrap; }
+    .dash-chart-legend { display:flex; gap:1rem; margin-top:0.5rem; font-size:0.72rem; color: var(--sepia-muted); flex-wrap:wrap; }
     .dash-chart-legend span { display:inline-flex; align-items:center; gap:0.3rem; }
     .dash-chart-legend i { width:10px; height:3px; border-radius:2px; display:inline-block; }
 
     .dash-kpi-grid { display:grid; grid-template-columns:1fr 1fr; gap:0.9rem; }
     @media (max-width:560px){ .dash-kpi-grid { grid-template-columns:1fr; } }
     .dash-kpi { display:flex; flex-direction:column; }
-    .dash-kpi-value { font-size:1.25rem; font-weight:700; letter-spacing:-0.01em; margin:2px 0 2px; font-variant-numeric:tabular-nums; line-height:1.25; color: var(--text-primary); }
-    .dash-kpi-delta-up { color: var(--success); font-size:0.76rem; font-weight:600; }
-    .dash-kpi-delta-down { color: var(--danger); font-size:0.76rem; font-weight:600; }
-    .dash-kpi-sub { color: var(--text-muted); font-size:0.68rem; margin-top:2px; }
+    .dash-kpi-value { font-size:1.25rem; font-weight:700; letter-spacing:-0.01em; margin:2px 0 2px; font-variant-numeric:tabular-nums; line-height:1.25; color: var(--sepia-text); }
+    .dash-kpi-delta-up { color: #2a5a2a; font-size:0.76rem; font-weight:700; }
+    .dash-kpi-delta-down { color: var(--sepia-danger); font-size:0.76rem; font-weight:700; }
+    .dash-kpi-sub { color: var(--sepia-muted); font-size:0.68rem; margin-top:2px; }
     .dash-kpi-spark { margin-top:auto; padding-top:0.5rem; align-self:flex-end; }
 
-    .dash-progress { height:5px; border-radius:999px; background: var(--hover-strong); overflow:hidden; margin-bottom:0.6rem; }
-    .dash-progress-fill { height:100%; border-radius:999px; background:linear-gradient(90deg, #34d399, #10b981); transition:width 0.4s ease; }
+    /* Financial health card — olive green */
+    .dash-card-financial {
+      background: var(--sepia-olive);
+      border-color: var(--sepia-olive-dark);
+    }
+    .dash-card-financial .dash-card-title { color: #2a2418; }
+    .dash-card-financial .dash-chip { background: rgba(255,255,255,0.28); border-color: rgba(0,0,0,0.18); color: #2a2418; }
+    .dash-card-financial .dash-chart-legend { color: #3a3218; }
+    .dash-card-financial .dash-chart-legend span { color: #3a3218; }
 
-    .dash-check-item { display:flex; align-items:center; gap:0.65rem; width:100%; text-align:left; padding:0.5rem 0.6rem; border:none; background:transparent; border-radius:10px; cursor:pointer; color: var(--text-primary); font-size:0.83rem; }
-    .dash-check-item:not(.dash-check-static):hover { background: var(--hover); }
+    /* Sales Overview — sage green */
+    .dash-kpi-sales { background: var(--sepia-sage); border-color: var(--sepia-sage-dark); }
+    .dash-kpi-sales .dash-card-title,
+    .dash-kpi-sales .dash-kpi-value { color: #1f2e15; }
+    .dash-kpi-sales .dash-kpi-sub { color: #3a4a28; }
+
+    /* Outstanding Receivables — terracotta */
+    .dash-kpi-outstanding { background: var(--sepia-terracotta); border-color: var(--sepia-terracotta-dark); }
+    .dash-kpi-outstanding .dash-card-title { color: #4a2210; }
+    .dash-kpi-outstanding .dash-kpi-value { color: #7a2a10 !important; }
+    .dash-kpi-outstanding .dash-kpi-sub { color: #5a3018; }
+
+    /* Tax Collected + GST Compliance — mustard */
+    .dash-kpi-tax, .dash-kpi-compliance { background: var(--sepia-mustard); border-color: var(--sepia-mustard-dark); }
+    .dash-kpi-tax .dash-card-title,
+    .dash-kpi-tax .dash-kpi-value,
+    .dash-kpi-compliance .dash-card-title,
+    .dash-kpi-compliance .dash-kpi-value { color: #3a2a08 !important; }
+    .dash-kpi-tax .dash-kpi-sub,
+    .dash-kpi-compliance .dash-kpi-sub { color: #5a4518; }
+
+    /* Gross Profit — light sage */
+    .dash-kpi-profit { background: var(--sepia-light-sage); border-color: #8aa870; }
+    .dash-kpi-profit .dash-card-title { color: #1f3312; }
+    .dash-kpi-profit .dash-kpi-sub { color: #3d5028; }
+
+    .dash-progress { height:5px; border-radius:999px; background: rgba(92, 80, 64, 0.20); overflow:hidden; margin-bottom:0.6rem; }
+    .dash-progress-fill { height:100%; border-radius:999px; background:linear-gradient(90deg, #3a6a3a, #2a5a2a); transition:width 0.4s ease; }
+
+    .dash-check-item { display:flex; align-items:center; gap:0.65rem; width:100%; text-align:left; padding:0.5rem 0.6rem; border:none; background:transparent; border-radius:10px; cursor:pointer; color: var(--sepia-text); font-size:0.83rem; }
+    .dash-check-item:not(.dash-check-static):hover { background: rgba(92, 80, 64, 0.08); }
     .dash-check-static { cursor:default; opacity:0.75; }
-    .dash-check-dot { display:inline-flex; color: var(--text-muted); flex-shrink:0; }
-    .dash-check-dot.done { color: #34d399; }
+    .dash-check-dot { display:inline-flex; color: var(--sepia-muted); flex-shrink:0; }
+    .dash-check-dot.done { color: #2a5a2a; }
     .dash-check-label { flex:1; }
-    .dash-check-arrow { color: var(--text-muted); }
+    .dash-check-arrow { color: var(--sepia-muted); }
 
     .dash-quick-grid { display:grid; grid-template-columns:repeat(3, 1fr); gap:0.55rem; }
     @media (max-width:560px){ .dash-quick-grid { grid-template-columns:repeat(2, 1fr); } }
-    .dash-quick-btn { display:flex; flex-direction:column; align-items:center; gap:0.4rem; padding:0.85rem 0.4rem; border-radius:12px; border:1px solid var(--border); background: var(--bg-secondary); color: var(--text-primary); font-size:0.72rem; cursor:pointer; transition:background 0.15s ease, transform 0.1s ease; }
-    .dash-quick-btn:hover { background: var(--hover); }
+    .dash-quick-btn {
+      display:flex; flex-direction:column; align-items:center; gap:0.4rem;
+      padding:0.85rem 0.4rem; border-radius:12px;
+      border:1px solid var(--sepia-border);
+      background: var(--sepia-card-alt);
+      color: var(--sepia-text);
+      font-size:0.72rem; cursor:pointer;
+      transition:background 0.15s ease, transform 0.1s ease;
+    }
+    .dash-quick-btn:hover { background: var(--sepia-card); }
     .dash-quick-btn:active { transform:scale(0.97); }
 
-    .row-overdue { background: rgba(239, 68, 68, 0.08) !important; }
+    .row-overdue { background: rgba(168, 68, 46, 0.10) !important; }
+
+    /* Primary button (New Invoice / Record Payment etc.) */
+    .erp-page .btn.btn-primary {
+      background: var(--sepia-btn-green) !important;
+      color: #f5edd5 !important;
+      border-color: var(--sepia-btn-green-hov) !important;
+    }
+    .erp-page .btn.btn-primary:hover { background: var(--sepia-btn-green-hov) !important; }
+
+    .erp-page .btn.btn-secondary {
+      background: var(--sepia-card-alt) !important;
+      color: var(--sepia-text) !important;
+      border-color: var(--sepia-border) !important;
+    }
+    .erp-page .btn.btn-secondary:hover { background: var(--sepia-card) !important; }
+
+    /* Modal inner look */
+    .erp-page ~ .modal-overlay .modal-content,
+    .modal-overlay .modal-content {
+      background: var(--sepia-card-alt, #e8dfc5);
+      color: var(--sepia-text, #2a2418);
+      border:1px solid var(--sepia-border, #b8a988);
+    }
   `;
-  document.head.appendChild(s2);
+  document.head.appendChild(s);
 }
 
 // ---------------------------------------------------------------------------
-// Pure SVG Components — colors use CSS variables so they flip with the theme.
+// Pure SVG Components
 // ---------------------------------------------------------------------------
 function Sparkline({ data, color = 'var(--text-primary)', width = 92, height = 28 }) {
   const clean = (data || []).map(v => Number(v) || 0);
@@ -155,7 +282,7 @@ function Sparkline({ data, color = 'var(--text-primary)', width = 92, height = 2
   const last = pts[pts.length - 1];
   return (
     <svg width={width} height={height} style={{ display: 'block', overflow: 'visible' }}>
-      <path d={`${line} L${width},${height} L0,${height} Z`} fill={color} opacity="0.15" />
+      <path d={`${line} L${width},${height} L0,${height} Z`} fill={color} opacity="0.18" />
       <path d={line} fill="none" stroke={color} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
       <circle cx={last[0]} cy={last[1]} r="2.4" fill={color} />
     </svg>
@@ -165,10 +292,11 @@ function Sparkline({ data, color = 'var(--text-primary)', width = 92, height = 2
 function FinancialHealthChart({ months }) {
   const W = 560, H = 200, P = { t: 12, r: 10, b: 24, l: 48 };
   const iw = W - P.l - P.r, ih = H - P.t - P.b;
+  // Colours tuned for the olive background of the Financial Health card.
   const keys = [
-    { k: 'invoiced',    color: 'var(--text-primary)' },
-    { k: 'received',    color: '#34d399' },
-    { k: 'outstanding', color: '#f87171' },
+    { k: 'invoiced',    color: '#f5edd5' },   // cream line
+    { k: 'received',    color: '#3a6a3a' },   // deep green
+    { k: 'outstanding', color: '#8a2f18' },   // deep red
   ];
   const all = (months || []).flatMap(m => keys.map(({ k }) => m[k]));
   const max = Math.max(...all, 1);
@@ -181,15 +309,17 @@ function FinancialHealthChart({ months }) {
     <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
       {ticks.map((t, i) => (
         <g key={i}>
-          <line x1={P.l} x2={W - P.r} y1={y(t)} y2={y(t)} stroke="var(--border)" strokeWidth="1" strokeDasharray={i === 0 ? '' : '3 4'} opacity="0.7" />
-          <text x={P.l - 8} y={y(t) + 4} textAnchor="end" fontSize="10" fill="var(--text-muted)">{fmtTick(t)}</text>
+          <line x1={P.l} x2={W - P.r} y1={y(t)} y2={y(t)}
+            stroke="rgba(0,0,0,0.22)" strokeWidth="1"
+            strokeDasharray={i === 0 ? '' : '3 4'} />
+          <text x={P.l - 8} y={y(t) + 4} textAnchor="end" fontSize="10" fill="#3a3218">{fmtTick(t)}</text>
         </g>
       ))}
       {keys.map(({ k, color }) => (
-        <path key={k} d={path(k)} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        <path key={k} d={path(k)} fill="none" stroke={color} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
       ))}
       {months.map((m, i) => (
-        <text key={m.key} x={x(i)} y={H - 6} textAnchor="middle" fontSize="10" fill="var(--text-muted)">{m.label}</text>
+        <text key={m.key} x={x(i)} y={H - 6} textAnchor="middle" fontSize="10" fill="#3a3218">{m.label}</text>
       ))}
     </svg>
   );
@@ -199,7 +329,6 @@ function FinancialHealthChart({ months }) {
 // Main Dashboard Component
 // ---------------------------------------------------------------------------
 export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
-  // --- 1. Hook Initializations ---
   const metrics = useDashboardMetrics() || {};
   const bills = metrics.bills || [];
   const stats = metrics.stats || { byCurrency: {}, count: 0 };
@@ -228,11 +357,52 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
     onEdit, onDuplicate, onConvert,
   }) || {};
 
-  // --- 2. Local UI State ---
+  // --- Gross Profit ---
+  const [products, setProducts] = useState([]);
+  useEffect(() => {
+    getAllProducts().then(setProducts).catch(() => {});
+  }, []);
+
+  const grossProfit = useMemo(() => {
+    const byId = new Map(products.map(p => [p.id, p]));
+    const byName = new Map(products.map(p => [(p.name || '').trim().toLowerCase(), p]));
+    let profit = 0;
+    let sales = 0;
+    let unknownCostLines = 0;
+    for (const bill of filtered) {
+      const items = bill?.data?.items || [];
+      for (const it of items) {
+        const qty = Number(it.quantity) || 0;
+        const rate = Number(it.rate) || 0;
+        if (qty <= 0) continue;
+        const stamped = Number(it.costAtSale);
+        let cost;
+        if (Number.isFinite(stamped) && stamped > 0) {
+          cost = stamped;
+        } else {
+          const prod = (it.productId && byId.get(it.productId))
+            || byName.get((it.name || '').trim().toLowerCase());
+          const current = Number(prod?.purchasePrice);
+          if (Number.isFinite(current) && current > 0) cost = current;
+          else { cost = 0; unknownCostLines += 1; }
+        }
+        sales += qty * rate;
+        profit += qty * (rate - cost);
+      }
+    }
+    return {
+      profit,
+      sales,
+      margin: sales > 0 ? (profit / sales) * 100 : 0,
+      unknownCostLines,
+    };
+  }, [filtered, products]);
+
+  // --- Local UI State ---
   const [showColumnPicker, setShowColumnPicker] = useState(false);
   const [showRemindAll, setShowRemindAll] = useState(false);
 
-  // --- 3. Local Computations ---
+  // --- Local Computations ---
   const overdueByCurrency = useMemo(() => {
     const acc = {};
     for (const b of overdueBills) {
@@ -277,7 +447,6 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
 
   const hasFilters = Boolean(filters.search || filters.typeFilter !== 'all' || filters.statusFilter !== 'all' || filters.fyFilter !== 'all' || filters.dateFrom || filters.dateTo);
 
-  // --- 4. Render ---
   return (
     <div className="erp-page">
       <div className="erp-header">
@@ -305,10 +474,11 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
             <option value="month">This Month (इस महीने)</option>
           </select>
           <HelpButton title="Dashboard (डैशबोर्ड) — how to use (कैसे इस्तेमाल करें)">
-            <ul style={{ paddingLeft: '1.1rem', margin: 0, color: 'var(--text-primary)' }}>
+            <ul style={{ paddingLeft: '1.1rem', margin: 0 }}>
               <li><strong>Financial Health (वित्तीय स्थिति)</strong> — last 6 months: invoiced vs received vs outstanding.</li>
-              <li><strong>KPI cards (कार्ड)</strong> — sales, outstanding, tax collected and GST compliance.</li>
+              <li><strong>KPI cards (कार्ड)</strong> — sales, outstanding, tax collected, GST compliance and gross profit.</li>
               <li><strong>Checklist (चेकलिस्ट)</strong> — ticks itself off as you set up profile, clients, invoices and payments.</li>
+              <li><strong>Gross Profit (कुल मुनाफ़ा)</strong> — what you earned after subtracting purchase cost. Respects the filters above.</li>
             </ul>
           </HelpButton>
           <button className="btn btn-primary" onClick={onNew}><Plus size={16} /> New Invoice (नया इनवॉइस)</button>
@@ -318,12 +488,12 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
       {overdueBills.length > 0 && (
         <div className="erp-alert danger" onClick={() => { filters.setStatusFilter('overdue'); }}
           style={{ cursor: 'pointer' }}>
-          <AlertTriangle size={18} style={{ color: 'var(--danger)', flexShrink: 0 }} />
+          <AlertTriangle size={18} style={{ color: 'var(--sepia-danger)', flexShrink: 0 }} />
           <div style={{ flex: 1, minWidth: 200 }}>
-            <span style={{ fontWeight: 700, color: 'var(--danger)' }}>
+            <span style={{ fontWeight: 700, color: 'var(--sepia-danger)' }}>
               {overdueBills.length} overdue invoice{overdueBills.length > 1 ? 's' : ''} ({overdueBills.length} देरी से बकाया इनवॉइस)
             </span>
-            <span style={{ color: 'var(--text-secondary)', marginLeft: 8, fontSize: '0.8rem' }}>
+            <span style={{ color: 'var(--sepia-muted)', marginLeft: 8, fontSize: '0.8rem' }}>
               — {overdueStr} outstanding (बाकी राशि)
             </span>
           </div>
@@ -331,7 +501,7 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
             onClick={(e) => { e.stopPropagation(); setShowRemindAll(true); }}>
             <Send size={12} /> Remind All (सबको याद दिलाएं)
           </button>
-          <span style={{ fontSize: '0.75rem', color: 'var(--danger)', fontWeight: 600, whiteSpace: 'nowrap' }}>View all (सभी देखें) <ChevronRight size={12} style={{ verticalAlign: '-2px' }} /></span>
+          <span style={{ fontSize: '0.75rem', color: 'var(--sepia-danger)', fontWeight: 600, whiteSpace: 'nowrap' }}>View all (सभी देखें) <ChevronRight size={12} style={{ verticalAlign: '-2px' }} /></span>
         </div>
       )}
 
@@ -349,19 +519,19 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
                 {overdueBills.map(bill => {
                   const phone = actions.getClientPhone ? actions.getClientPhone(bill) : '';
                   return (
-                    <div key={bill.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.6rem 0', borderBottom: '1px solid var(--border)', gap: '0.5rem' }}>
+                    <div key={bill.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.6rem 0', borderBottom: '1px solid var(--sepia-border)', gap: '0.5rem' }}>
                       <div>
-                        <span className="font-medium" style={{ color: 'var(--text-primary)' }}>{bill.clientName}</span>
+                        <span className="font-medium">{bill.clientName}</span>
                         <span className="text-muted" style={{ marginLeft: 8, fontSize: '0.8rem' }}>{bill.invoiceNumber}</span>
                         {(() => {
                           const outCur = bill.currency || bill.data?.invoiceOptions?.currency;
                           const out = bill.totalAmount - (bill.paidAmount || 0);
                           if (out < -0.005) {
-                            return <span style={{ marginLeft: 8, fontWeight: 600, color: 'var(--text-primary)', fontSize: '0.85rem' }}>
+                            return <span style={{ marginLeft: 8, fontWeight: 600, fontSize: '0.85rem' }}>
                               Overpaid (अधिक भुगतान) {formatCurrency(Math.abs(out), outCur)}
                             </span>;
                           }
-                          return <span style={{ marginLeft: 8, fontWeight: 600, color: 'var(--danger)', fontSize: '0.85rem' }}>
+                          return <span style={{ marginLeft: 8, fontWeight: 600, color: 'var(--sepia-danger)', fontSize: '0.85rem' }}>
                             {formatCurrency(Math.max(0, out), outCur)} (बाकी)
                           </span>;
                         })()}
@@ -384,21 +554,21 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
       )}
 
       <div className="dash-top-grid">
-        <div className="dash-card">
+        <div className="dash-card dash-card-financial">
           <div className="dash-card-head">
             <h3 className="dash-card-title">Financial Health <span className="hi">(वित्तीय स्थिति)</span></h3>
             <span className="dash-chip">Last 6 months (पिछले 6 महीने)</span>
           </div>
           <FinancialHealthChart months={monthlySeries} />
           <div className="dash-chart-legend">
-            <span><i style={{ background: 'var(--text-primary)' }} />Invoiced (बिल किया गया)</span>
-            <span><i style={{ background: '#34d399' }} />Received (प्राप्त)</span>
-            <span><i style={{ background: '#f87171' }} />Outstanding (बाकी)</span>
+            <span><i style={{ background: '#f5edd5' }} />Invoiced (बिल किया गया)</span>
+            <span><i style={{ background: '#3a6a3a' }} />Received (प्राप्त)</span>
+            <span><i style={{ background: '#8a2f18' }} />Outstanding (बाकी)</span>
           </div>
         </div>
 
         <div className="dash-kpi-grid">
-          <div className="dash-card dash-kpi">
+          <div className="dash-card dash-kpi dash-kpi-sales">
             <h3 className="dash-card-title">Sales Overview <span className="hi">(कुल बिक्री)</span></h3>
             {Object.entries(stats.byCurrency).map(([cur, v]) => (
               <div key={cur} className="dash-kpi-value" style={multiCurrency ? { fontSize: '1rem' } : undefined}>
@@ -410,44 +580,76 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
               {deltaSales >= 0 ? '▲' : '▼'} {Math.abs(deltaSales).toFixed(2)}%
             </div>
             <div className="dash-kpi-sub">vs last month (पिछले महीने से)</div>
-            <div className="dash-kpi-spark"><Sparkline data={monthlySeries.map(m => m.invoiced)} color="var(--text-primary)" /></div>
+            <div className="dash-kpi-spark"><Sparkline data={monthlySeries.map(m => m.invoiced)} color="#1f2e15" /></div>
           </div>
 
-          <div className="dash-card dash-kpi">
+          <div className="dash-card dash-kpi dash-kpi-outstanding">
             <h3 className="dash-card-title">Outstanding Receivables <span className="hi">(बाकी राशि)</span></h3>
             {Object.entries(stats.byCurrency).map(([cur, v]) => (
-              <div key={cur} className="dash-kpi-value" style={{ color: 'var(--danger)', ...(multiCurrency ? { fontSize: '1rem' } : undefined) }}>
+              <div key={cur} className="dash-kpi-value" style={multiCurrency ? { fontSize: '1rem' } : undefined}>
                 {formatCurrency(v.unpaid, cur)}
               </div>
             ))}
-            {Object.keys(stats.byCurrency).length === 0 && <div className="dash-kpi-value" style={{ color: 'var(--danger)' }}>—</div>}
+            {Object.keys(stats.byCurrency).length === 0 && <div className="dash-kpi-value">—</div>}
             <div className={deltaOutstanding <= 0 ? 'dash-kpi-delta-up' : 'dash-kpi-delta-down'}>
               {deltaOutstanding <= 0 ? '▼' : '▲'} {Math.abs(deltaOutstanding).toFixed(2)}%
             </div>
             <div className="dash-kpi-sub">{overdueBills.length} overdue (देरी से बकाया)</div>
-            <div className="dash-kpi-spark"><Sparkline data={monthlySeries.map(m => m.outstanding)} color="#f87171" /></div>
+            <div className="dash-kpi-spark"><Sparkline data={monthlySeries.map(m => m.outstanding)} color="#7a2a10" /></div>
           </div>
 
-          <div className="dash-card dash-kpi">
+          <div className="dash-card dash-kpi dash-kpi-tax">
             <h3 className="dash-card-title">Tax Collected <span className="hi">(जमा किया गया कर)</span></h3>
             {Object.entries(stats.byCurrency).map(([cur, v]) => (
-              <div key={cur} className="dash-kpi-value" style={{ color: 'var(--success)', ...(multiCurrency ? { fontSize: '1rem' } : undefined) }}>
+              <div key={cur} className="dash-kpi-value" style={multiCurrency ? { fontSize: '1rem' } : undefined}>
                 {formatCurrency(v.tax, cur)}
               </div>
             ))}
-            {Object.keys(stats.byCurrency).length === 0 && <div className="dash-kpi-value" style={{ color: 'var(--success)' }}>—</div>}
+            {Object.keys(stats.byCurrency).length === 0 && <div className="dash-kpi-value">—</div>}
             <div className={deltaTax >= 0 ? 'dash-kpi-delta-up' : 'dash-kpi-delta-down'}>
               {deltaTax >= 0 ? '▲' : '▼'} {Math.abs(deltaTax).toFixed(2)}%
             </div>
             <div className="dash-kpi-sub">receipts vs last month (पिछले महीने की तुलना में)</div>
-            <div className="dash-kpi-spark"><Sparkline data={monthlySeries.map(m => m.received)} color="#34d399" /></div>
+            <div className="dash-kpi-spark"><Sparkline data={monthlySeries.map(m => m.received)} color="#2a5a2a" /></div>
           </div>
 
-          <div className="dash-card dash-kpi">
+          <div className="dash-card dash-kpi dash-kpi-compliance">
             <h3 className="dash-card-title">GST Compliance Score <span className="hi">(GST अनुपालन स्कोर)</span></h3>
-            <div className="dash-kpi-value" style={{ color: 'var(--success)' }}>{gstCompliance}%</div>
+            <div className="dash-kpi-value">{gstCompliance}%</div>
             <div className="dash-kpi-sub">invoices with GSTIN on file (GSTIN वाले इनवॉइस)</div>
-            <div className="dash-kpi-spark"><Sparkline data={monthlySeries.map(m => m.received)} color="#34d399" /></div>
+            <div className="dash-kpi-spark"><Sparkline data={monthlySeries.map(m => m.received)} color="#2a5a2a" /></div>
+          </div>
+
+          {/* Gross Profit — spans both columns */}
+          <div className="dash-card dash-kpi dash-kpi-profit" style={{ gridColumn: 'span 2', flexDirection: 'row', alignItems: 'center', gap: '1rem' }}>
+            <div style={{
+              width: 36, height: 36, borderRadius: 8, flexShrink: 0,
+              background: 'rgba(255,255,255,0.35)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              color: '#2a5a2a',
+            }}>
+              <TrendingUp size={18} />
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <h3 className="dash-card-title">Gross Profit <span className="hi">(कुल मुनाफ़ा)</span></h3>
+              <div className="dash-kpi-sub">
+                Profit earned on billed sales (बिक्री पर मुनाफ़ा)
+                {grossProfit.unknownCostLines > 0 && (
+                  <span style={{ marginLeft: 6, fontStyle: 'italic' }}>
+                    · {grossProfit.unknownCostLines} line{grossProfit.unknownCostLines > 1 ? 's' : ''} missing cost
+                  </span>
+                )}
+              </div>
+            </div>
+            <div style={{ textAlign: 'right', flexShrink: 0 }}>
+              <div className="dash-kpi-value" style={{ margin: 0 }}>
+                {formatCurrency(grossProfit.profit)}
+              </div>
+              <div className={grossProfit.margin >= 0 ? 'dash-kpi-delta-up' : 'dash-kpi-delta-down'}>
+                {grossProfit.margin >= 0 ? '▲' : '▼'} {Math.abs(grossProfit.margin).toFixed(1)}% margin
+              </div>
+              <div className="dash-kpi-sub">on {formatCurrency(grossProfit.sales)} sales</div>
+            </div>
           </div>
         </div>
       </div>
@@ -515,12 +717,12 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
               {lowStockProducts.map(p => (
                 <div key={p.id} className="erp-stock-pill"
                   style={{
-                    background: (p.stock ?? 0) <= 0 ? 'var(--danger-light)' : 'var(--warn-bg)',
-                    borderColor: (p.stock ?? 0) <= 0 ? 'var(--danger)' : 'var(--warn-border)',
-                    color: (p.stock ?? 0) <= 0 ? 'var(--danger)' : 'var(--warn-text)',
+                    background: (p.stock ?? 0) <= 0 ? 'rgba(168, 68, 46, 0.15)' : 'rgba(220, 200, 100, 0.35)',
+                    borderColor: (p.stock ?? 0) <= 0 ? 'var(--sepia-danger)' : 'var(--warn-border)',
+                    color: (p.stock ?? 0) <= 0 ? 'var(--sepia-danger)' : 'var(--warn-text)',
                   }}>
                   <strong>{p.name}</strong>
-                  {p.hsn ? <span className="text-muted" style={{ marginLeft: 4, fontSize: '0.72rem' }}>({p.hsn})</span> : null}
+                  {p.hsn ? <span style={{ marginLeft: 4, fontSize: '0.72rem', opacity: 0.75 }}>({p.hsn})</span> : null}
                   <span style={{ marginLeft: 6, fontWeight: 700 }}>
                     {(p.stock ?? 0) <= 0 ? 'Out of Stock (स्टॉक खत्म)' : `Stock: ${p.stock} (स्टॉक: ${p.stock})`}
                   </span>
@@ -542,7 +744,7 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
 
         <div className="erp-filters">
           <div className="erp-search">
-            <Search size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+            <Search size={14} style={{ color: 'var(--sepia-muted)', flexShrink: 0 }} />
             <input type="text" placeholder="Search client or invoice…" value={filters.search || ''}
               onChange={e => filters.setSearch(e.target.value)} />
           </div>
@@ -570,10 +772,10 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
 
         {showColumnPicker && (
           <div style={{
-            padding: '0.7rem 1rem', borderBottom: '1px solid var(--border)',
-            background: 'var(--bg-tertiary)',
+            padding: '0.7rem 1rem', borderBottom: '1px solid var(--sepia-border)',
+            background: 'var(--sepia-card)',
           }}>
-            <div style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.4rem' }}>
+            <div style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--sepia-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.4rem' }}>
               Pick columns to show (दिखाने के लिए कॉलम चुनें)
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
@@ -583,10 +785,10 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
                 ['status', 'Status (स्थिति)'], ['dueDate', 'Due date (देय तारीख)'],
                 ['printed', 'Print count (प्रिंट)'], ['actions', 'Actions (कार्रवाई)'],
               ].map(([key, label]) => (
-                <label key={key} style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.8rem', cursor: 'pointer', color: 'var(--text-primary)' }}>
+                <label key={key} style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.8rem', cursor: 'pointer' }}>
                   <input type="checkbox" checked={!!visibleColumns[key]}
                     onChange={e => filters.setVisibleColumns(prev => ({ ...prev, [key]: e.target.checked }))}
-                    style={{ width: 14, height: 14, accentColor: 'var(--primary)' }} />
+                    style={{ width: 14, height: 14, accentColor: 'var(--sepia-btn-green)' }} />
                   {label}
                 </label>
               ))}
@@ -596,9 +798,9 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
 
         <div style={{
           padding: '0.5rem 1rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap',
-          alignItems: 'center', borderBottom: '1px solid var(--border)', background: 'var(--bg-tertiary)'
+          alignItems: 'center', borderBottom: '1px solid var(--sepia-border)', background: 'var(--sepia-card)'
         }}>
-          <span style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+          <span style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--sepia-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
             Quick print (त्वरित प्रिंट):
           </span>
           <button type="button" className="erp-mini-btn" disabled={actions.bulkBusy}
@@ -621,7 +823,7 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
 
         {actions.selectedIds?.size > 0 && (
           <div className="erp-bulkbar">
-            <strong style={{ fontSize: '0.85rem', color: 'var(--text-primary)' }}>{actions.selectedIds.size} selected (चुने गए)</strong>
+            <strong style={{ fontSize: '0.85rem' }}>{actions.selectedIds.size} selected (चुने गए)</strong>
             <button type="button" className="erp-mini-btn" disabled={actions.bulkBusy} onClick={() => actions.bulkMarkStatus('paid')}>
               <CheckCircle size={12} /> Mark paid (पूरा)</button>
             <button type="button" className="erp-mini-btn" disabled={actions.bulkBusy} onClick={() => actions.bulkMarkStatus('unpaid')}>
@@ -656,7 +858,7 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
                     <input type="checkbox"
                       checked={filtered.length > 0 && filtered.every(b => actions.selectedIds?.has(b.id))}
                       onChange={actions.toggleSelectAllVisible}
-                      style={{ width: 14, height: 14, accentColor: 'var(--primary)', cursor: 'pointer' }} />
+                      style={{ width: 14, height: 14, accentColor: 'var(--sepia-btn-green)', cursor: 'pointer' }} />
                   </th>
                   {visibleColumns.date && <th>Date <span className="hi">(तारीख)</span></th>}
                   {visibleColumns.invoice && <th>Invoice No. <span className="hi">(इनवॉइस नं.)</span></th>}
@@ -680,10 +882,10 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
                   const billCurrency = bill.currency || bill.data?.invoiceOptions?.currency || 'INR';
                   return (
                     <tr key={bill.id} className={isOverdue || status === 'overdue' ? 'row-overdue' : ''}
-                      style={actions.selectedIds?.has(bill.id) ? { background: 'var(--primary-light)' } : undefined}>
+                      style={actions.selectedIds?.has(bill.id) ? { background: 'rgba(74, 122, 74, 0.16)' } : undefined}>
                       <td style={{ padding: '0.5rem 0.25rem 0.5rem 0.75rem' }}>
                         <input type="checkbox" checked={actions.selectedIds?.has(bill.id)} onChange={() => actions.toggleSelect(bill.id)}
-                          style={{ width: 14, height: 14, accentColor: 'var(--primary)', cursor: 'pointer' }} />
+                          style={{ width: 14, height: 14, accentColor: 'var(--sepia-btn-green)', cursor: 'pointer' }} />
                       </td>
                       {visibleColumns.date && <td className="muted" style={{ whiteSpace: 'nowrap' }}>{new Date(bill.invoiceDate).toLocaleDateString('en-IN')}</td>}
                       {visibleColumns.invoice && <td><span className="erp-badge">{bill.invoiceNumber}</span></td>}
@@ -707,7 +909,7 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
                             <option key={key} value={key}>{val.label}</option>
                           ))}
                         </select>
-                        {daysOverdue > 0 && <span style={{ fontSize: '0.7rem', color: 'var(--danger)', display: 'block', marginTop: 2 }}>{daysOverdue}d overdue</span>}
+                        {daysOverdue > 0 && <span style={{ fontSize: '0.7rem', color: 'var(--sepia-danger)', display: 'block', marginTop: 2 }}>{daysOverdue}d overdue</span>}
                       </td>}
                       {visibleColumns.actions && <td>
                         <div className="erp-actions">
@@ -723,7 +925,7 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
                           {(isOverdue || status === 'overdue' || status === 'unpaid' || status === 'partial') && (bill.totalAmount || 0) - (bill.paidAmount || 0) > 0.01 && (
                             <button className="icon-btn icon-btn-green"
                               onClick={() => actions.sendReminder({ ...bill, clientPhone: actions.getClientPhone ? actions.getClientPhone(bill) : '' })}
-                              style={{ color: status === 'partial' ? 'var(--text-muted)' : 'var(--danger)' }}>
+                              style={{ color: status === 'partial' ? 'var(--sepia-muted)' : 'var(--sepia-danger)' }}>
                               <Send size={14} />
                             </button>
                           )}
@@ -745,24 +947,23 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
             <span>
               Total (कुल): <strong>{filteredTotalStr}</strong>
               <span style={{ margin: '0 8px' }}>·</span>
-              Outstanding (बाकी): <strong style={{ color: 'var(--danger)' }}>{filteredOutStr}</strong>
+              Outstanding (बाकी): <strong style={{ color: 'var(--sepia-danger)' }}>{filteredOutStr}</strong>
             </span>
           </div>
         )}
       </div>
 
-      {/* ===== Modals (Record Payment & Edit Payment) ===== */}
       {actions.paymentModal && (
         <div className="modal-overlay" onClick={() => actions.closePaymentModal()}>
           <div className="modal-content" onClick={e => e.stopPropagation()}>
             <h3 className="section-title">Record Payment (भुगतान दर्ज करें)</h3>
             <p className="text-muted" style={{ marginBottom: '1rem', fontSize: '0.85rem' }}>
-              Invoice (इनवॉइस): <strong style={{ color: 'var(--text-primary)' }}>{actions.paymentModal.invoiceNumber}</strong> | Total: <strong style={{ color: 'var(--text-primary)' }}>{formatCurrency(actions.paymentModal.totalAmount, actions.paymentModal.currency)}</strong>
-              {(actions.paymentModal.paidAmount || 0) > 0 && <> | Paid: <strong style={{ color: 'var(--text-primary)' }}>{formatCurrency(actions.paymentModal.paidAmount, actions.paymentModal.currency)}</strong></>}
+              Invoice (इनवॉइस): <strong>{actions.paymentModal.invoiceNumber}</strong> | Total: <strong>{formatCurrency(actions.paymentModal.totalAmount, actions.paymentModal.currency)}</strong>
+              {(actions.paymentModal.paidAmount || 0) > 0 && <> | Paid: <strong>{formatCurrency(actions.paymentModal.paidAmount, actions.paymentModal.currency)}</strong></>}
               {' '}| {(() => {
                 const rem = actions.paymentModal.totalAmount - (actions.paymentModal.paidAmount || 0);
-                if (rem < -0.005) return <>Overpaid: <strong style={{ color: 'var(--success)' }}>{formatCurrency(Math.abs(rem), actions.paymentModal.currency)}</strong></>;
-                return <>Balance: <strong style={{ color: rem > 0.005 ? 'var(--danger)' : 'var(--success)' }}>{formatCurrency(Math.max(0, rem), actions.paymentModal.currency)}</strong></>;
+                if (rem < -0.005) return <>Overpaid: <strong style={{ color: '#2a5a2a' }}>{formatCurrency(Math.abs(rem), actions.paymentModal.currency)}</strong></>;
+                return <>Balance: <strong style={{ color: rem > 0.005 ? 'var(--sepia-danger)' : '#2a5a2a' }}>{formatCurrency(Math.max(0, rem), actions.paymentModal.currency)}</strong></>;
               })()}
             </p>
             <div className="grid grid-cols-2 gap-4">
@@ -789,13 +990,13 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
                 <div className="payment-history">
                   {actions.paymentModal.payments.map((p, i) => (
                     <div key={p.id || i} className="payment-row" style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
-                      <span style={{ minWidth: 90, color: 'var(--text-muted)' }}>{p.date ? new Date(p.date).toLocaleDateString('en-IN') : '—'}</span>
+                      <span style={{ minWidth: 90, color: 'var(--sepia-muted)' }}>{p.date ? new Date(p.date).toLocaleDateString('en-IN') : '—'}</span>
                       <span className="font-bold" style={{ minWidth: 100 }}>{formatCurrency(p.amount, actions.paymentModal.currency)}</span>
                       <span className="text-muted" style={{ minWidth: 110 }}>{p.mode}</span>
                       <div style={{ marginLeft: 'auto', display: 'flex', gap: '0.25rem' }}>
                         <button className="btn btn-secondary" style={{ fontSize: '0.7rem', padding: '0.2rem 0.5rem' }} onClick={() => receipt.openReceipt && receipt.openReceipt(actions.paymentModal, p)}><Receipt size={12} /> Receipt</button>
                         <button className="btn btn-secondary" style={{ fontSize: '0.7rem', padding: '0.2rem 0.5rem' }} onClick={() => actions.editPaymentAt(actions.paymentModal, i)}><Edit3 size={12} /></button>
-                        <button className="btn btn-secondary" style={{ fontSize: '0.7rem', padding: '0.2rem 0.5rem', color: 'var(--danger)', borderColor: 'var(--danger)' }} onClick={() => actions.deletePaymentAt(actions.paymentModal, i)}><Trash2 size={12} /></button>
+                        <button className="btn btn-secondary" style={{ fontSize: '0.7rem', padding: '0.2rem 0.5rem', color: 'var(--sepia-danger)', borderColor: 'var(--sepia-danger)' }} onClick={() => actions.deletePaymentAt(actions.paymentModal, i)}><Trash2 size={12} /></button>
                       </div>
                     </div>
                   ))}

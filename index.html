@@ -1,429 +1,124 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ArthSutra</title>
-  <link rel="icon" type="image/svg+xml" href="public/favicon.svg">
-  <style>
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-      background: #eef2f7;
-      color: #0f172a;
-      padding: 2.5rem 1rem;
-      display: flex;
-      align-items: flex-start;
-      justify-content: center;
-    }
-    .wrap { width: 100%; max-width: 640px; }
-    header { text-align: center; margin-bottom: 1.5rem; }
-    header h1 {
-      font-size: 1.6rem;
-      font-weight: 700;
-      margin: 0 0 0.25rem;
-      color: #1e40af;
-    }
-    header p { margin: 0; font-size: 0.88rem; color: #64748b; }
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
-    .card {
-      background: #ffffff;
-      border: 1px solid #e2e8f0;
-      border-radius: 12px;
-      padding: 1.5rem;
-      box-shadow: 0 2px 12px rgba(15, 23, 42, 0.06);
-      margin-bottom: 1rem;
-    }
+    <!--
+      Content Security Policy. Defends the rich-text Terms / Notes / extra-section
+      paths which inject sanitized HTML via DOMPurify. Even if the sanitizer config
+      is ever loosened, the CSP locks scripts to same-origin so injected script
+      tags can't execute, and connect-src is limited to localhost + Google
+      services (only place we make outbound calls).
+    -->
+    <!--
+      v1.10.33 — Tesseract assets now bundled into public/tesseract/ by
+      scripts/bundle-tesseract-assets.mjs. That means:
+        - script-src no longer needs https://cdn.jsdelivr.net (worker
+          serves from same-origin)
+        - connect-src no longer needs jsdelivr or tessdata.projectnaptha
+          (traineddata + core WASM serve from same-origin)
+      What STAYS wide:
+        - 'wasm-unsafe-eval' in script-src → tesseract-core compiles a
+          WebAssembly module, which requires this outside of a fresh
+          instantiation flow
+        - worker-src 'self' blob: → tesseract creates its worker from a
+          blob URL. Without an explicit worker-src, it falls back to
+          script-src (which excludes blob:) and blocks the worker.
+    -->
+    <meta http-equiv="Content-Security-Policy" content="
+      default-src 'self';
+      script-src  'self' 'wasm-unsafe-eval' https://accounts.google.com https://apis.google.com;
+      worker-src  'self' blob:;
+      style-src   'self' 'unsafe-inline' https://fonts.googleapis.com;
+      font-src    'self' https://fonts.gstatic.com data:;
+      img-src     'self' data: blob: https://*.googleusercontent.com;
+      connect-src 'self' http://localhost:* https://accounts.google.com https://www.googleapis.com https://api.github.com https://nodejs.org https://raw.githubusercontent.com;
+      frame-src   https://accounts.google.com;
+      object-src  'none';
+      base-uri    'self';
+    " />
 
-    .status {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      padding: 0.95rem 1.1rem;
-      border-radius: 10px;
-      margin-bottom: 1rem;
-      border: 1px solid #e2e8f0;
-      background: #f8fafc;
-    }
-    .status strong { font-size: 1rem; display: block; }
-    .status small { font-size: 0.78rem; opacity: 0.85; display: block; margin-top: 2px; }
-    .status.running { background: #ecfdf5; color: #047857; border-color: #6ee7b7; }
-    .status.stopped { background: #fef2f2; color: #b91c1c; border-color: #fca5a5; }
-    .status.checking { background: #fffbeb; color: #b45309; border-color: #fde68a; }
+    <!-- Primary SEO -->
+    <title>ArthSutra v1.10.33 — Free Open-Source GST Invoice Generator with GSTR-2B Reconciliation, TDS/TCS Reports, Multi-Currency | Billing Software for India</title>
+    <meta name="description" content="ArthSutra v1.10.33 — open-source GST invoice generator with GSTR-1, GSTR-3B, GSTR-2B reconciliation, TDS / TCS reports (Form 26Q, 27EQ), e-Way Bill JSON, multi-currency for 22 countries (USD, EUR, GBP, AED, AUD, SGD), per-line custom units, rich-text Terms with 13 India business presets, granular backup with Google Drive option, and a searchable in-app user guide. 100% offline, private, free forever. By Arth." />
+    <meta name="author" content="Arth" />
+    <meta name="robots" content="index, follow" />
+    <link rel="canonical" href="https://github.com/arthupadhyay/ArthSutra" />
 
-    .status-dot {
-      width: 12px;
-      height: 12px;
-      border-radius: 50%;
-      background: currentColor;
-      flex-shrink: 0;
-    }
+    <!-- Open Graph / Social -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="ArthSutra by Arth" />
+    <meta property="og:title" content="ArthSutra v1.10.33" />
+    <meta property="og:description" content="Open-source billing software for Indian businesses" />
+    <meta property="og:image" content="/og-preview.png" />
+    <meta property="og:url" content="https://github.com/arthupadhyay/ArthSutra" />
 
-    .actions { display: grid; gap: 0.6rem; grid-template-columns: 1fr; }
-    @media (min-width: 480px) {
-      .actions { grid-template-columns: 1fr 1fr; }
-      .btn-primary-full { grid-column: 1 / -1; }
-    }
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="ArthSutra v1.10.33 — GST + GSTR-2B + TDS/TCS + Multi-Currency, Free & Offline" />
+    <meta name="twitter:description" content="Open-source GST invoice generator. GSTR-1/2B/3B, e-Way Bill, TDS/TCS reports (Form 26Q/27EQ), 22-currency invoicing, custom units, rich Terms presets. Your data on your machine. Free forever." />
+    <meta name="twitter:image" content="/og-preview.png" />
 
-    .btn {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 0.5rem;
-      padding: 0.85rem 1rem;
-      border: 1px solid #e2e8f0;
-      border-radius: 10px;
-      font-size: 0.92rem;
-      font-weight: 600;
-      cursor: pointer;
-      text-decoration: none;
-      color: #0f172a;
-      background: #ffffff;
-    }
-    .btn:hover { background: #f1f5f9; }
-    .btn[aria-disabled="true"] {
-      opacity: 0.45;
-      cursor: not-allowed;
-      pointer-events: none;
-    }
-    .btn-primary {
-      background: #1e40af;
-      color: #ffffff;
-      border-color: #1e40af;
-    }
-    .btn-primary:hover { background: #1e3a8a; }
-    .btn-danger { color: #b91c1c; border-color: #fecaca; }
-    .btn-danger:hover { background: #fef2f2; }
+    <!-- Favicon -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <!-- v1.10.33 — Chrome deprecated the apple-* variant. Keep both for
+         cross-browser installability. -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="GST Billing" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
 
-    .info-grid {
-      display: grid;
-      grid-template-columns: 130px 1fr;
-      gap: 0.5rem 1rem;
-      font-size: 0.85rem;
-      margin: 0;
-    }
-    .info-grid dt { color: #64748b; font-weight: 500; }
-    .info-grid dd {
-      margin: 0;
-      color: #0f172a;
-      font-family: "Consolas", "Menlo", monospace;
-      font-size: 0.82rem;
-      word-break: break-all;
-    }
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="/manifest.webmanifest" />
 
-    details { margin-top: 0.85rem; border-top: 1px solid #e2e8f0; padding-top: 0.5rem; }
-    details summary {
-      cursor: pointer;
-      padding: 0.4rem 0;
-      font-size: 0.85rem;
-      font-weight: 600;
-      color: #475569;
-    }
-    details summary:hover { color: #0f172a; }
-    details .help {
-      font-size: 0.82rem;
-      color: #475569;
-      line-height: 1.55;
-      padding: 0.4rem 0;
-    }
-    details ol { margin: 0.5rem 0 0.5rem 1.2rem; padding: 0; }
-    details code {
-      background: #f1f5f9;
-      padding: 1px 6px;
-      border-radius: 4px;
-      font-size: 0.85em;
-    }
+    <!-- Theme -->
+    <meta name="theme-color" content="#10b981" />
 
-    footer {
-      text-align: center;
-      font-size: 0.75rem;
-      color: #64748b;
-      margin-top: 1.25rem;
+    <!-- Structured Data for Google -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "ArthSutra",
+      "applicationCategory": "BusinessApplication",
+      "operatingSystem": "Windows, macOS, Linux",
+      "offers": {
+        "@type": "Offer",
+        "price": 0,
+        "priceCurrency": "INR"
+      },
+      "description": "Free, open-source GST invoice generator and billing software for India.",
+      "author": {
+        "@type": "Organization",
+        "name": "Arth",
+        "email": "arth14deepak@gmail.com"
+      }
     }
-    footer a { color: #1e40af; text-decoration: none; }
+    </script>
 
-    .nojs-warning {
-      background: #fef2f2;
-      border: 1px solid #fca5a5;
-      color: #991b1b;
-      padding: 0.75rem 1rem;
-      border-radius: 8px;
-      margin-bottom: 1rem;
-      font-size: 0.85rem;
-    }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <header>
-      <h1>ArthSutra</h1>
-      <p>Control Panel - start, stop, and open your local billing app</p>
-    </header>
-
+    <!-- Preconnect for Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <!--
+      This file is the React app entry — never opened directly by users.
+      It lives in src/ rather than the project root so users don't see
+      it in their install folder. The Vite build transforms it into
+      dist/index.html which Express serves at http://localhost:47371/.
+      The user-facing HTML at the project root is the launcher.
+    -->
     <noscript>
-      <div class="card">
-        <div class="nojs-warning">
-          <strong>JavaScript is disabled in your browser.</strong>
-          This control panel needs JavaScript to check server status. Either enable it,
-          or open the file <code>Start ArthSutra Server.bat</code> in the install folder
-          and then go to <a href="http://localhost:47371/">http://localhost:47371/</a>
-          in your browser.
-        </div>
+      <div style="font-family:sans-serif;padding:2rem;max-width:600px;margin:2rem auto;background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;color:#991b1b">
+        <h2>JavaScript is required</h2>
+        <p>This page is the ArthSutra app. It needs JavaScript to run.</p>
       </div>
     </noscript>
 
-    <div class="card">
-      <div id="status" class="status checking">
-        <div class="status-dot"></div>
-        <div>
-          <strong id="status-text">Checking server&hellip;</strong>
-          <small id="status-detail">Probing localhost on the configured port range.</small>
-        </div>
-      </div>
-
-      <div class="actions">
-        <a id="open-app" class="btn btn-primary btn-primary-full" href="#" target="_blank" rel="noopener" aria-disabled="true">
-          Open Billing App
-        </a>
-        <a id="start-btn" class="btn" href="arthsutra://run">
-          Start Server
-        </a>
-        <a id="stop-btn" class="btn btn-danger" href="arthsutra-stop://run" aria-disabled="true">
-          Stop Server
-        </a>
-      </div>
-    </div>
-
-    <div class="card">
-      <dl class="info-grid">
-        <dt>Status</dt>        <dd id="info-status">-</dd>
-        <dt>Port</dt>          <dd id="info-port">-</dd>
-        <dt>Version</dt>       <dd id="info-version">-</dd>
-        <dt>App URL</dt>       <dd id="info-url">-</dd>
-        <dt>Last checked</dt>  <dd id="info-checked">-</dd>
-      </dl>
-
-      <details>
-        <summary>Server won't start? Click here for help</summary>
-        <div class="help">
-          <p>Try these in order:</p>
-          <ol>
-            <li>Click <strong>Start Server</strong> above. Your browser may ask to allow <code>arthsutra://</code> - click Allow.</li>
-            <li>If nothing happens after 30 seconds, open the install folder and double-click <code>Start ArthSutra Server.bat</code> directly. A small black window should appear briefly.</li>
-            <li>If you see "Node.js is not installed", run <code>Install ArthSutra.bat</code> first.</li>
-            <li>If the port is busy, open <code>data\port.txt</code> in Notepad to see which port the app picked, or delete that file and restart to let the server pick a fresh one.</li>
-            <li>Still stuck? Open a <a href="https://github.com/arth-upadhyay/ArthSutra/issues" target="_blank" rel="noopener">GitHub issue</a>.</li>
-          </ol>
-          <p><strong>Tip:</strong> Press <kbd>F12</kbd> to open browser developer tools and check the Console tab for any errors. Share what you see if you ask for support.</p>
-        </div>
-      </details>
-    </div>
-
-    <footer>
-      ArthSutra &middot;
-      <a href="https://github.com/arth-upadhyay/ArthSutra" target="_blank" rel="noopener">GitHub</a> &middot;
-      made by Arth
-    </footer>
-  </div>
-
-  <script>
-    (function () {
-      'use strict';
-
-      var DEFAULT_PORT = 47371;
-      var SCAN_RANGE = 50;
-      var activePort = DEFAULT_PORT;
-      var pollTimer = null;
-      var didInitialScan = false;
-      var consecutiveFailures = 0;
-      var currentInterval = 2000;
-
-      try {
-        var cached = window.sessionStorage && sessionStorage.getItem('arthsutra_port');
-        if (cached) {
-          var n = parseInt(cached, 10);
-          if (n >= 1024 && n <= 65535) activePort = n;
-        }
-      } catch (e) { /* sessionStorage blocked - ignore */ }
-
-      function $(id) { return document.getElementById(id); }
-
-      function pingPort(port) {
-        return new Promise(function (resolve) {
-          try {
-            var c = new AbortController();
-            var t = setTimeout(function () { c.abort(); }, 800);
-            fetch('http://localhost:' + port + '/api/version', { signal: c.signal })
-              .then(function (r) {
-                clearTimeout(t);
-                if (!r.ok) { resolve(null); return; }
-                return r.json();
-              })
-              .then(function (data) {
-                if (!data) return;
-                resolve({ port: port, version: data.current });
-              })
-              .catch(function () { resolve(null); });
-          } catch (e) { resolve(null); }
-        });
-      }
-
-      function fullScan() {
-        var probes = [];
-        for (var p = DEFAULT_PORT; p < DEFAULT_PORT + SCAN_RANGE; p++) {
-          probes.push(pingPort(p));
-        }
-        return Promise.all(probes).then(function (results) {
-          for (var i = 0; i < results.length; i++) { if (results[i]) return results[i]; }
-          return null;
-        });
-      }
-
-      function findRunningPort() {
-        if (!didInitialScan) {
-          didInitialScan = true;
-          return pingPort(activePort).then(function (hit) {
-            if (hit) return hit;
-            return fullScan();
-          });
-        }
-        return pingPort(activePort);
-      }
-
-      function setStatus(state, message, detail) {
-        var el = $('status');
-        if (el) el.className = 'status ' + state;
-        var t = $('status-text'); if (t) t.textContent = message;
-        var d = $('status-detail'); if (d) d.textContent = detail;
-      }
-
-      function setButtons(running, port) {
-        var open = $('open-app');
-        var stop = $('stop-btn');
-        if (running) {
-          if (open) { open.href = 'http://localhost:' + port + '/'; open.removeAttribute('aria-disabled'); }
-          if (stop) { stop.removeAttribute('aria-disabled'); }
-        } else {
-          if (open) { open.href = '#'; open.setAttribute('aria-disabled', 'true'); }
-          if (stop) { stop.setAttribute('aria-disabled', 'true'); }
-        }
-      }
-
-      function setInfo(running, port, version) {
-        var s = $('info-status'); if (s) s.textContent = running ? 'Running' : 'Stopped';
-        var p = $('info-port'); if (p) p.textContent = running ? port : '-';
-        var v = $('info-version'); if (v) v.textContent = version || '-';
-        var u = $('info-url'); if (u) u.textContent = running ? ('http://localhost:' + port + '/') : '-';
-        var c = $('info-checked'); if (c) c.textContent = new Date().toLocaleTimeString();
-      }
-
-      function schedulePoll() {
-        if (pollTimer) clearTimeout(pollTimer);
-        pollTimer = setTimeout(checkServer, currentInterval);
-      }
-
-      function checkServer() {
-        return findRunningPort().then(function (hit) {
-          if (hit) {
-            activePort = hit.port;
-            try { sessionStorage.setItem('arthsutra_port', String(hit.port)); } catch (e) {}
-            consecutiveFailures = 0;
-            currentInterval = 2000;
-            setStatus('running', 'Server is running on port ' + hit.port, 'Click "Open Billing App" to launch in a new tab.');
-            setButtons(true, hit.port);
-            setInfo(true, hit.port, hit.version);
-            schedulePoll();
-          } else {
-            consecutiveFailures += 1;
-            var detailMsg = 'Click "Start Server" — your browser may ask to allow arthsutra://. Click Allow.';
-            if (consecutiveFailures === 1) currentInterval = 5000;
-            else if (consecutiveFailures === 2) currentInterval = 15000;
-            else if (consecutiveFailures >= 3) {
-              currentInterval = 0; 
-              detailMsg = 'Auto-check paused after 3 failures. Click "Retry now" to check again.';
-            }
-            setStatus('stopped', 'Server is not running', detailMsg);
-            setButtons(false);
-            setInfo(false);
-            showRetryButton(currentInterval === 0);
-            if (currentInterval > 0) schedulePoll();
-          }
-        }).catch(function (e) {
-          setStatus('stopped', 'Error checking server', 'Open browser DevTools (F12) Console for details.');
-          if (window.console && console.error) console.error('Launcher status check failed:', e);
-          currentInterval = 0;
-          showRetryButton(true);
-        });
-      }
-
-      function showRetryButton(visible) {
-        var existing = $('retry-btn');
-        if (!visible) {
-          if (existing) existing.style.display = 'none';
-          return;
-        }
-        if (existing) { existing.style.display = ''; return; }
-        var btn = document.createElement('button');
-        btn.id = 'retry-btn';
-        btn.className = 'btn';
-        btn.style.cssText = 'margin-top:10px;font-size:0.85rem;padding:6px 12px;';
-        btn.textContent = '↻ Retry now';
-        btn.addEventListener('click', function () {
-          didInitialScan = false; 
-          consecutiveFailures = 0;
-          currentInterval = 2000;
-          btn.style.display = 'none';
-          checkServer();
-        });
-        var status = $('status');
-        if (status && status.parentNode) status.parentNode.insertBefore(btn, status.nextSibling);
-      }
-
-      function startPolling() {
-        consecutiveFailures = 0;
-        currentInterval = 2000;
-        checkServer();
-      }
-      function stopPolling() {
-        if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
-      }
-
-      try {
-        document.addEventListener('visibilitychange', function () {
-          if (document.hidden) stopPolling(); else startPolling();
-        });
-      } catch (e) {}
-
-      function burst(durationMs) {
-        var start = Date.now();
-        consecutiveFailures = 0;
-        currentInterval = 2000;
-        didInitialScan = false;
-        var burstTimer = setInterval(function () {
-          checkServer();
-          if (Date.now() - start > durationMs) clearInterval(burstTimer);
-        }, 1000);
-      }
-
-      var startBtn = $('start-btn');
-      if (startBtn) {
-        startBtn.addEventListener('click', function () {
-          setStatus('checking', 'Starting server...', 'This usually takes 5-15 seconds.');
-          burst(30000);
-        });
-      }
-      var stopBtn = $('stop-btn');
-      if (stopBtn) {
-        stopBtn.addEventListener('click', function () {
-          setStatus('checking', 'Stopping server...', 'Releasing the port.');
-          burst(15000);
-        });
-      }
-
-      startPolling();
-    })();
-  </script>
-</body>
+    <div id="root"></div>
+    <script type="module" src="/main.jsx"></script>
+  </body>
 </html>

@@ -1,165 +1,18 @@
 import { useState, useEffect, useRef } from 'react';
-import { Printer, TestTube, RotateCcw, Info, Trash2 } from 'lucide-react';
-import { Save as SaveIcon } from 'lucide-react'; // Separate import for SaveIcon usage in utility component below
+import { Printer, RotateCcw, Info } from 'lucide-react';
 import { toast } from './Toast';
 import { confirmAction } from './ConfirmModal';
 import InvoicePreview from './InvoicePreview';
 import { getProfile } from '../store';
-import { getPaperSize } from '../utils';
-import { DEFAULT_PRINT_SETTINGS, getPrintSettings, savePrintSettings, buildSampleInvoice, BUSINESS_PRESETS, applyBusinessPreset, LABEL_PRESETS } from '../utils/printSettings';
-
-const DESIGN_PRESETS = [
-  {
-    id: 'modern',
-    name: 'Aurora',
-    icon: '✦',
-    description: 'Cool slate + electric blue. Modern SaaS invoice.',
-    tag: 'Freelancers · Tech',
-    settings: {
-      pdfTemplate: 'modern',
-      userColorsEnabled: true,
-      pdfPrimaryText: '#0f172a', pdfMutedText: '#64748b',
-      pdfAccent: '#2563eb', pdfAccentText: '#ffffff',
-      pdfHeaderBg: '#f8fafc', pdfDividerColor: '#e2e8f0',
-      fontFamily: 'sans', fontWeight: 'bold', fontSize: 'medium',
-      lineSpacing: 'normal', allCaps: false,
-      headerAlign: 'left', headerCaps: true, contrast: 'high',
-    },
-  },
-  {
-    id: 'classic',
-    name: 'Editorial',
-    icon: '❋',
-    description: 'Deep charcoal on warm ivory. Newspaper-authority feel.',
-    tag: 'Law · Consulting',
-    settings: {
-      pdfTemplate: 'classic',
-      userColorsEnabled: true,
-      pdfPrimaryText: '#1c1917', pdfMutedText: '#78716c',
-      pdfAccent: '#1c1917', pdfAccentText: '#f5f5f4',
-      pdfHeaderBg: '#f5f5f4', pdfDividerColor: '#d6d3d1',
-      fontFamily: 'mono', fontWeight: 'ultra', fontSize: 'medium',
-      lineSpacing: 'compact', allCaps: true,
-      headerAlign: 'center', headerCaps: true, contrast: 'ultra',
-    },
-  },
-  {
-    id: 'corporate',
-    name: 'Executive',
-    icon: '◆',
-    description: 'Deep navy + soft champagne. Boardroom serious.',
-    tag: 'Enterprise · B2B',
-    settings: {
-      pdfTemplate: 'corporate',
-      userColorsEnabled: true,
-      pdfPrimaryText: '#0c1e3d', pdfMutedText: '#475569',
-      pdfAccent: '#0c1e3d', pdfAccentText: '#e8dcc4',
-      pdfHeaderBg: '#f4f2ed', pdfDividerColor: '#c4b896',
-      fontFamily: 'sans', fontWeight: 'bold', fontSize: 'medium',
-      lineSpacing: 'comfortable', allCaps: false,
-      headerAlign: 'center', headerCaps: true, contrast: 'high',
-    },
-  },
-  {
-    id: 'minimalist',
-    name: 'Whisper',
-    icon: '○',
-    description: 'Off-white, single hairline, zero clutter.',
-    tag: 'Designers · Studios',
-    settings: {
-      pdfTemplate: 'minimalist',
-      userColorsEnabled: true,
-      pdfPrimaryText: '#171717', pdfMutedText: '#a3a3a3',
-      pdfAccent: '#171717', pdfAccentText: '#ffffff',
-      pdfHeaderBg: '#fafafa', pdfDividerColor: '#e5e5e5',
-      fontFamily: 'sans', fontWeight: 'normal', fontSize: 'medium',
-      lineSpacing: 'comfortable', allCaps: false,
-      headerAlign: 'left', headerCaps: false, contrast: 'normal',
-    },
-  },
-  {
-    id: 'colorful',
-    name: 'Sunset',
-    icon: '❉',
-    description: 'Warm terracotta on cream. Boutique, cafe, salon.',
-    tag: 'Retail · Cafe',
-    settings: {
-      pdfTemplate: 'modern',
-      userColorsEnabled: true,
-      pdfPrimaryText: '#7c2d12', pdfMutedText: '#9a3412',
-      pdfAccent: '#ea580c', pdfAccentText: '#ffffff',
-      pdfHeaderBg: '#fef3ec', pdfDividerColor: '#fdba74',
-      fontFamily: 'sans', fontWeight: 'bold', fontSize: 'medium',
-      lineSpacing: 'normal', allCaps: false,
-      headerAlign: 'center', headerCaps: true, contrast: 'high',
-      showTagline: true,
-    },
-  },
-  {
-    id: 'minimal',
-    name: 'Monoline',
-    icon: '⌘',
-    description: 'Editorial mono, dense rows, developer aesthetic.',
-    tag: 'Dev · Agency',
-    settings: {
-      pdfTemplate: 'minimal',
-      userColorsEnabled: true,
-      pdfPrimaryText: '#0a0a0a', pdfMutedText: '#525252',
-      pdfAccent: '#16a34a', pdfAccentText: '#ffffff',
-      pdfHeaderBg: '#ffffff', pdfDividerColor: '#0a0a0a',
-      pdfFontScale: 0.9,
-      fontFamily: 'mono', fontWeight: 'ultra', fontSize: 'small',
-      lineSpacing: 'compact', allCaps: true,
-      headerAlign: 'left', headerCaps: true, contrast: 'ultra',
-      showRateLine: false,
-    },
-  },
-  {
-    id: 'enterprise',
-    name: 'Nordic',
-    icon: '❄',
-    description: 'Cool teal on frosted white. Calm, professional.',
-    tag: 'SaaS · Studios',
-    settings: {
-      pdfTemplate: 'modern',
-      userColorsEnabled: true,
-      pdfPrimaryText: '#134e4a', pdfMutedText: '#0f766e',
-      pdfAccent: '#0d9488', pdfAccentText: '#ffffff',
-      pdfHeaderBg: '#f0fdfa', pdfDividerColor: '#99f6e4',
-      pdfDarkenOnPrint: true,
-      fontFamily: 'sans', fontWeight: 'bold', fontSize: 'medium',
-      lineSpacing: 'normal', allCaps: false,
-      headerAlign: 'left', headerCaps: true, contrast: 'high',
-      showHSN: true,
-    },
-  },
-  {
-    id: 'retail',
-    name: 'Bold Retail',
-    icon: '▲',
-    description: 'Aggressive black + red pop. Fashion, sports, street.',
-    tag: 'Fashion · Sports',
-    settings: {
-      pdfTemplate: 'minimalist',
-      userColorsEnabled: true,
-      pdfPrimaryText: '#0a0a0a', pdfMutedText: '#404040',
-      pdfAccent: '#dc2626', pdfAccentText: '#ffffff',
-      pdfHeaderBg: '#ffffff', pdfDividerColor: '#0a0a0a',
-      pdfDarkenOnPrint: true,
-      fontFamily: 'sans', fontWeight: 'bold', fontSize: 'medium',
-      lineSpacing: 'normal', allCaps: true,
-      headerAlign: 'left', headerCaps: true, contrast: 'high',
-      showHSN: true,
-    },
-  },
-];
+import { getPrintSettings, savePrintSettings, buildSampleInvoice, DEFAULT_PRINT_SETTINGS } from '../utils/printSettings';
 
 export default function PrintSettings() {
-  const [settings, setSettings] = useState(getPrintSettings);
-  const [showTestPreview, setShowTestPreview] = useState(false);
+  const [settings, setSettings] = useState(() => {
+    const s = getPrintSettings();
+    return s.paperSize === 'a4' ? s : { ...s, paperSize: 'a4' };
+  });
   const [profile, setProfile] = useState(null);
   const previewRef = useRef(null);
-  const [previewMode, setPreviewMode] = useState('pdf');
 
   useEffect(() => { getProfile().then(setProfile).catch(() => {}); }, []);
 
@@ -169,130 +22,22 @@ export default function PrintSettings() {
     savePrintSettings(next);
   };
 
-  const activeBiz = settings.activeBusinessPresetId || '';
-  const isRecommendedForActive = (recommendedList) => {
-    if (!activeBiz) return false;
-    return recommendedList.includes(activeBiz);
-  };
-  const isVisibleFor = (relevantList) => {
-    if (!activeBiz) return true;
-    return relevantList.includes(activeBiz);
-  };
-
-  const HIDDEN_HINT = activeBiz ? (
-    <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
-      Some options are hidden because they don't apply to your "{BUSINESS_PRESETS[activeBiz]?.label}" workflow. Change or clear the business type above to see everything.
-    </span>
-  ) : null;
-
   const reset = () => {
-    setSettings({ ...DEFAULT_PRINT_SETTINGS });
-    savePrintSettings({ ...DEFAULT_PRINT_SETTINGS });
+    setSettings({ ...DEFAULT_PRINT_SETTINGS, paperSize: 'a4' });
+    savePrintSettings({ ...DEFAULT_PRINT_SETTINGS, paperSize: 'a4' });
     toast('Print settings reset to defaults', 'info');
   };
 
-  const runTestPrint = async () => {
-    setShowTestPreview(true);
-    setTimeout(async () => {
-      try {
-        const { jsPDF } = await import('jspdf');
-        const html2canvas = (await import('html2canvas')).default;
-        if (!previewRef.current) { toast('Preview not ready', 'error'); return; }
-
-        if (document.fonts && document.fonts.ready) {
-          try { await document.fonts.ready; } catch { /* non-fatal */ }
-        }
-        
-        const bufSafe = !!settings.thermalBufferSafe;
-        const capScale = bufSafe
-          ? 2
-          : Math.min(6, Math.max(2, Math.round((window.devicePixelRatio || 1) * 1.5)));
-        const canvas = await html2canvas(previewRef.current, {
-          scale: capScale,
-          backgroundColor: '#ffffff', useCORS: false, logging: false,
-        });
-        
-        if (bufSafe) {
-          try {
-            const ctx = canvas.getContext('2d');
-            const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-            const d = img.data;
-            for (let i = 0; i < d.length; i += 4) {
-              const gray = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
-              const v = gray < 180 ? 0 : 255;
-              d[i] = d[i + 1] = d[i + 2] = v;
-            }
-            ctx.putImageData(img, 0, 0);
-          } catch { /* CORS-tainted canvas can't be read; fall back to raw */ }
-        }
-        
-        const activePaper = previewMode === 'thermal' ? 'thermal80' : 'a4';
-        let paperCfg;
-        try {
-          paperCfg = getPaperSize(activePaper);
-        } catch {
-          paperCfg = { kind: activePaper === 'a4' ? 'sheet' : 'roll', widthMm: activePaper === 'a4' ? 210 : 80 };
-        }
-
-        const width = paperCfg.widthMm || 80;
-        const computedHeight = (canvas.height * width) / canvas.width;
-        const format = paperCfg.kind === 'sheet' ? activePaper : [width, Math.max(150, computedHeight)];
-        const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format });
-        
-        const jpegQ = bufSafe ? 0.72 : 0.95;
-        pdf.addImage(canvas.toDataURL('image/jpeg', jpegQ), 'JPEG', 0, 0, width, computedHeight, undefined, 'FAST');
-
-        const blob = pdf.output('blob');
-        const url = URL.createObjectURL(blob);
-        let cleaned = false;
-        const cleanup = () => { if (!cleaned) { cleaned = true; URL.revokeObjectURL(url); } };
-        const timer = setTimeout(cleanup, 90_000);
-        let frame = document.getElementById('fgsb-print-frame');
-        if (!frame) {
-          frame = document.createElement('iframe');
-          frame.id = 'fgsb-print-frame';
-          frame.style.cssText = 'position:fixed;left:-99999px;top:-99999px;width:0;height:0;border:0;';
-          document.body.appendChild(frame);
-        }
-        frame.src = url;
-        frame.onload = () => {
-          try { frame.contentWindow.focus(); frame.contentWindow.print(); }
-          catch { window.open(url, '_blank'); }
-          setTimeout(() => { clearTimeout(timer); cleanup(); }, 60_000);
-        };
-        frame.onerror = () => { clearTimeout(timer); cleanup(); };
-        toast('Test print sent to your default printer', 'success');
-      } catch (e) {
-        console.error('Test print failed', e);
-        toast('Test print failed — try Download PDF instead', 'error');
-      }
-    }, 300);
-  };
-
   const previewInvoiceOptions = {
-    paperSize: 'thermal80',
+    paperSize: 'a4',
     showGST: true,
     showBankDetails: settings.showBankDetails,
     showUPI: settings.showUPI,
     showAmountWords: settings.showAmountWords,
-    showTerms: false, showNotes: false,
-    thermalFontSize: settings.fontSize,
-    thermalCompact: !settings.showRateLine && !settings.showHSN,
-    thermalCutMark: settings.cutMark,
-    thermalFontFamily: settings.fontFamily,
-    thermalFontWeight: settings.fontWeight,
-    thermalAllCaps: settings.allCaps,
-    thermalLineSpacing: settings.lineSpacing,
-    thermalContrast: settings.contrast,
-    thermalHeaderAlign: settings.headerAlign,
-    thermalHeaderCaps: settings.headerCaps,
-    thermalShowLogo: settings.showLogo,
-    thermalShowHSN: settings.showHSN,
-    thermalShowRate: settings.showRateLine,
-    thermalQrSize: settings.qrSize,
-    thermalFooterMessage: settings.footerMessage,
-    thermalFeedLines: settings.feedLines,
-    thermalTagline: settings.showTagline ? settings.tagline : '',
+    showHSN: settings.showHSN,
+    showLogo: settings.showLogo,
+    showTerms: false,
+    showNotes: false,
   };
 
   const sample = buildSampleInvoice(profile);
@@ -303,29 +48,15 @@ export default function PrintSettings() {
         <div>
           <h3 className="section-title" style={{ marginTop: 0, marginBottom: '0.25rem' }}>
             <Printer size={18} style={{ display: 'inline', verticalAlign: -3, marginRight: 6 }} />
-            Print & PDF Settings
+            Invoice Layout
           </h3>
           <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: 0 }}>
-            App-wide defaults for every printed / PDF invoice. 70+ settings — every one dynamic. Each invoice can override via its Customize panel.
+            What appears on your printed and PDF invoices. Each invoice can override via its Customize panel.
           </p>
         </div>
-        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-          <button className="btn btn-secondary" style={{ fontSize: '0.82rem' }}
-            onClick={() => {
-              const next = { ...settings, onboardingComplete: false };
-              setSettings(next); savePrintSettings(next);
-              toast('Setup wizard will re-open on next page reload', 'info');
-            }}
-            title="Show the first-run wizard again">
-            🚀 Run setup wizard
-          </button>
-          <button className="btn btn-secondary" style={{ fontSize: '0.82rem' }} onClick={reset}>
-            <RotateCcw size={14} /> Reset defaults
-          </button>
-          <button className="btn btn-primary" style={{ fontSize: '0.82rem' }} onClick={runTestPrint}>
-            <TestTube size={14} /> Test Print
-          </button>
-        </div>
+        <button className="btn btn-secondary" style={{ fontSize: '0.82rem' }} onClick={reset}>
+          <RotateCcw size={14} /> Reset defaults
+        </button>
       </div>
 
       <div className="print-settings-layout" style={{
@@ -337,724 +68,160 @@ export default function PrintSettings() {
       }}>
         <div className="print-settings-body" style={{ minWidth: 0 }}>
 
-      <div style={{
-        padding: '0.85rem 1rem',
-        background: 'linear-gradient(135deg, var(--primary-light, rgba(30,64,175,0.06)), var(--card))',
-        border: '1px solid var(--border)',
-        borderRadius: 10,
-        marginBottom: '1rem',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '0.6rem', gap: '0.5rem', flexWrap: 'wrap' }}>
-          <strong style={{ fontSize: '0.9rem' }}>⚡ Business type <span style={{ fontSize: '0.65rem', fontWeight: 500, color: 'var(--text-muted)', marginLeft: 6 }}>picks 15+ settings that match your workflow</span></strong>
-          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Pick this first. Every setting below is still editable.</span>
-        </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.5rem' }}>
-          {Object.entries(BUSINESS_PRESETS).map(([key, preset]) => {
-            const active = settings.activeBusinessPresetId === key;
-            return (
-              <button key={key} type="button"
-                onClick={async () => {
-                  if (!await confirmAction({
-                    title: `Apply "${preset.label}" preset?`,
-                    message: `This will overwrite ${Object.keys(preset.patch).length} print settings on top of your current setup. You can undo by picking "Reset defaults".`,
-                    confirmLabel: 'Apply preset',
-                    tone: 'warning',
-                  })) return;
-                  const next = { ...applyBusinessPreset(settings, key), activeBusinessPresetId: key };
-                  setSettings(next);
-                  savePrintSettings(next);
-                  toast(`Applied "${preset.label}" preset`, 'success');
-                }}
-                style={{
-                  padding: '0.65rem 0.7rem',
-                  border: active ? '2px solid var(--primary)' : '1px solid var(--border)',
-                  borderRadius: 8,
-                  background: active ? 'var(--primary-light, rgba(30,64,175,0.08))' : 'var(--card)',
-                  cursor: 'pointer', textAlign: 'left',
-                  display: 'flex', flexDirection: 'column', gap: '3px',
-                  transition: 'all 0.15s',
-                }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 4 }}>
-                  <strong style={{ fontSize: '0.82rem' }}>{preset.label}</strong>
-                  {active && <span style={{ fontSize: '0.62rem', color: 'var(--primary)', fontWeight: 700 }}>ACTIVE</span>}
-                </div>
-                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', lineHeight: 1.3 }}>{preset.hint}</span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {HIDDEN_HINT && (
-        <div style={{ padding: '0.55rem 0.85rem', background: 'var(--primary-light, rgba(30,64,175,0.06))', border: '1px solid var(--border)', borderRadius: 8, marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: '0.85rem' }}>ℹ</span>
-          {HIDDEN_HINT}
-          <button type="button" className="btn btn-secondary"
-            style={{ fontSize: '0.72rem', padding: '0.2rem 0.55rem', marginLeft: 'auto' }}
-            onClick={() => set({ activeBusinessPresetId: '' })}
-            title="Clear business type to see every option regardless of relevance">
-            Show all options
-          </button>
-        </div>
-      )}
-
-      <div style={{
-        padding: '0.85rem 1rem',
-        background: 'linear-gradient(135deg, var(--bg-secondary), var(--card))',
-        border: '1px solid var(--border)',
-        borderRadius: 10,
-        marginBottom: '1rem',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '0.6rem', gap: '0.5rem', flexWrap: 'wrap' }}>
-          <strong style={{ fontSize: '0.9rem' }}>🎨 Visual style <span style={{ fontSize: '0.65rem', fontWeight: 500, color: 'var(--text-muted)', marginLeft: 6 }}>colours + typography for PDF & thermal</span></strong>
-          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Click a design to start. Edit anything below.</span>
-        </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.6rem' }}>
-          {DESIGN_PRESETS.map(preset => {
-            const active = settings.activePresetId === preset.id;
-            const s = preset.settings;
-            const isMono = s.fontFamily === 'mono';
-            const mockupFont = isMono
-              ? '"Courier New", ui-monospace, monospace'
-              : 'system-ui, -apple-system, "Segoe UI", sans-serif';
-            return (
-              <button
-                key={preset.id}
-                type="button"
-                onClick={() => {
-                  const next = { ...settings, ...preset.settings, activePresetId: preset.id };
-                  setSettings(next); savePrintSettings(next);
-                  toast(`Applied "${preset.name}" design — every setting still editable below`, 'success');
-                }}
-                style={{
-                  padding: 0,
-                  border: active ? '2px solid var(--primary)' : '1px solid var(--border)',
-                  borderRadius: 10,
-                  background: active ? 'var(--primary-light, rgba(30,64,175,0.06))' : 'var(--card)',
-                  cursor: 'pointer',
-                  textAlign: 'left',
-                  overflow: 'hidden',
-                  transition: 'transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease',
-                  boxShadow: active ? '0 4px 14px rgba(30,64,175,0.15)' : '0 1px 3px rgba(0,0,0,0.04)',
-                }}
-                onMouseEnter={(e) => { if (!active) e.currentTarget.style.transform = 'translateY(-2px)'; }}
-                onMouseLeave={(e) => { e.currentTarget.style.transform = 'translateY(0)'; }}
-                title={preset.description}
-              >
-                <div style={{
-                  height: 110,
-                  background: s.pdfHeaderBg || '#ffffff',
-                  padding: '10px 12px',
-                  display: 'flex', flexDirection: 'column', gap: 6,
-                  fontFamily: mockupFont,
-                  borderBottom: `1px solid ${s.pdfDividerColor || '#e5e5e5'}`,
-                }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                    <span style={{
-                      fontSize: 10, fontWeight: 700,
-                      color: s.pdfPrimaryText || '#0f172a',
-                      letterSpacing: s.allCaps || s.headerCaps ? '0.05em' : '0',
-                      textTransform: (s.allCaps || s.headerCaps) ? 'uppercase' : 'none',
-                    }}>BUSINESS</span>
-                    <span style={{
-                      fontSize: 8, fontWeight: 700,
-                      color: s.pdfAccent || '#1e40af',
-                      letterSpacing: '0.08em',
-                    }}>INVOICE</span>
-                  </div>
-                  <div style={{ height: 2, background: s.pdfAccent || '#1e40af', width: '35%' }} />
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginTop: 2 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <div style={{ height: 4, background: s.pdfMutedText || '#94a3b8', width: '55%', borderRadius: 1, opacity: 0.6 }} />
-                      <div style={{ height: 4, background: s.pdfMutedText || '#94a3b8', width: '18%', borderRadius: 1, opacity: 0.6 }} />
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <div style={{ height: 4, background: s.pdfMutedText || '#94a3b8', width: '45%', borderRadius: 1, opacity: 0.4 }} />
-                      <div style={{ height: 4, background: s.pdfMutedText || '#94a3b8', width: '15%', borderRadius: 1, opacity: 0.4 }} />
-                    </div>
-                  </div>
-                  <div style={{
-                    marginTop: 'auto', alignSelf: 'flex-end',
-                    background: s.pdfAccent || '#1e40af',
-                    color: s.pdfAccentText || '#ffffff',
-                    fontSize: 8, fontWeight: 700,
-                    padding: '2px 8px', borderRadius: 3,
-                    letterSpacing: '0.04em',
-                  }}>TOTAL ₹1,250</div>
-                </div>
-
-                <div style={{ padding: '0.55rem 0.75rem', display: 'flex', flexDirection: 'column', gap: 3 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 4 }}>
-                    <span style={{ fontSize: '0.85rem', fontWeight: 700 }}>
-                      <span style={{ marginRight: 5, opacity: 0.7 }}>{preset.icon}</span>
-                      {preset.name}
-                    </span>
-                    {active && <span style={{ fontSize: '0.6rem', color: 'var(--primary)', fontWeight: 700, letterSpacing: '0.04em' }}>ACTIVE</span>}
-                  </div>
-                  {preset.tag && (
-                    <span style={{
-                      fontSize: '0.6rem', color: 'var(--text-muted)',
-                      textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 600,
-                    }}>{preset.tag}</span>
-                  )}
-                  <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', lineHeight: 1.3 }}>{preset.description}</span>
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {isVisibleFor(['retail_shop', 'restaurant']) ? (
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '1rem' }}>
-        <SettingGroup title="Typography (Thermal receipts)">
-          <SelectRow label="Font family" value={settings.fontFamily} onChange={v => set({ fontFamily: v })}
-            options={[
-              ['mono', 'Monospace (Courier) — thermal-optimized'],
-              ['sans', 'Sans-serif (Arial-like)'],
-            ]}
-            hint="Applies to THERMAL receipts only. For A4/A5 PDFs use the 'PDF FONT FAMILY' section below." />
-          <SelectRow label="Font size" value={settings.fontSize} onChange={v => set({ fontSize: v })}
-            options={[
-              ['small', 'Small (fits more per receipt)'],
-              ['medium', 'Medium (recommended)'],
-              ['large', 'Large'],
-              ['xlarge', 'Extra Large (easier for older customers)'],
-            ]} />
-          <SelectRow label="Font weight" value={settings.fontWeight} onChange={v => set({ fontWeight: v })}
-            options={[
-              ['normal', 'Normal'],
-              ['bold', 'Bold (recommended)'],
-              ['ultra', 'Ultra bold (darkest print)'],
-            ]}
-            hint="Thermal print heads render bold weights much darker than normal — pick bold or ultra for consistent legibility." />
-          <ToggleRow label="ALL CAPS mode" value={settings.allCaps} onChange={v => set({ allCaps: v })}
-            hint="Renders every text element in UPPERCASE — matches the SMART BAZAAR / Reliance receipt style. Best for high legibility." />
-        </SettingGroup>
-
-        <SettingGroup title="Layout">
-          <SelectRow label="Line spacing" value={settings.lineSpacing} onChange={v => set({ lineSpacing: v })}
-            options={[
-              ['compact', 'Compact (save paper)'],
-              ['normal', 'Normal'],
-              ['comfortable', 'Comfortable (easier to read)'],
-            ]} />
-          <SelectRow label="Header alignment" value={settings.headerAlign} onChange={v => set({ headerAlign: v })}
-            options={[
-              ['center', 'Center (default)'],
-              ['left', 'Left-aligned'],
-            ]} />
-          <SelectRow label="Thermal ink darkness" value={settings.contrast} onChange={v => set({ contrast: v })}
-            options={[
-              ['normal', 'Standard'],
-              ['high', 'Dark (recommended for older printers)'],
-              ['ultra', 'Extra-dark (max)'],
-            ]}
-            hint="Applies grayscale + contrast filter to logo / QR so faded prints come out darker." />
-          <ToggleRow label="Force ALL CAPS in header" value={settings.headerCaps} onChange={v => set({ headerCaps: v })}
-            hint="Business name always uppercase (independent of ALL CAPS mode)." />
-        </SettingGroup>
-
-        <SettingGroup title="Content">
-          <ToggleRow label="Show business logo" value={settings.showLogo} onChange={v => set({ showLogo: v })} />
-          <ToggleRow label="Show HSN code per item" value={settings.showHSN} onChange={v => set({ showHSN: v })}
-            hint="Required for GST compliance if you're printing tax invoices. Turn off for informal counter receipts." />
-          <ToggleRow label='Show "Qty × Rate" line per item' value={settings.showRateLine} onChange={v => set({ showRateLine: v })} />
-          <ToggleRow label="Show amount in words" value={settings.showAmountWords} onChange={v => set({ showAmountWords: v })} />
-          <ToggleRow label="Show bank details" value={settings.showBankDetails} onChange={v => set({ showBankDetails: v })} />
-          <ToggleRow label="Show UPI QR code" value={settings.showUPI} onChange={v => set({ showUPI: v })} />
-          {settings.showUPI && (
-            <SelectRow label="UPI QR size" value={settings.qrSize} onChange={v => set({ qrSize: v })}
-              options={[
-                ['small', 'Small (60 × 60 px)'],
-                ['medium', 'Medium (90 × 90 px)'],
-                ['large', 'Large (120 × 120 px)'],
-              ]} />
-          )}
-        </SettingGroup>
-
-        <SettingGroup title="Footer">
-          <TextRow label="Custom footer message" value={settings.footerMessage} onChange={v => set({ footerMessage: v })}
-            placeholder="Thank you for your business!"
-            hint='Appears above the cut mark. Leave blank to hide.' />
-          <ToggleRow label='Show cut mark ("✂ cut here")' value={settings.cutMark} onChange={v => set({ cutMark: v })}
-            hint="For thermal printers without auto-cutters. Turn off if your printer feeds paper automatically." />
-          <SelectRow label="Feed lines after cut" value={String(settings.feedLines)} onChange={v => set({ feedLines: parseInt(v, 10) })}
-            options={[['0', 'No extra feed'], ['1', '1 line'], ['2', '2 lines (default)'], ['3', '3 lines'], ['4', '4 lines'], ['6', '6 lines']]}
-            hint="Extra blank lines after the cut mark so the tear is clean." />
-          <ToggleRow label="Show tagline" value={settings.showTagline} onChange={v => set({ showTagline: v })}
-            hint="Optional tagline printed below business name." />
-          {settings.showTagline && (
-            <TextRow label="Tagline text" value={settings.tagline} onChange={v => set({ tagline: v })}
-              placeholder="e.g. Fresh & Local Since 2010" />
-          )}
-        </SettingGroup>
-      </div>
-      ) : (
-        <div style={{ padding: '0.75rem 1rem', background: 'var(--bg-secondary)', borderRadius: 8, marginBottom: '1rem', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-          🖨 Thermal receipt settings (font, cut mark, feed lines, contrast) are hidden — the <strong>{BUSINESS_PRESETS[activeBiz]?.label}</strong> preset uses A4/A5 PDFs. Switch business type above if you also print thermal receipts.
-        </div>
-      )}
-
-      <div style={{ marginTop: '1.75rem', padding: '1rem 1.25rem', background: 'var(--bg-secondary)', borderRadius: 8 }}>
-        <h4 style={{ margin: '0 0 0.75rem', fontSize: '0.95rem', color: 'var(--primary)' }}>
-          📄 PDF & universal print features
-        </h4>
-        <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: '0 0 1rem' }}>
-          Applies to A4 / A5 / Letter / Legal / thermal — every option here is dynamic (turn on / off any time).
-        </p>
-
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1rem' }}>
-
-          <SettingGroup title="Auto-print">
-            <ToggleRow label="Auto-print on save" value={settings.autoPrintOnSave} onChange={v => set({ autoPrintOnSave: v })}
-              hint="Send to your default printer immediately after Save & Download PDF. Perfect for POS counters — no manual click needed." />
-          </SettingGroup>
-
-          <SettingGroup title="Watermark">
-            <ToggleRow label="Show watermark" value={settings.watermarkEnabled} onChange={v => set({ watermarkEnabled: v })}
-              hint="Big diagonal stamp across the PDF (e.g. PAID / DUPLICATE / DRAFT)." />
-            {settings.watermarkEnabled && (
-              <>
-                <ToggleRow label="Use custom text instead of preset" value={settings.watermarkUseCustomText}
-                  onChange={v => set({ watermarkUseCustomText: v })}
-                  hint="Type your own text below (e.g. 'FOR INTERNAL USE'). Turn off to use the PAID/DUPLICATE/etc. preset picker." />
-                {settings.watermarkUseCustomText ? (
-                  <TextRow label="Custom watermark text" value={settings.watermarkCustomText}
-                    onChange={v => set({ watermarkCustomText: v })}
-                    placeholder="e.g. FOR INTERNAL USE" />
-                ) : (
-                  <SelectRow label="Watermark text" value={settings.watermarkText} onChange={v => set({ watermarkText: v })}
-                    options={[
-                      ['PAID', 'PAID'], ['DUPLICATE', 'DUPLICATE'], ['DRAFT', 'DRAFT'],
-                      ['OVERDUE', 'OVERDUE'], ['COPY', 'COPY'], ['ORIGINAL', 'ORIGINAL'],
-                      ['CANCELLED', 'CANCELLED'], ['REPRINT', 'REPRINT'],
-                    ]} />
-                )}
-                <SelectRow label="Opacity" value={String(settings.watermarkOpacity)} onChange={v => set({ watermarkOpacity: parseInt(v, 10) })}
-                  options={[['5', 'Very faint (5%)'], ['10', 'Faint (10%)'], ['15', 'Medium (15%)'], ['25', 'Strong (25%)'], ['40', 'Very strong (40%)']]} />
-              </>
+          <SettingGroup title="Content">
+            <ToggleRow label="Show business logo" value={settings.showLogo} onChange={v => set({ showLogo: v })} />
+            <ToggleRow label="Show HSN code per item" value={settings.showHSN} onChange={v => set({ showHSN: v })}
+              hint="Required for GST compliance on tax invoices." />
+            <ToggleRow label='Show "Qty × Rate" line per item' value={settings.showRateLine} onChange={v => set({ showRateLine: v })} />
+            <ToggleRow label="Show amount in words" value={settings.showAmountWords} onChange={v => set({ showAmountWords: v })} />
+            <ToggleRow label="Show bank details" value={settings.showBankDetails} onChange={v => set({ showBankDetails: v })} />
+            <ToggleRow label="Show UPI QR code" value={settings.showUPI} onChange={v => set({ showUPI: v })} />
+            {settings.showUPI && (
+              <SelectRow label="UPI QR size" value={settings.qrSize} onChange={v => set({ qrSize: v })}
+                options={[
+                  ['small', 'Small (60 × 60 px)'],
+                  ['medium', 'Medium (90 × 90 px)'],
+                  ['large', 'Large (120 × 120 px)'],
+                ]} />
             )}
           </SettingGroup>
 
-          {isVisibleFor(['wholesale', 'manufacturer']) && (
-          <SettingGroup title="Multi-copy (GST rule 48)">
-            <ToggleRow label="Print multiple copies with labels" value={settings.multiCopyEnabled} onChange={v => set({ multiCopyEnabled: v })}
-              tag={isRecommendedForActive(['wholesale', 'manufacturer']) ? 'Recommended for your business' : null}
-              hint="Prints your invoice N times with corner labels (ORIGINAL FOR RECIPIENT / DUPLICATE FOR TRANSPORTER / etc.). GST rule 48 requires 3 copies for goods, 2 for services." />
-            {settings.multiCopyEnabled && (
-              <SelectRow label="Number of copies" value={String(settings.multiCopyCount)} onChange={v => set({ multiCopyCount: parseInt(v, 10) })}
-                options={[['2', '2 (Original + Duplicate — services)'], ['3', '3 (Original + Duplicate + Triplicate — goods)']]} />
-            )}
-          </SettingGroup>
-          )}
-
-          <SettingGroup title="Multi-page invoices">
-            <ToggleRow label="Page numbers on every page" value={settings.pageNumbersEnabled} onChange={v => set({ pageNumbersEnabled: v })}
-              hint='Shows "Page 2 of 5" bottom-right on pages 2+.' />
-            <ToggleRow label="Business name header on pages 2+" value={settings.pageHeaderEnabled} onChange={v => set({ pageHeaderEnabled: v })}
-              hint="Repeats your business name at the top so multi-page invoices look professional." />
-          </SettingGroup>
-
-          <SettingGroup title="Print margins (mm)">
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.4rem' }}>
-              <NumInput label="Top" value={settings.marginTop} onChange={v => set({ marginTop: v })} />
-              <NumInput label="Bottom" value={settings.marginBottom} onChange={v => set({ marginBottom: v })} />
-              <NumInput label="Left" value={settings.marginLeft} onChange={v => set({ marginLeft: v })} />
-              <NumInput label="Right" value={settings.marginRight} onChange={v => set({ marginRight: v })} />
-            </div>
-            <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', margin: '3px 0 0' }}>
-              For users printing on pre-printed letterhead — shift content down to avoid your logo, or in from the edge to fit binding.
-            </p>
-          </SettingGroup>
-
-          <SettingGroup title="Verification codes">
-            <ToggleRow label="Invoice number as QR" value={settings.invoiceQrEnabled} onChange={v => set({ invoiceQrEnabled: v })}
-              tag={isRecommendedForActive(['manufacturer', 'wholesale']) ? 'Recommended for your business' : null}
-              hint="Prints a QR of the invoice number (or verification URL if set below) in the bottom-right corner." />
-            {settings.invoiceQrEnabled && (
-              <TextRow label="Verification URL (optional)" value={settings.invoiceQrUrl} onChange={v => set({ invoiceQrUrl: v })}
-                placeholder="https://mycompany.com/verify/{invoice_number}"
-                hint="{invoice_number} gets replaced with the actual invoice #. Leave blank to encode just the number." />
-            )}
-            <ToggleRow label="Invoice number as barcode text" value={settings.invoiceBarcodeEnabled} onChange={v => set({ invoiceBarcodeEnabled: v })}
-              hint="Prints the invoice number in large monospace at the bottom-left for warehouse scanning / filing." />
-          </SettingGroup>
-
-          {isVisibleFor(['retail_shop', 'restaurant']) && (
-          <SettingGroup title="Customer feedback QR">
-            <ToggleRow label="Feedback / review QR" value={settings.feedbackQrEnabled} onChange={v => set({ feedbackQrEnabled: v })}
-              tag={isRecommendedForActive(['retail_shop', 'restaurant']) ? 'Recommended for your business' : null}
-              hint="Adds a QR at the bottom-left of the PDF that opens a URL — Google Reviews, feedback form, WhatsApp chat, anything you want." />
-            {settings.feedbackQrEnabled && (
-              <>
-                <TextRow label="URL to encode" value={settings.feedbackQrUrl} onChange={v => set({ feedbackQrUrl: v })}
-                  placeholder="e.g. https://g.page/r/YOUR_ID/review" />
-                <TextRow label="Label above QR" value={settings.feedbackQrLabel} onChange={v => set({ feedbackQrLabel: v })}
-                  placeholder="Rate us · Give feedback" />
-              </>
-            )}
-          </SettingGroup>
-          )}
-
-          <SettingGroup title="Digital signature">
-            <ToggleRow label="Show signature on invoice" value={settings.signatureShow} onChange={v => set({ signatureShow: v })} />
-            {settings.signatureShow && (
-              <>
-                {settings.signatureImage ? (
-                  <>
-                    <div style={{ padding: '0.5rem', background: '#fff', borderRadius: 4, textAlign: 'center', marginBottom: '0.4rem' }}>
-                      <img src={settings.signatureImage} alt="signature" style={{ maxHeight: 60, maxWidth: '100%' }} />
-                    </div>
-                    <button className="btn btn-secondary" style={{ fontSize: '0.75rem', padding: '0.25rem 0.6rem' }}
-                      onClick={() => set({ signatureImage: '' })}>
-                      Remove signature
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <label style={{ fontSize: '0.78rem', display: 'block', marginBottom: 3 }}>Upload signature (PNG / JPG)</label>
-                    <input type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml"
-                      onChange={e => {
-                        const file = e.target.files?.[0];
-                        if (!file) return;
-                        if (file.size > 2 * 1024 * 1024) { toast('Image too large (max 2MB)', 'warning'); return; }
-                        const reader = new FileReader();
-                        reader.onload = (ev) => set({ signatureImage: ev.target.result });
-                        reader.readAsDataURL(file);
-                      }}
-                      style={{ fontSize: '0.78rem' }} />
-                  </>
-                )}
-                <TextRow label="Signatory name" value={settings.signatureName} onChange={v => set({ signatureName: v })}
-                  placeholder="e.g. Rakesh Kumar · Director"
-                  hint="Falls back to business name if left blank." />
-              </>
-            )}
-          </SettingGroup>
-
-          <SettingGroup title="Terms &amp; Conditions">
-            <ToggleRow label="Print T&amp;C on a separate page" value={settings.termsSeparatePage} onChange={v => set({ termsSeparatePage: v })}
-              hint="For long terms — puts them on page 2 instead of squishing on page 1. Only affects invoices with T&amp;C enabled." />
-          </SettingGroup>
-
-          <SettingGroup title="PDF font family">
-            <SelectRow label="Font used in generated PDFs" value={settings.pdfFontFamily} onChange={v => set({ pdfFontFamily: v })}
-              options={[
-                ['helvetica', 'Helvetica (default, cleanest)'],
-                ['times', 'Times New Roman (traditional / formal)'],
-                ['courier', 'Courier (monospace / retro / receipt style)'],
-              ]}
-              hint="Applies to the letterhead, table, and totals. Affects sheet formats (A4/A5/Letter/Legal); thermal has its own font setting above." />
-          </SettingGroup>
-
-          <SettingGroup title="Layout &amp; printer compatibility">
-            <ToggleRow label="Compact upper header (fit more items on page 1)"
-              value={settings.headerCompact} onChange={v => set({ headerCompact: v })}
-              hint="Shrinks the header, billing block, and Place-of-Supply spacing so the items table starts higher up. Best when your invoices routinely spill to page 2 because of large headers." />
-            <ToggleRow label="Thermal buffer-safe mode (for old / low-memory receipt printers)"
-              value={settings.thermalBufferSafe} onChange={v => set({ thermalBufferSafe: v })}
-              tag={isRecommendedForActive(['retail_shop', 'restaurant']) ? 'Recommended for your business' : null}
-              hint="Uses grayscale, drops render scale for thermal captures, and lowers JPEG quality. Helps ₹800–₹2000 thermal printers with small internal buffers avoid stuck B/W print jobs." />
-            <SelectRow label="Thermal print method"
-              value={settings.thermalPrintMode || 'direct'}
-              onChange={v => set({ thermalPrintMode: v })}
-              options={[
-                ['direct', 'Direct HTML — sharper, faster (recommended)'],
-                ['pdf',    'Via PDF — safer fallback for finicky printers'],
-              ]}
-              hint="Direct sends invoice text as vector to the printer — 203-dpi thermal renders it sharply. If your printer or browser mis-handles the direct path, switch to Via PDF for the pre-v1.10.42 raster behaviour." />
-          </SettingGroup>
-
-          <SettingGroup title="Custom prefix per invoice type">
-            <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', margin: '0 0 0.5rem' }}>
-              Leave blank to use the built-in default. Each type has its own atomic counter — changing a prefix starts a fresh count for the new one.
-            </p>
-            {[
-              { key: 'tax-invoice',     label: 'Tax Invoice',       def: 'INV'  },
-              { key: 'proforma',        label: 'Proforma / Estimate', def: 'EST' },
-              { key: 'bill-of-supply',  label: 'Bill of Supply',    def: 'BOS'  },
-              { key: 'composition',     label: 'Composition',       def: 'COMP' },
-              { key: 'credit-note',     label: 'Credit Note',       def: 'CN'   },
-              { key: 'delivery-challan',label: 'Delivery Challan',  def: 'DC'   },
-            ].map(({ key, label, def }) => (
-              <div key={key} style={{ display: 'grid', gridTemplateColumns: '1fr 130px', gap: '0.5rem', alignItems: 'center', marginBottom: 6 }}>
-                <span style={{ fontSize: '0.82rem' }}>{label}</span>
-                <input type="text" className="form-input"
-                  value={settings.customPrefixes?.[key] || ''}
-                  onChange={e => set({ customPrefixes: { ...(settings.customPrefixes || {}), [key]: e.target.value.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 8) } })}
-                  placeholder={def} maxLength={8}
-                  style={{ fontSize: '0.8rem', padding: '0.3rem 0.5rem' }} />
-              </div>
-            ))}
-          </SettingGroup>
-
-          {isVisibleFor(['retail_shop', 'restaurant']) && (
-          <SettingGroup title="Reprint tracking">
-            <ToggleRow label="Show REPRINT badge on reprints" value={settings.reprintLabelEnabled} onChange={v => set({ reprintLabelEnabled: v })}
-              tag={isRecommendedForActive(['retail_shop', 'restaurant']) ? 'Recommended for your business' : null}
-              hint="Automatic red badge in the top-left of the PDF when an invoice has been printed before. Tracks how many times each bill was printed." />
-          </SettingGroup>
-          )}
-
-          <SettingGroup title="PDF quality vs file size">
-            <SelectRow label="Print quality" value={settings.pdfQuality} onChange={v => set({ pdfQuality: v })}
-              options={[
-                ['draft', 'Draft — smallest file (email-friendly)'],
-                ['standard', 'Standard — default balance'],
-                ['hd', 'HD — archival quality (largest file)'],
-              ]}
-              hint="Draft = ~50% smaller PDFs, fine for emailing. HD = crisper text at 100% zoom, larger file, better for physical archive." />
-          </SettingGroup>
-
-          {isVisibleFor(['freelancer', 'service']) && (
-          <SettingGroup title="Dual currency display">
-            <ToggleRow label="Show foreign-currency equivalent" value={settings.dualCurrencyEnabled} onChange={v => set({ dualCurrencyEnabled: v })}
-              tag={isRecommendedForActive(['freelancer', 'service']) ? 'Recommended for your business' : null}
-              hint="For INR invoices to foreign clients, shows the total in a second currency next to the ₹ amount. Uses YOUR manually set rate — no live conversion." />
-            {settings.dualCurrencyEnabled && (
-              <>
-                <SelectRow label="Secondary currency" value={settings.dualCurrencyCode} onChange={v => set({ dualCurrencyCode: v })}
-                  options={[
-                    ['USD', 'USD ($)'], ['EUR', 'EUR (€)'], ['GBP', 'GBP (£)'],
-                    ['AED', 'AED (د.إ)'], ['SGD', 'SGD (S$)'], ['AUD', 'AUD (A$)'], ['JPY', 'JPY (¥)'],
-                  ]} />
-                <NumInput label={`Rate (1 ${settings.dualCurrencyCode} = ? INR)`} value={settings.dualCurrencyRate}
-                  onChange={v => set({ dualCurrencyRate: v })} min={0.01} max={10000} />
-                <SelectRow label="Display position" value={settings.dualCurrencyPosition} onChange={v => set({ dualCurrencyPosition: v })}
-                  options={[
-                    ['below', 'On a line below the ₹ amount'],
-                    ['inline', 'Inline in parentheses'],
-                  ]} />
-              </>
-            )}
-          </SettingGroup>
-          )}
-
-          <SettingGroup title="Company letterhead">
-            <ToggleRow label="Use pre-printed letterhead image" value={settings.letterheadEnabled} onChange={v => set({ letterheadEnabled: v })}
-              hint="Upload your own designed letterhead as a full-page background. Invoice content prints on top. Best for businesses with formal branded stationery." />
-            {settings.letterheadEnabled && (
-              <>
-                {settings.letterheadImage ? (
-                  <>
-                    <div style={{ padding: '0.5rem', background: '#fff', borderRadius: 4, textAlign: 'center', marginBottom: '0.4rem' }}>
-                      <img src={settings.letterheadImage} alt="letterhead" style={{ maxHeight: 100, maxWidth: '100%' }} />
-                    </div>
-                    <button className="btn btn-secondary" style={{ fontSize: '0.75rem', padding: '0.25rem 0.6rem' }}
-                      onClick={() => set({ letterheadImage: '' })}>
-                      Remove letterhead
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <div style={{ padding: '0.5rem 0.75rem', background: 'var(--warn-bg)', border: '1px solid var(--warn-border)', color: 'var(--warn-text)', borderRadius: 6, fontSize: '0.78rem', marginBottom: '0.6rem' }}>
-                      ⚠ Letterhead is enabled but no image is uploaded yet. Upload a PNG or JPG below (A4 recommended, max 3 MB) — the toggle does nothing until an image is set.
-                    </div>
-                    <label style={{ fontSize: '0.78rem', display: 'block', marginBottom: 3 }}>Upload letterhead (PNG / JPG, A4 recommended)</label>
-                    <input type="file" accept="image/png,image/jpeg,image/webp"
-                      onChange={e => {
-                        const file = e.target.files?.[0];
-                        if (!file) return;
-                        if (file.size > 3 * 1024 * 1024) { toast('Image too large (max 3MB)', 'warning'); return; }
-                        const reader = new FileReader();
-                        reader.onload = (ev) => set({ letterheadImage: ev.target.result });
-                        reader.readAsDataURL(file);
-                      }}
-                      style={{ fontSize: '0.78rem' }} />
-                  </>
-                )}
-                <ToggleRow label="Hide invoice header block" value={settings.letterheadHideHeader} onChange={v => set({ letterheadHideHeader: v })}
-                  hint="When letterhead already has your business info, hide the generated header block to avoid duplication." />
-              </>
-            )}
-          </SettingGroup>
-
-          <SettingGroup title="PDF template style (visual design)">
-            <SelectRow label="Template" value={settings.pdfTemplate} onChange={v => set({ pdfTemplate: v })}
-              options={[
-                ['modern', 'Modern (colorful header · default)'],
-                ['classic', 'Classic (professional / conservative)'],
-                ['minimal', 'Minimal (clean / whitespace)'],
-                ['corporate', 'Corporate (formal blue/navy)'],
-                ['minimalist', 'Minimalist (grayscale + Inter)'],
-              ]}
-              hint="Changes the header block and table styling of the A4/A5 PDF. Thermal receipts use their own compact template." />
-          </SettingGroup>
-
-          <SettingGroup title="Print darkness">
-            <ToggleRow label="Force darker text on printed PDF" value={settings.pdfDarkenOnPrint} onChange={v => set({ pdfDarkenOnPrint: v })}
-              hint="Fixes light-gray labels + addresses fading on paper printers. Applies automatically when generating the PDF (screen view is unchanged). Turn off if your printer already prints greys crisply." />
-          </SettingGroup>
-
-          <SettingGroup title="PDF font scale">
-            <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, marginBottom: 4 }}>
-              Overall size: <strong>{Math.round((settings.pdfFontScale || 1) * 100)}%</strong>
-            </label>
-            <input type="range" min="80" max="140" step="5"
-              value={Math.round((settings.pdfFontScale || 1) * 100)}
-              onChange={e => set({ pdfFontScale: parseInt(e.target.value, 10) / 100 })}
-              style={{ width: '100%', accentColor: 'var(--primary)' }} />
-            <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', margin: '3px 0 0' }}>
-              80% = compact (fits more per page) · 100% = default · 140% = large. Scales the entire PDF proportionally.
-            </p>
-            <p style={{ fontSize: '0.68rem', color: 'var(--text-muted)', margin: '3px 0 0', fontStyle: 'italic' }}>
-              v1.10.10 note: applied at PDF export time. The on-screen preview always renders at 100% — download a PDF to see the actual scale.
-            </p>
-          </SettingGroup>
-
-        </div>
-      </div>
-
-      <div style={{ marginTop: '1.5rem', padding: '1rem 1.25rem', background: 'var(--bg-secondary)', borderRadius: 8 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.5rem' }}>
-          <div>
-            <h4 style={{ margin: 0, fontSize: '0.95rem', color: 'var(--primary)' }}>
-              🎨 PDF Style Editor — full control over every colour
+          <div style={{ marginTop: '1.75rem', padding: '1rem 1.25rem', background: 'var(--bg-secondary)', borderRadius: 8 }}>
+            <h4 style={{ margin: '0 0 0.5rem', fontSize: '0.95rem', color: 'var(--primary)' }}>
+              📄 PDF &amp; universal print features
             </h4>
-            <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: '0.25rem 0 0' }}>
-              Match your brand. Every colour you change updates the live preview instantly and gets baked into your PDFs.
+            <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: '0 0 1rem' }}>
+              Every option below is dynamic — turn on / off any time.
             </p>
-          </div>
-          <ToggleRow label="Use custom colours" value={settings.userColorsEnabled} onChange={v => set({ userColorsEnabled: v })} />
-        </div>
 
-        {settings.userColorsEnabled && (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.75rem', marginTop: '0.75rem' }}>
-            <ColorRow label="Primary text" value={settings.pdfPrimaryText || '#0f172a'} onChange={v => set({ pdfPrimaryText: v })}
-              hint="Main body text — client name, item names, totals." />
-            <ColorRow label="Muted text" value={settings.pdfMutedText || '#334155'} onChange={v => set({ pdfMutedText: v })}
-              hint="Labels, addresses, meta info (Date, Invoice #)." />
-            <ColorRow label="Accent colour" value={settings.pdfAccent || '#1e40af'} onChange={v => set({ pdfAccent: v })}
-              hint="Section titles + table header background." />
-            <ColorRow label="Accent text" value={settings.pdfAccentText || '#ffffff'} onChange={v => set({ pdfAccentText: v })}
-              hint="Text on the accent colour (usually white on a coloured header)." />
-            <ColorRow label="Header background" value={settings.pdfHeaderBg || '#f8fafc'} onChange={v => set({ pdfHeaderBg: v })}
-              hint="Header block behind the business name / invoice title." />
-            <ColorRow label="Divider lines" value={settings.pdfDividerColor || '#334155'} onChange={v => set({ pdfDividerColor: v })}
-              hint="Hairlines between sections + table row borders." />
-            <div style={{ gridColumn: '1 / -1' }}>
-              <button className="btn btn-secondary" style={{ fontSize: '0.75rem', padding: '0.35rem 0.75rem' }}
-                onClick={() => set({
-                  pdfPrimaryText: '#0f172a', pdfMutedText: '#334155',
-                  pdfAccent: '#1e40af', pdfAccentText: '#ffffff',
-                  pdfHeaderBg: '#f8fafc', pdfDividerColor: '#334155',
-                })}>
-                Reset colours to defaults
-              </button>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1rem' }}>
+
+              <SettingGroup title="Auto-print">
+                <ToggleRow label="Auto-print on save" value={settings.autoPrintOnSave} onChange={v => set({ autoPrintOnSave: v })}
+                  hint="Send to your default printer immediately after Save & Download PDF." />
+              </SettingGroup>
+
+              <SettingGroup title="Watermark">
+                <ToggleRow label="Show watermark" value={settings.watermarkEnabled} onChange={v => set({ watermarkEnabled: v })}
+                  hint="Big diagonal stamp across the PDF (e.g. PAID / DUPLICATE / DRAFT)." />
+                {settings.watermarkEnabled && (
+                  <>
+                    <ToggleRow label="Use custom text instead of preset" value={settings.watermarkUseCustomText}
+                      onChange={v => set({ watermarkUseCustomText: v })} />
+                    {settings.watermarkUseCustomText ? (
+                      <TextRow label="Custom watermark text" value={settings.watermarkCustomText}
+                        onChange={v => set({ watermarkCustomText: v })}
+                        placeholder="e.g. FOR INTERNAL USE" />
+                    ) : (
+                      <SelectRow label="Watermark text" value={settings.watermarkText} onChange={v => set({ watermarkText: v })}
+                        options={[
+                          ['PAID', 'PAID'], ['DUPLICATE', 'DUPLICATE'], ['DRAFT', 'DRAFT'],
+                          ['OVERDUE', 'OVERDUE'], ['COPY', 'COPY'], ['ORIGINAL', 'ORIGINAL'],
+                          ['CANCELLED', 'CANCELLED'], ['REPRINT', 'REPRINT'],
+                        ]} />
+                    )}
+                    <SelectRow label="Opacity" value={String(settings.watermarkOpacity)} onChange={v => set({ watermarkOpacity: parseInt(v, 10) })}
+                      options={[['5', 'Very faint (5%)'], ['10', 'Faint (10%)'], ['15', 'Medium (15%)'], ['25', 'Strong (25%)'], ['40', 'Very strong (40%)']]} />
+                  </>
+                )}
+              </SettingGroup>
+
+              <SettingGroup title="Multi-copy (GST rule 48)">
+                <ToggleRow label="Print multiple copies with labels" value={settings.multiCopyEnabled} onChange={v => set({ multiCopyEnabled: v })}
+                  hint="Prints the invoice N times with corner labels (ORIGINAL FOR RECIPIENT / DUPLICATE FOR TRANSPORTER / etc.). GST rule 48 requires 3 copies for goods, 2 for services." />
+                {settings.multiCopyEnabled && (
+                  <SelectRow label="Number of copies" value={String(settings.multiCopyCount)} onChange={v => set({ multiCopyCount: parseInt(v, 10) })}
+                    options={[['2', '2 (Original + Duplicate — services)'], ['3', '3 (Original + Duplicate + Triplicate — goods)']]} />
+                )}
+              </SettingGroup>
+
+              <SettingGroup title="Multi-page invoices">
+                <ToggleRow label="Page numbers on every page" value={settings.pageNumbersEnabled} onChange={v => set({ pageNumbersEnabled: v })}
+                  hint='Shows "Page 2 of 5" bottom-right on pages 2+.' />
+                <ToggleRow label="Business name header on pages 2+" value={settings.pageHeaderEnabled} onChange={v => set({ pageHeaderEnabled: v })}
+                  hint="Repeats your business name at the top so multi-page invoices look professional." />
+              </SettingGroup>
+
+              <SettingGroup title="Print margins (mm)">
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.4rem' }}>
+                  <NumInput label="Top" value={settings.marginTop} onChange={v => set({ marginTop: v })} />
+                  <NumInput label="Bottom" value={settings.marginBottom} onChange={v => set({ marginBottom: v })} />
+                  <NumInput label="Left" value={settings.marginLeft} onChange={v => set({ marginLeft: v })} />
+                  <NumInput label="Right" value={settings.marginRight} onChange={v => set({ marginRight: v })} />
+                </div>
+                <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', margin: '3px 0 0' }}>
+                  For pre-printed letterhead — shift content down to avoid your logo, or in from the edge to fit binding.
+                </p>
+              </SettingGroup>
+
+              <SettingGroup title="Verification codes">
+                <ToggleRow label="Invoice number as QR" value={settings.invoiceQrEnabled} onChange={v => set({ invoiceQrEnabled: v })}
+                  hint="Prints a QR of the invoice number (or verification URL if set below) in the bottom-right corner." />
+                {settings.invoiceQrEnabled && (
+                  <TextRow label="Verification URL (optional)" value={settings.invoiceQrUrl} onChange={v => set({ invoiceQrUrl: v })}
+                    placeholder="https://mycompany.com/verify/{invoice_number}"
+                    hint="{invoice_number} gets replaced with the actual invoice #. Leave blank to encode just the number." />
+                )}
+                <ToggleRow label="Invoice number as barcode text" value={settings.invoiceBarcodeEnabled} onChange={v => set({ invoiceBarcodeEnabled: v })}
+                  hint="Prints the invoice number in large monospace at the bottom-left for warehouse scanning / filing." />
+              </SettingGroup>
+
+              <SettingGroup title="Customer feedback QR">
+                <ToggleRow label="Feedback / review QR" value={settings.feedbackQrEnabled} onChange={v => set({ feedbackQrEnabled: v })}
+                  hint="Adds a QR at the bottom-left of the PDF that opens a URL — Google Reviews, feedback form, WhatsApp chat, anything you want." />
+                {settings.feedbackQrEnabled && (
+                  <>
+                    <TextRow label="URL to encode" value={settings.feedbackQrUrl} onChange={v => set({ feedbackQrUrl: v })}
+                      placeholder="e.g. https://g.page/r/YOUR_ID/review" />
+                    <TextRow label="Label above QR" value={settings.feedbackQrLabel} onChange={v => set({ feedbackQrLabel: v })}
+                      placeholder="Rate us · Give feedback" />
+                  </>
+                )}
+              </SettingGroup>
+
+              <SettingGroup title="Digital signature">
+                <ToggleRow label="Show signature on invoice" value={settings.signatureShow} onChange={v => set({ signatureShow: v })} />
+                {settings.signatureShow && (
+                  <>
+                    {settings.signatureImage ? (
+                      <>
+                        <div style={{ padding: '0.5rem', background: '#fff', borderRadius: 4, textAlign: 'center', marginBottom: '0.4rem' }}>
+                          <img src={settings.signatureImage} alt="signature" style={{ maxHeight: 60, maxWidth: '100%' }} />
+                        </div>
+                        <button className="btn btn-secondary" style={{ fontSize: '0.75rem', padding: '0.25rem 0.6rem' }}
+                          onClick={() => set({ signatureImage: '' })}>
+                          Remove signature
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <label style={{ fontSize: '0.78rem', display: 'block', marginBottom: 3 }}>Upload signature (PNG / JPG)</label>
+                        <input type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                          onChange={e => {
+                            const file = e.target.files?.[0];
+                            if (!file) return;
+                            if (file.size > 2 * 1024 * 1024) { toast('Image too large (max 2MB)', 'warning'); return; }
+                            const reader = new FileReader();
+                            reader.onload = (ev) => set({ signatureImage: ev.target.result });
+                            reader.readAsDataURL(file);
+                          }}
+                          style={{ fontSize: '0.78rem' }} />
+                      </>
+                    )}
+                    <TextRow label="Signatory name" value={settings.signatureName} onChange={v => set({ signatureName: v })}
+                      placeholder="e.g. Rakesh Kumar · Director"
+                      hint="Falls back to business name if left blank." />
+                  </>
+                )}
+              </SettingGroup>
+
+              <SettingGroup title="Terms &amp; Conditions">
+                <ToggleRow label="Print T&amp;C on a separate page" value={settings.termsSeparatePage} onChange={v => set({ termsSeparatePage: v })}
+                  hint="For long terms — puts them on page 2 instead of squishing on page 1. Only affects invoices with T&amp;C enabled." />
+              </SettingGroup>
+
             </div>
           </div>
-        )}
-      </div>
-
-      <div style={{ marginTop: '1.5rem', padding: '1rem 1.25rem', background: 'var(--bg-secondary)', borderRadius: 8 }}>
-        <h4 style={{ margin: '0 0 0.5rem', fontSize: '0.95rem', color: 'var(--primary)' }}>
-          🌐 Section labels — multi-language + custom text
-        </h4>
-        <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: '0 0 0.75rem' }}>
-          Pick a language preset OR override any individual label. Custom text overrides the language preset for that field.
-        </p>
-        <SelectRow label="Language preset" value={settings.labelLanguage} onChange={v => set({ labelLanguage: v })}
-          options={[
-            ['en', 'English'],
-            ['hi', 'हिन्दी (Hindi)'],
-            ['ta', 'தமிழ் (Tamil)'],
-            ['mr', 'मराठी (Marathi)'],
-            ['bn', 'বাংলা (Bengali)'],
-          ]} />
-        <div style={{ marginTop: '0.75rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.6rem' }}>
-          <TextRow label='"BILL TO" label' value={settings.labelBillTo} onChange={v => set({ labelBillTo: v })}
-            placeholder={LABEL_PRESETS[settings.labelLanguage]?.billTo || LABEL_PRESETS.en.billTo} />
-          <TextRow label='"PLACE OF SUPPLY" label' value={settings.labelPlaceOfSupply} onChange={v => set({ labelPlaceOfSupply: v })}
-            placeholder={LABEL_PRESETS[settings.labelLanguage]?.placeOfSupply || LABEL_PRESETS.en.placeOfSupply} />
-          <TextRow label='"BANK DETAILS" label' value={settings.labelBankDetails} onChange={v => set({ labelBankDetails: v })}
-            placeholder={LABEL_PRESETS[settings.labelLanguage]?.bankDetails || LABEL_PRESETS.en.bankDetails} />
-          <TextRow label='"AMOUNT IN WORDS" label' value={settings.labelAmountInWords} onChange={v => set({ labelAmountInWords: v })}
-            placeholder={LABEL_PRESETS[settings.labelLanguage]?.amountInWords || LABEL_PRESETS.en.amountInWords} />
-          <TextRow label='"TERMS & CONDITIONS" label' value={settings.labelTerms} onChange={v => set({ labelTerms: v })}
-            placeholder={LABEL_PRESETS[settings.labelLanguage]?.terms || LABEL_PRESETS.en.terms} />
-          <TextRow label='"NOTES" label' value={settings.labelNotes} onChange={v => set({ labelNotes: v })}
-            placeholder={LABEL_PRESETS[settings.labelLanguage]?.notes || LABEL_PRESETS.en.notes} />
-        </div>
-      </div>
-
-      <div style={{ marginTop: '1.5rem', padding: '1rem 1.25rem', background: 'var(--bg-secondary)', borderRadius: 8 }}>
-        <h4 style={{ margin: '0 0 0.5rem', fontSize: '0.95rem', color: 'var(--primary)' }}>
-          📅 Formatting — date, number, currency
-        </h4>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem' }}>
-          <SelectRow label="Date format" value={settings.dateFormat} onChange={v => set({ dateFormat: v })}
-            options={[
-              ['dd-mon-yyyy', '02 Apr 2026 (Indian)'],
-              ['dd-mmm-yyyy', '02-Apr-2026'],
-              ['dd-mm-yyyy', '02/04/2026'],
-              ['mm-dd-yyyy', '04/02/2026 (US)'],
-              ['yyyy-mm-dd', '2026-04-02'],
-              ['iso', 'ISO 8601'],
-            ]} />
-          <SelectRow label="Number grouping" value={settings.numberFormat} onChange={v => set({ numberFormat: v })}
-            options={[
-              ['indian', '1,00,000.00 (Indian)'],
-              ['western', '100,000.00 (Western)'],
-              ['european', '100.000,00 (European)'],
-            ]} />
-          <SelectRow label="Decimal places" value={String(settings.decimalPlaces)} onChange={v => set({ decimalPlaces: parseInt(v, 10) })}
-            options={[['0', '0 (no decimals)'], ['2', '2 (default)'], ['3', '3'], ['4', '4']]} />
-          <SelectRow label="Currency symbol position" value={settings.currencyPosition} onChange={v => set({ currencyPosition: v })}
-            options={[['before', '₹100 (before number)'], ['after', '100₹ (after number)']]} />
-        </div>
-      </div>
-
-      <div style={{ marginTop: '1.5rem', padding: '1rem 1.25rem', background: 'var(--bg-secondary)', borderRadius: 8 }}>
-        <h4 style={{ margin: '0 0 0.5rem', fontSize: '0.95rem', color: 'var(--primary)' }}>
-          📏 Row density
-        </h4>
-        <SelectRow label="Vertical spacing in tables + sections" value={settings.rowDensity} onChange={v => set({ rowDensity: v })}
-          options={[
-            ['compact', 'Compact — fit more per page'],
-            ['normal', 'Normal (default)'],
-            ['comfortable', 'Comfortable — easier to read'],
-          ]}
-          hint="Affects both A4/A5 PDFs and the on-screen preview." />
-      </div>
-
-      <div style={{ marginTop: '1.5rem', padding: '1rem 1.25rem', background: 'var(--bg-secondary)', borderRadius: 8 }}>
-        <h4 style={{ margin: '0 0 0.5rem', fontSize: '0.95rem', color: 'var(--primary)' }}>
-          💯 Custom tax rate presets
-        </h4>
-        <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: '0 0 0.6rem' }}>
-          Built-in rates: 0% · 5% · 12% · 18% · 28%. Add your own (e.g. 3% jewellery, 0.25% diamond, 7.5% custom).
-        </p>
-        <CustomListEditor
-          values={settings.customTaxRates || []}
-          onChange={v => set({ customTaxRates: v })}
-          placeholder="e.g. 3, 0.25, 7.5"
-          hint="Comma-separated numbers. Between 0 and 100." />
-      </div>
-
-      <div style={{ marginTop: '1.5rem', padding: '1rem 1.25rem', background: 'var(--bg-secondary)', borderRadius: 8 }}>
-        <h4 style={{ margin: '0 0 0.5rem', fontSize: '0.95rem', color: 'var(--primary)' }}>
-          💾 My saved templates
-        </h4>
-        <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: '0 0 0.6rem' }}>
-          Save your current setup as a named template. Recall any time.
-        </p>
-        <SavedTemplatesEditor
-          templates={settings.savedTemplates || []}
-          onChange={v => set({ savedTemplates: v })}
-          currentSettings={settings}
-          onLoad={async (tpl) => {
-            if (!await confirmAction({
-              title: `Load template "${tpl.name}"?`,
-              message: 'This overwrites your current print settings. Save the current setup as a template first if you want to be able to go back.',
-              confirmLabel: 'Load template',
-              tone: 'warning',
-            })) return;
-            setSettings(tpl.settings);
-            savePrintSettings(tpl.settings);
-            toast(`Loaded "${tpl.name}"`, 'success');
-          }} />
-      </div>
 
         </div>
 
@@ -1071,91 +238,27 @@ export default function PrintSettings() {
               <Info size={14} style={{ display: 'inline', verticalAlign: -2, marginRight: 5 }} />
               Live preview
             </strong>
-            <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Updates as you type</span>
+            <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>A4 · updates as you type</span>
           </div>
-
-          <div style={{ display: 'flex', gap: '0.25rem', background: 'var(--card)', padding: '0.25rem', borderRadius: 6 }}>
-            {[
-              ['pdf', '📄 PDF (A4)'],
-              ['thermal', '🖨 Thermal (80mm)'],
-              ['both', '⊞ Split view'],
-            ].map(([key, label]) => (
-              <button key={key} type="button"
-                onClick={() => setPreviewMode(key)}
-                style={{
-                  flex: 1, padding: '0.35rem', border: 'none', borderRadius: 4,
-                  background: previewMode === key ? 'var(--primary)' : 'transparent',
-                  color: previewMode === key ? '#fff' : 'var(--text)',
-                  fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer',
-                }}>
-                {label}
-              </button>
-            ))}
-          </div>
-
           <div style={{ overflow: 'auto', flex: 1, background: '#fff', padding: '0.75rem', borderRadius: 6, minHeight: 200 }}>
-            {previewMode === 'both' ? (
-              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start', flexWrap: 'wrap' }}>
-                <div style={{ zoom: 0.42, minWidth: 0 }}>
-                  <InvoicePreview
-                    ref={previewRef}
-                    profile={sample.profile}
-                    client={sample.client}
-                    details={sample.details}
-                    items={sample.items}
-                    totals={sample.totals}
-                    invoiceType={sample.invoiceType}
-                    options={{ ...previewInvoiceOptions, paperSize: 'a4' }}
-                    customTerms="" customNotes="" extraSections={[]}
-                  />
-                </div>
-                <div style={{ zoom: 0.85, minWidth: 0 }}>
-                  <InvoicePreview
-                    profile={sample.profile}
-                    client={sample.client}
-                    details={sample.details}
-                    items={sample.items}
-                    totals={sample.totals}
-                    invoiceType={sample.invoiceType}
-                    options={{ ...previewInvoiceOptions, paperSize: 'thermal80' }}
-                    customTerms="" customNotes="" extraSections={[]}
-                  />
-                </div>
-              </div>
-            ) : previewMode === 'pdf' ? (
-              <div style={{ zoom: 0.5, minWidth: 0 }}>
-                <InvoicePreview
-                  ref={previewRef}
-                  profile={sample.profile}
-                  client={sample.client}
-                  details={sample.details}
-                  items={sample.items}
-                  totals={sample.totals}
-                  invoiceType={sample.invoiceType}
-                  options={{ ...previewInvoiceOptions, paperSize: 'a4' }}
-                  customTerms="" customNotes="" extraSections={[]}
-                />
-              </div>
-            ) : (
-              <div style={{ margin: '0 auto', width: 'fit-content' }}>
-                <InvoicePreview
-                  ref={previewRef}
-                  profile={sample.profile}
-                  client={sample.client}
-                  details={sample.details}
-                  items={sample.items}
-                  totals={sample.totals}
-                  invoiceType={sample.invoiceType}
-                  options={{ ...previewInvoiceOptions, paperSize: 'thermal80' }}
-                  customTerms="" customNotes="" extraSections={[]}
-                />
-              </div>
-            )}
+            <div style={{ zoom: 0.5, minWidth: 0 }}>
+              <InvoicePreview
+                ref={previewRef}
+                profile={sample.profile}
+                client={sample.client}
+                details={sample.details}
+                items={sample.items}
+                totals={sample.totals}
+                invoiceType={sample.invoiceType}
+                options={previewInvoiceOptions}
+                customTerms=""
+                customNotes=""
+                extraSections={[]}
+              />
+            </div>
           </div>
         </div>
       </div>
-
-      {showTestPreview && null}
     </div>
   );
 }
@@ -1173,21 +276,13 @@ function SettingGroup({ title, children }) {
   );
 }
 
-function ToggleRow({ label, value, onChange, hint, tag }) {
+function ToggleRow({ label, value, onChange, hint }) {
   return (
     <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', cursor: 'pointer', fontSize: '0.82rem' }}>
       <input type="checkbox" checked={!!value} onChange={e => onChange(e.target.checked)}
         style={{ marginTop: 2, accentColor: 'var(--primary)' }} />
       <span style={{ flex: 1 }}>
         <span style={{ fontWeight: 600 }}>{label}</span>
-        {tag && <span style={{
-          display: 'inline-block', marginLeft: 6,
-          fontSize: '0.6rem', fontWeight: 700,
-          textTransform: 'uppercase', letterSpacing: '0.04em',
-          padding: '1px 6px', borderRadius: 999,
-          background: 'var(--primary-light, rgba(30,64,175,0.1))',
-          color: 'var(--primary)',
-        }}>★ {tag}</span>}
         {hint && <span style={{ display: 'block', fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: 2 }}>{hint}</span>}
       </span>
     </label>
@@ -1203,83 +298,6 @@ function SelectRow({ label, value, onChange, options, hint }) {
         {options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
       </select>
       {hint && <p style={{ margin: '3px 0 0', fontSize: '0.72rem', color: 'var(--text-muted)' }}>{hint}</p>}
-    </div>
-  );
-}
-
-function CustomListEditor({ values, onChange, placeholder }) {
-  const [input, setInput] = useState('');
-  return (
-    <div>
-      <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap', marginBottom: '0.5rem' }}>
-        {(values || []).map((v, i) => (
-          <span key={i} style={{ background: 'var(--primary)', color: '#fff', padding: '0.15rem 0.5rem', borderRadius: 12, fontSize: '0.75rem', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-            {v}%
-            <button type="button" onClick={() => onChange(values.filter((_, j) => j !== i))}
-              style={{ background: 'transparent', border: 'none', color: '#fff', cursor: 'pointer', padding: 0, fontSize: '0.85rem', lineHeight: 1 }}>×</button>
-          </span>
-        ))}
-      </div>
-      <div style={{ display: 'flex', gap: '0.35rem' }}>
-        <input type="text" value={input} onChange={e => setInput(e.target.value)}
-          placeholder={placeholder}
-          className="form-input" style={{ fontSize: '0.82rem', padding: '0.35rem 0.55rem', flex: 1 }} />
-        <button type="button" className="btn btn-secondary" style={{ fontSize: '0.78rem' }}
-          onClick={() => {
-            const parsed = input.split(',').map(s => parseFloat(s.trim())).filter(n => Number.isFinite(n) && n >= 0 && n <= 100);
-            if (parsed.length === 0) return;
-            const merged = Array.from(new Set([...(values || []), ...parsed])).sort((a, b) => a - b);
-            onChange(merged);
-            setInput('');
-          }}>Add</button>
-      </div>
-    </div>
-  );
-}
-
-function SavedTemplatesEditor({ templates, onChange, currentSettings, onLoad }) {
-  const [name, setName] = useState('');
-  return (
-    <div>
-      {(templates || []).map((tpl, i) => (
-        <div key={i} style={{ display: 'flex', gap: '0.35rem', marginBottom: '0.35rem', alignItems: 'center', padding: '0.4rem', background: 'var(--card)', borderRadius: 5 }}>
-          <span style={{ flex: 1, fontSize: '0.82rem', fontWeight: 600 }}>{tpl.name}</span>
-          <button type="button" className="btn btn-secondary" style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem' }}
-            onClick={() => onLoad(tpl)}>Load</button>
-          <button type="button" className="icon-btn icon-btn-red"
-            onClick={() => onChange(templates.filter((_, j) => j !== i))}><Trash2 size={13} /></button>
-        </div>
-      ))}
-      <div style={{ display: 'flex', gap: '0.35rem', marginTop: '0.5rem' }}>
-        <input type="text" value={name} onChange={e => setName(e.target.value)}
-          placeholder="Template name (e.g. Retail v1)"
-          className="form-input" style={{ fontSize: '0.82rem', padding: '0.35rem', flex: 1 }} />
-        <button type="button" className="btn btn-primary" style={{ fontSize: '0.78rem' }}
-          onClick={() => {
-            if (!name.trim()) return;
-            onChange([...(templates || []), { name: name.trim(), settings: { ...currentSettings } }]);
-            setName('');
-            toast(`Saved template "${name.trim()}"`, 'success');
-          }}>
-          <SaveIcon size={13} /> Save current as template
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function ColorRow({ label, value, onChange, hint }) {
-  return (
-    <div>
-      <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, marginBottom: 4 }}>{label}</label>
-      <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
-        <input type="color" value={value} onChange={e => onChange(e.target.value)}
-          style={{ width: 42, height: 32, padding: 0, border: '1px solid var(--border)', borderRadius: 4, cursor: 'pointer' }} />
-        <input type="text" value={value} onChange={e => onChange(e.target.value)}
-          className="form-input" style={{ fontSize: '0.8rem', padding: '0.3rem 0.4rem', fontFamily: 'monospace' }}
-          placeholder="#000000" />
-      </div>
-      {hint && <p style={{ margin: '3px 0 0', fontSize: '0.68rem', color: 'var(--text-muted)' }}>{hint}</p>}
     </div>
   );
 }

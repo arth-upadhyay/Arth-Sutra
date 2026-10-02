@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
-import { getProfile, saveProfile, exportAllData, importData, inspectBackup, getTermsTemplates, saveTermsTemplate, deleteTermsTemplate, getAllProfiles, saveBusinessProfile, deleteBusinessProfile, getInvoiceNumberSettings, saveInvoiceNumberSettings, getRegionMode, setRegionMode, getEnabledModules, setEnabledModules, getStockAlertSettings, saveStockAlertSettings, getInvoiceDisplayOptions, saveInvoiceDisplayOptions } from '../store';
+import { getProfile, saveProfile, exportAllData, importData, inspectBackup, getTermsTemplates, saveTermsTemplate, deleteTermsTemplate, getAllProfiles, saveBusinessProfile, deleteBusinessProfile, getInvoiceNumberSettings, saveInvoiceNumberSettings, getEnabledModules, setEnabledModules, getStockAlertSettings, saveStockAlertSettings, getInvoiceDisplayOptions, saveInvoiceDisplayOptions } from '../store';
 import { ensureToken, findOrCreateFolder, uploadJSON } from '../services/googleDrive';
 import { getCountryConfig, getStatesForCountry, validateTaxId, detectCountryFromBrowser, getCountriesForRegion, FEATURE_GROUPS, isModuleEnabled, getPaymentAccounts, createEmptyAccount, maskAccountNumber, reorderAccounts, setDefaultAccount, isValidUpiId } from '../utils';
-import { Save, Upload, Download, Plus, Trash2, Edit3, Image as ImageIcon, PenTool, Cloud, CloudOff, Building2, Hash, RefreshCw } from 'lucide-react';
+import { Save, Upload, Download, Plus, Trash2, Edit3, Image as ImageIcon, PenTool, Cloud, CloudOff, Building2, Hash } from 'lucide-react';
 import { initGoogleDrive, isConnected, disconnect } from '../services/googleDrive';
 import { toast } from './Toast';
 import { confirmAction } from './ConfirmModal';
@@ -14,14 +14,12 @@ const JUMP_NAV_SECTIONS = [
   ['section-company',  'Company'],
   ['section-profiles', 'Profiles'],
   ['section-terms',    'Terms'],
-  ['section-print',    'Print & PDF'],
+  ['section-print',    'Invoice Layout'],
   ['section-modules',  'Features'],
   ['section-stock',    'Stock'],
-  ['section-region',   'Region'],
   ['section-backups',  'Backups'],
   ['section-cloud',    'Google Drive'],
   ['section-data',     'Import/Export'],
-  ['section-updates',  'Updates'],
 ];
 
 const EMPTY_PROFILE = {
@@ -34,7 +32,7 @@ const EMPTY_PROFILE = {
 export default function SettingsView({ onSaved }) {
   const [profile, setProfile] = useState({ ...EMPTY_PROFILE, country: detectCountryFromBrowser() });
   const [activeSection, setActiveSection] = useState(JUMP_NAV_SECTIONS[0][0]);
-  
+
   useEffect(() => {
     const els = JUMP_NAV_SECTIONS
       .map(([id]) => document.getElementById(id))
@@ -52,7 +50,7 @@ export default function SettingsView({ onSaved }) {
     els.forEach(el => io.observe(el));
     return () => io.disconnect();
   }, []);
-  
+
   const [saving, setSaving] = useState(false);
   const [termsTemplates, setTermsTemplates] = useState([]);
   const [editingTemplate, setEditingTemplate] = useState(null);
@@ -63,9 +61,6 @@ export default function SettingsView({ onSaved }) {
     format: 'branded', brandPrefix: '', separator: '/', showFinYear: true, startNumber: 1, padDigits: 4,
   });
   const [invNumSaving, setInvNumSaving] = useState(false);
-  const [updateInfo, setUpdateInfo] = useState(null);
-  const [checkingUpdate, setCheckingUpdate] = useState(false);
-  const [regionMode, setRegionModeState] = useState(getRegionMode());
   const [enabledModules, setEnabledModulesState] = useState(getEnabledModules());
   const [stockAlerts, setStockAlerts] = useState({ enabled: true, threshold: 5 });
   const [stockAlertsSaving, setStockAlertsSaving] = useState(false);
@@ -85,13 +80,7 @@ export default function SettingsView({ onSaved }) {
   const logoInputRef = useRef(null);
   const sigInputRef = useRef(null);
   const companyFormRef = useRef(null);
-  const visibleCountries = getCountriesForRegion(regionMode);
-
-  const handleRegionChange = (mode) => {
-    setRegionModeState(mode);
-    setRegionMode(mode);
-    toast(`Region preference: ${mode === 'india' ? 'India only' : mode === 'international' ? 'International only' : 'Both'}`, 'success');
-  };
+  const visibleCountries = getCountriesForRegion('india');
 
   useEffect(() => {
     getProfile().then(setProfile);
@@ -112,7 +101,7 @@ export default function SettingsView({ onSaved }) {
 
   const [editingAccount, setEditingAccount] = useState(null);
   const [accountUpiWarning, setAccountUpiWarning] = useState('');
-  
+
   const saveProfileTimer = useRef(null);
   const pendingProfileSave = useRef(null);
 
@@ -138,14 +127,14 @@ export default function SettingsView({ onSaved }) {
           upiId: def.upiId || '',
         } : {}),
       };
-      
+
       pendingProfileSave.current = next;
       if (saveProfileTimer.current) clearTimeout(saveProfileTimer.current);
       saveProfileTimer.current = setTimeout(() => {
         saveProfile(pendingProfileSave.current).catch(() => {});
         pendingProfileSave.current = null;
       }, 500);
-      
+
       return next;
     });
   };
@@ -184,7 +173,7 @@ export default function SettingsView({ onSaved }) {
   const removeAccount = async (acc) => {
     if (!await confirmAction({
       title: `Delete payment account "${acc.label || acc.bankName || 'this account'}"?`,
-      message: 'Existing invoices that used this account keep their frozen bank-detail snapshots (v1.10.19 invariant) — the PDFs stay exactly as printed.',
+      message: 'Existing invoices that used this account keep their frozen bank-detail snapshots — the PDFs stay exactly as printed.',
       confirmLabel: 'Delete account',
       tone: 'danger',
     })) return;
@@ -235,7 +224,7 @@ export default function SettingsView({ onSaved }) {
       return;
     }
     if (file.size > 5 * 1024 * 1024) {
-      toast(`Image is ${(file.size / 1024 / 1024).toFixed(1)}MB — over the 5MB cap. Try compressing at tinypng.com.`, 'warning', 6000);
+      toast(`Image is ${(file.size / 1024 / 1024).toFixed(1)}MB — over the 5MB cap.`, 'warning', 6000);
       return;
     }
 
@@ -245,10 +234,7 @@ export default function SettingsView({ onSaved }) {
         setProfile(prev => ({ ...prev, [field]: ev.target.result }));
         toast(`${field === 'logo' ? 'Logo' : 'Signature'} uploaded — click Save Profile to keep it.`, 'success', 4000);
       };
-      reader.onerror = () => {
-        reader.abort();
-        toast('Could not read the SVG file.', 'error');
-      };
+      reader.onerror = () => { reader.abort(); toast('Could not read the SVG file.', 'error'); };
       reader.readAsDataURL(file);
       return;
     }
@@ -259,10 +245,7 @@ export default function SettingsView({ onSaved }) {
       URL.revokeObjectURL(url);
       const MAX = 1024;
       let { width, height } = img;
-      if (!width || !height) {
-        toast(`Image has zero dimensions — cannot use as logo.`, 'error');
-        return;
-      }
+      if (!width || !height) { toast(`Image has zero dimensions — cannot use as logo.`, 'error'); return; }
       if (width > MAX || height > MAX) {
         const ratio = MAX / Math.max(width, height);
         width = Math.round(width * ratio);
@@ -282,7 +265,7 @@ export default function SettingsView({ onSaved }) {
     };
     img.onerror = () => {
       URL.revokeObjectURL(url);
-      toast(`Could not decode this image (type: ${file.type || 'unknown'}). If it's a HEIC from iPhone, share it as JPEG — in Photos: Share → Copy Photo → Files → paste, or set Camera Format = "Most Compatible".`, 'error', 10000);
+      toast(`Could not decode this image (type: ${file.type || 'unknown'}).`, 'error', 10000);
     };
     img.src = url;
   };
@@ -294,23 +277,21 @@ export default function SettingsView({ onSaved }) {
     try {
       setSaving(true);
       await saveProfile(profile);
-      
+
       if (profile.logo || profile.signature) {
         try {
           const raw = localStorage.getItem('freegstbill_invoiceOptions');
           const opts = raw ? JSON.parse(raw) : {};
           const serverOpts = await getInvoiceDisplayOptions().catch(() => null);
-          
+
           let changed = false;
           if (profile.logo && opts.showLogo === undefined && (!serverOpts || serverOpts.showLogo === undefined)) {
-            opts.showLogo = true;
-            changed = true;
+            opts.showLogo = true; changed = true;
           }
           if (profile.signature && opts.showSignature === undefined && (!serverOpts || serverOpts.showSignature === undefined)) {
-            opts.showSignature = true;
-            changed = true;
+            opts.showSignature = true; changed = true;
           }
-          
+
           if (changed) {
             localStorage.setItem('freegstbill_invoiceOptions', JSON.stringify(opts));
             const merged = { ...(serverOpts || {}), ...opts };
@@ -342,9 +323,7 @@ export default function SettingsView({ onSaved }) {
     const pfx = s.brandPrefix || 'INV';
     const sep = s.separator || '/';
     const padded = String(s.startNumber || 1).padStart(s.padDigits || 4, '0');
-    if (s.format === 'random') {
-      return `${pfx}${sep}A3X9K2`;
-    }
+    if (s.format === 'random') return `${pfx}${sep}A3X9K2`;
     if (s.showFinYear) {
       const yr = new Date().getFullYear();
       const ny = (yr + 1).toString().slice(-2);
@@ -354,22 +333,13 @@ export default function SettingsView({ onSaved }) {
   };
 
   const handleConnectDrive = async () => {
-    if (!profile.googleClientId.trim()) {
-      toast('Enter your Google OAuth Client ID first', 'warning');
-      return;
-    }
+    if (!profile.googleClientId.trim()) { toast('Enter your Google OAuth Client ID first', 'warning'); return; }
     setConnecting(true);
     try {
       const result = await initGoogleDrive(profile.googleClientId);
-      if (result.success) {
-        setDriveConnected(true);
-        toast('Connected to Google Drive!', 'success');
-      } else {
-        toast('Failed: ' + (result.error || 'Unknown error'), 'error');
-      }
-    } catch (err) {
-      toast('Connection failed: ' + err.message, 'error');
-    }
+      if (result.success) { setDriveConnected(true); toast('Connected to Google Drive!', 'success'); }
+      else { toast('Failed: ' + (result.error || 'Unknown error'), 'error'); }
+    } catch (err) { toast('Connection failed: ' + err.message, 'error'); }
     setConnecting(false);
   };
 
@@ -411,7 +381,7 @@ export default function SettingsView({ onSaved }) {
   const runExport = async () => {
     try {
       const json = await exportAllData(exportSel);
-      const fileName = `freegstbill-backup-${new Date().toISOString().split('T')[0]}.json`;
+      const fileName = `arthsutra-backup-${new Date().toISOString().split('T')[0]}.json`;
 
       const blob = new Blob([json], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
@@ -451,7 +421,7 @@ export default function SettingsView({ onSaved }) {
     try {
       const text = await file.text();
       const inspection = inspectBackup(text);
-      if (!inspection.valid) { toast("This file doesn't look like a Free GST Billing backup.", 'error'); return; }
+      if (!inspection.valid) { toast("This file doesn't look like an ArthSutra backup.", 'error'); return; }
       setImportInspection(inspection);
       setImportJsonText(text);
       const auto = {};
@@ -547,7 +517,6 @@ export default function SettingsView({ onSaved }) {
     setTaxIdWarning(result.ok ? '' : result.message);
   };
 
-
   return (
     <div className="settings-container">
       <div className="page-header" style={{
@@ -580,12 +549,12 @@ export default function SettingsView({ onSaved }) {
             <ul style={{ paddingLeft: '1.1rem', margin: 0 }}>
               <li><strong>Company Details</strong> — this is the header block on every invoice. GSTIN drives place-of-supply detection.</li>
               <li><strong>Multi-business profiles</strong> — Save as Profile keeps the current form as a switchable profile; switch between them from the invoice generator.</li>
-              <li><strong>Payment Accounts</strong> — add multiple bank / UPI accounts; ⭐ marks the default. Every inline change (add / edit / ⭐ / reorder / delete) auto-saves.</li>
+              <li><strong>Payment Accounts</strong> — add multiple bank / UPI accounts; ⭐ marks the default. Every inline change auto-saves.</li>
               <li><strong>Invoice Number Settings</strong> — brand prefix, financial-year suffix, padding. Live preview at the bottom.</li>
-              <li><strong>Print Settings</strong> — templates, colors, watermark, thermal font size, per-type prefix overrides.</li>
-              <li><strong>Backup Management</strong> — daily auto-backups kept 30 days. Restore any date, or Delete to reclaim disk. Trash bin keeps deleted invoices for 30 days.</li>
+              <li><strong>Invoice Layout</strong> — toggles for what appears on printed invoices (logo, HSN, bank, UPI QR, watermark, multi-copy, margins, signature, T&amp;C page).</li>
+              <li><strong>Backup Management</strong> — daily auto-backups kept 30 days. Restore any date, or Delete to reclaim disk.</li>
               <li><strong>Google Drive sync</strong> — connect once to auto-upload every backup to your own Drive.</li>
-              <li><strong>Import / Export</strong> — CSV import for products/clients; JSON export for full backup portability.</li>
+              <li><strong>Import / Export</strong> — JSON export for full backup portability.</li>
             </ul>
           </HelpButton>
         </div>
@@ -729,27 +698,20 @@ export default function SettingsView({ onSaved }) {
                     </label>
                   </div>
                   <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', margin: '0 0 0.6rem' }}>
-                    Drives HSN reporting rule — <strong>{profile.aatoAbove5Cr ? '6-digit HSN' : '4-digit HSN'}</strong> minimum on every item. Since Jan 2025 the portal blocks GSTR-1 if any HSN falls short.
+                    Drives HSN reporting rule — <strong>{profile.aatoAbove5Cr ? '6-digit HSN' : '4-digit HSN'}</strong> minimum on every item.
                   </p>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.6rem' }}>
                     <div>
                       <label className="form-label" style={{ fontSize: '0.72rem' }}>Previous FY aggregate turnover (₹) — sets JSON <code>gt</code></label>
                       <input type="number" min="0" step="1" name="prevFYTurnover" className="form-input"
-                        value={profile.prevFYTurnover ?? ''}
-                        onChange={handleChange}
-                        placeholder="e.g. 5000000" />
+                        value={profile.prevFYTurnover ?? ''} onChange={handleChange} placeholder="e.g. 5000000" />
                     </div>
                     <div>
                       <label className="form-label" style={{ fontSize: '0.72rem' }}>Current FY turnover so far (₹) — sets JSON <code>cur_gt</code></label>
                       <input type="number" min="0" step="1" name="currentFYTurnover" className="form-input"
-                        value={profile.currentFYTurnover ?? ''}
-                        onChange={handleChange}
-                        placeholder="e.g. 1200000" />
+                        value={profile.currentFYTurnover ?? ''} onChange={handleChange} placeholder="e.g. 1200000" />
                     </div>
                   </div>
-                  <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', margin: '0.5rem 0 0' }}>
-                    Both are optional (default 0). The portal lets you edit these while filing — you're just avoiding a schema-validation reject on upload.
-                  </p>
                 </div>
               )}
             </div>
@@ -768,7 +730,6 @@ export default function SettingsView({ onSaved }) {
                   <h3 className="section-title" style={{ margin: 0 }}>Payment Accounts</h3>
                   <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0.15rem 0 0' }}>
                     Multiple bank / UPI accounts per profile. Pick one per invoice in the Customize panel.
-                    The ⭐ default account is preselected on new invoices.
                   </p>
                 </div>
                 <button type="button" className="btn btn-primary" onClick={openAddAccount}>
@@ -900,7 +861,7 @@ export default function SettingsView({ onSaved }) {
                           onChange={e => { setEditingAccount(a => ({ ...a, upiId: e.target.value })); if (accountUpiWarning) setAccountUpiWarning(''); }}
                           onBlur={() => {
                             const v = (editingAccount.upiId || '').trim();
-                            setAccountUpiWarning(v && !isValidUpiId(v) ? "Doesn't look like a UPI ID. Expected like merchant@hdfcbank or 9876543210@paytm." : '');
+                            setAccountUpiWarning(v && !isValidUpiId(v) ? "Doesn't look like a UPI ID." : '');
                           }}
                           placeholder="e.g. yourbusiness@hdfcbank" />
                         {accountUpiWarning && <small style={{ color: '#d97706', fontSize: '0.7rem', display: 'block', marginTop: '0.2rem' }}>⚠ {accountUpiWarning}</small>}
@@ -1148,7 +1109,6 @@ export default function SettingsView({ onSaved }) {
                 { name: 'Services (IT, Consulting, Freelance)', content: '1. Payment is due within 15 days of invoice date via NEFT/RTGS/UPI unless otherwise agreed.\n2. Late payment interest of 18% per annum will apply on overdue amounts as per MSME Act, 2006.\n3. All amounts are exclusive of GST (CGST/SGST/IGST) as applicable under the GST Act, 2017.\n4. Services rendered are non-refundable once delivered and accepted by the client.\n5. TDS (if applicable) must be deducted as per Income Tax Act. Please share TDS certificate (Form 16A) within 15 days.\n6. All deliverables remain the intellectual property of the service provider until full payment is received.\n7. Any disputes shall be subject to the exclusive jurisdiction of courts in the service provider\'s city.\n8. This is a computer-generated invoice and does not require a physical signature.' },
                 { name: 'Goods & Products (Retail, Wholesale)', content: '1. Goods once sold will not be taken back or exchanged unless defective as per Consumer Protection Act, 2019.\n2. Payment is due on delivery via Cash/UPI/NEFT unless credit terms are agreed in advance.\n3. Warranty (if applicable) covers manufacturing defects only as per terms mentioned on the product.\n4. All prices are inclusive of GST (CGST + SGST / IGST) as shown on this invoice.\n5. Claims for damaged or missing items must be reported within 48 hours of delivery with photos.\n6. E-way bill is generated for consignments exceeding Rs. 50,000 as per GST rules.\n7. Risk of loss passes to the buyer upon dispatch from our godown/warehouse.\n8. Subject to jurisdiction of courts at the seller\'s place of business.\n9. This is a computer-generated invoice and does not require a physical signature.' },
                 { name: 'Manufacturing & Trading', content: '1. All prices are ex-factory/ex-godown unless otherwise specified.\n2. Payment terms: 50% advance via NEFT/RTGS, balance before dispatch (or as per agreed credit terms).\n3. Goods dispatched only after full payment or confirmed credit arrangement.\n4. Quality complaints must be raised within 7 days of receipt with photographic evidence.\n5. Returns accepted only for manufacturing defects, subject to inspection at our premises.\n6. GST, freight, insurance, loading/unloading charges are as per agreement or additional to quoted price.\n7. E-way bill will be generated as per Section 68 of CGST Act for applicable consignments.\n8. Force majeure: Delays due to natural calamities, strikes, or government orders shall not be held against us.\n9. Interest @ 18% p.a. on overdue payments as per MSME Development Act, 2006.\n10. Subject to exclusive jurisdiction of courts at the seller\'s registered office.\n11. This is a computer-generated invoice and does not require a physical signature.' },
-                { name: 'Export / International', content: '1. All prices are in the agreed currency (USD/EUR/GBP) and exclusive of local taxes/duties in buyer\'s country.\n2. Payment via wire transfer (SWIFT/TT) within 30 days of invoice date as per RBI guidelines.\n3. Supply is zero-rated under GST — exported under Letter of Undertaking (LUT) / Bond.\n4. Title and risk pass to buyer upon delivery to carrier (FOB/CIF as per Incoterms 2020).\n5. Buyer is responsible for import duties, customs clearance, and local compliance in destination country.\n6. Claims for shortage or damage must be filed within 14 days of receipt with supporting documents.\n7. All payments to be received in INR equivalent or foreign currency as per FEMA regulations.\n8. Disputes shall be resolved through arbitration in India under the Arbitration & Conciliation Act, 1996.\n9. This is a computer-generated invoice and does not require a physical signature.' },
                 { name: 'Freelancer (Simple)', content: '1. Payment due within 7 days of invoice via UPI/NEFT/IMPS.\n2. Late payments attract interest @ 2% per month.\n3. 50% advance required before project commencement.\n4. Scope changes after agreement will be quoted and billed separately.\n5. All work remains property of the freelancer until full payment is received.\n6. Cancellation after work begins: completed portion will be billed proportionally.\n7. TDS (if applicable) to be deducted at source. Share Form 16A within 15 days of deduction.\n8. Subject to jurisdiction of courts in the freelancer\'s city.\n9. This is a computer-generated invoice.' },
               ].map((qt, i) => (
                 <button key={i} type="button" className="quick-template-btn" onClick={async () => {
@@ -1204,7 +1164,7 @@ export default function SettingsView({ onSaved }) {
         )}
       </div>
 
-      {/* ---- Thermal Printer Settings ---- */}
+      {/* ---- Invoice Layout ---- */}
       <div id="section-print"><PrintSettings /></div>
 
       {/* ---- Modules / Features ---- */}
@@ -1228,7 +1188,6 @@ export default function SettingsView({ onSaved }) {
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
                 {group.modules.map(mod => {
                   const enabled = isModuleEnabled(mod.id, enabledModules);
-                  if (mod.indiaOnly && regionMode === 'international') return null;
                   return (
                     <label key={mod.id} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', fontSize: '0.78rem', cursor: mod.core ? 'not-allowed' : 'pointer', opacity: mod.core ? 0.55 : 1 }}>
                       <input type="checkbox" checked={enabled} disabled={mod.core}
@@ -1237,7 +1196,6 @@ export default function SettingsView({ onSaved }) {
                       <span style={{ lineHeight: 1.35 }}>
                         {mod.label}
                         {mod.core && <span style={{ fontSize: '0.65rem', color: '#94a3b8', marginLeft: '0.4rem' }}>(always on)</span>}
-                        {mod.indiaOnly && <span style={{ fontSize: '0.65rem', color: '#94a3b8', marginLeft: '0.4rem' }} title="India-only feature">🇮🇳</span>}
                       </span>
                     </label>
                   );
@@ -1262,7 +1220,7 @@ export default function SettingsView({ onSaved }) {
           <div>
             <h3 className="section-title" style={{ marginTop: 0, marginBottom: '0.25rem' }}>Low-stock alerts</h3>
             <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: 0 }}>
-              Powers the 🔔 sidebar badge and the Dashboard low-stock list. The Inventory page colour-codes products against this threshold too.
+              Powers the 🔔 sidebar badge and the Dashboard low-stock list.
             </p>
           </div>
         </div>
@@ -1280,11 +1238,6 @@ export default function SettingsView({ onSaved }) {
               style={{ width: 18, height: 18, accentColor: 'var(--primary)' }} />
             Show low-stock alerts
           </label>
-          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', flex: 1, minWidth: 200 }}>
-            {stockAlerts.enabled
-              ? 'Notifications fire when a product\'s stock falls to or below the threshold.'
-              : 'Alerts are silenced. Inventory still tracks stock; it just doesn\'t nag you.'}
-          </span>
         </div>
 
         {stockAlerts.enabled && (
@@ -1354,30 +1307,6 @@ export default function SettingsView({ onSaved }) {
         </div>
       </div>
 
-      {/* ---- Region Preference ---- */}
-      <div id="section-region" className="glass-panel p-6 mb-6">
-        <h3 className="section-title" style={{ marginTop: 0 }}>Region Preference</h3>
-        <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '0.85rem' }}>
-          Choose how the app behaves. You can change this any time without losing data.
-        </p>
-        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-          {[
-            { id: 'india', label: '🇮🇳 India only', desc: 'GST flows, INR-first, GSTR-1/3B, E-Way Bill, UPI QR' },
-            { id: 'international', label: '🌍 International', desc: 'VAT/SST/TVA labels, multi-currency, no India-only flows' },
-            { id: 'both', label: '🌐 Both / Auto', desc: 'Show all countries — pick per invoice (default)' },
-          ].map(opt => (
-            <button key={opt.id} type="button"
-              onClick={() => handleRegionChange(opt.id)}
-              className={`type-chip ${regionMode === opt.id ? 'type-chip-active' : ''}`}
-              title={opt.desc}
-              style={{ flex: '1 1 200px', minWidth: '200px', textAlign: 'left', padding: '0.6rem 0.85rem', display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '0.2rem' }}>
-              <span style={{ fontWeight: 600 }}>{opt.label}</span>
-              <span style={{ fontSize: '0.72rem', color: regionMode === opt.id ? 'inherit' : '#94a3b8', fontWeight: 400 }}>{opt.desc}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-
       {/* ---- Backup Management + Trash Bin ---- */}
       <div id="section-backups"><BackupAndTrashPanel /></div>
 
@@ -1403,9 +1332,6 @@ export default function SettingsView({ onSaved }) {
             <li>Move your app's <strong>Saved Invoices</strong> folder into Google Drive, or set Windows to sync it</li>
             <li>Done! All PDFs automatically sync to your Google Drive cloud</li>
           </ol>
-          <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.75rem', marginBottom: 0 }}>
-            Your invoices will be accessible from any device, phone, or computer via drive.google.com. No API key needed.
-          </p>
         </div>
 
         <details style={{ fontSize: '0.85rem' }}>
@@ -1418,10 +1344,6 @@ export default function SettingsView({ onSaved }) {
                 <label className="form-label">Google OAuth Client ID</label>
                 <input type="text" name="googleClientId" className="form-input" value={profile.googleClientId} onChange={handleChange}
                   placeholder="xxxx.apps.googleusercontent.com" />
-                <p className="field-hint">
-                  <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer"
-                    style={{ color: 'var(--primary)' }}>Open Google Cloud Console</a> &rarr; Create Project &rarr; Enable Drive API &rarr; Create OAuth Client ID (Web app) &rarr; Add <code>http://localhost:5173</code> as origin.
-                </p>
               </div>
               <div className="form-group">
                 <label className="form-label">Drive Folder Name</label>
@@ -1462,65 +1384,18 @@ export default function SettingsView({ onSaved }) {
           <span className="notice-icon">🔒</span>
           <div>
             <strong>Your data is on this computer only.</strong> Nothing is uploaded to
-            us, our servers, or any third party — not invoices, not clients, not
-            settings. The only time anything leaves your machine is if you explicitly
-            click <em>Save to Drive</em> below (uploads to <strong>your own</strong>
-            Google Drive account).
-            Files live under <code>data/</code> and <code>Saved Invoices/</code> next to the app.
+            us, our servers, or any third party. Files live under <code>data/</code> and <code>Saved Invoices/</code> next to the app.
           </div>
         </div>
 
         <p className="page-subtitle mb-6">
-          Choose what to back up or restore — invoices, clients, products, settings, custom units, or just specific parts.
-          Backup files are plain JSON you can keep on a USB drive, OneDrive, or your own Google Drive.
+          Choose what to back up or restore. Backup files are plain JSON you can keep on a USB drive, OneDrive, or your own Google Drive.
         </p>
         <div className="flex gap-4" style={{ flexWrap: 'wrap' }}>
           <button type="button" className="btn btn-primary" onClick={() => setShowExportModal(true)}><Download size={18} /> Export Backup…</button>
           <button type="button" className="btn btn-secondary" onClick={() => fileInputRef.current?.click()}><Upload size={18} /> Import Backup…</button>
           <input ref={fileInputRef} type="file" accept=".json" onChange={handleImportPick} style={{ display: 'none' }} />
         </div>
-      </div>
-      
-      {/* ---- App Updates ---- */}
-      <div id="section-updates" className="glass-panel p-6 mb-6">
-        <h3 className="section-title">App Updates</h3>
-        <p className="page-subtitle mb-4">Check if a newer version is available.</p>
-        <div className="flex gap-4 items-center">
-          <button type="button" className="btn btn-secondary" disabled={checkingUpdate} onClick={async () => {
-            setCheckingUpdate(true);
-            try {
-              const res = await fetch('/api/check-update');
-              const data = await res.json();
-              setUpdateInfo(data);
-              if (data.updateAvailable) {
-                toast(`Update available: v${data.latest}`, 'info');
-              } else if (data.error) {
-                toast('Could not check for updates. Check internet connection.', 'warning');
-              } else {
-                toast('You are on the latest version!', 'success');
-              }
-            } catch {
-              toast('Could not check for updates.', 'error');
-            }
-            setCheckingUpdate(false);
-          }}>
-            <RefreshCw size={18} className={checkingUpdate ? 'spin' : ''} /> {checkingUpdate ? 'Checking...' : 'Check for Updates'}
-          </button>
-          {updateInfo && (
-            <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-              Current: v{updateInfo.current}{updateInfo.latest ? ` | Latest: v${updateInfo.latest}` : ''}
-            </span>
-          )}
-        </div>
-        {updateInfo?.updateAvailable && (
-          <div className="update-available-box">
-            <p><strong>New version v{updateInfo.latest} is available!</strong></p>
-            <p>Your data will not be affected. Click below to update:</p>
-            <a href="freegstbill-update://run" className="btn btn-primary" style={{ marginTop: '0.5rem', display: 'inline-flex', textDecoration: 'none' }}>
-              <Download size={18} /> Update Now
-            </a>
-          </div>
-        )}
       </div>
 
       </div>
@@ -1553,7 +1428,7 @@ export default function SettingsView({ onSaved }) {
               <span>
                 <span className="cbx-label">Also save a copy to my Google Drive</span>
                 <span className="cbx-hint">
-                  Uploads to <em>{(profile.googleDriveFolder || 'GST Billing Invoices')} - Backups</em> in your Drive. Requires Google Client ID configured above. The file always downloads to your computer too.
+                  Uploads to <em>{(profile.googleDriveFolder || 'GST Billing Invoices')} - Backups</em> in your Drive.
                 </span>
               </span>
             </label>
@@ -1582,7 +1457,7 @@ export default function SettingsView({ onSaved }) {
               background: 'var(--warn-bg)', border: '1px solid var(--warn-border)',
               fontSize: '0.78rem', color: 'var(--warn-text)', marginBottom: '0.75rem',
             }}>
-              ⚠ Restoring will <strong>overwrite matching records by ID</strong> in the categories you select. Records you didn't tick are untouched. We recommend exporting a fresh backup of your current data first.
+              ⚠ Restoring will <strong>overwrite matching records by ID</strong> in the categories you select. We recommend exporting a fresh backup of your current data first.
             </div>
             <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
               <button type="button" className="btn btn-secondary" onClick={() => importToggleAll(true)} style={{ fontSize: '0.72rem', padding: '0.25rem 0.55rem' }}>Select all (with data)</button>
@@ -1649,7 +1524,7 @@ function BackupAndTrashPanel() {
   const handleRestoreBackup = async (date) => {
     if (!await confirmAction({
       title: `Restore all data from backup ${date}?`,
-      message: 'This OVERWRITES your current data. A snapshot of the current state will be taken first — if the restore looks wrong, you can roll back.',
+      message: 'This OVERWRITES your current data. A snapshot of the current state will be taken first.',
       confirmLabel: 'Restore backup',
       tone: 'warning',
     })) return;
@@ -1691,7 +1566,7 @@ function BackupAndTrashPanel() {
   const handleDeleteBackup = async (date) => {
     if (!await confirmAction({
       title: `Delete backup ${date}?`,
-      message: 'Auto-backups still run daily, so future data will be safe. This just removes the archived snapshot.',
+      message: 'Auto-backups still run daily. This just removes the archived snapshot.',
       confirmLabel: 'Delete backup',
       tone: 'danger',
     })) return;
@@ -1712,7 +1587,7 @@ function BackupAndTrashPanel() {
             💾 Backup Management + 🗑 Trash Bin
           </h3>
           <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: 0 }}>
-            Automatic daily snapshots kept for 30 days · Deleted invoices soft-trash for 30 days (v1.9.5+).
+            Automatic daily snapshots kept for 30 days · Deleted invoices soft-trash for 30 days.
           </p>
         </div>
         <button className="btn btn-secondary" style={{ fontSize: '0.82rem' }}

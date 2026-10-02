@@ -1,6 +1,5 @@
-
- import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { saveBill, getAllBills, getNextInvoiceNumber, saveRecurring } from '../../../store';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { saveBill, getAllBills, getNextInvoiceNumber, saveRecurring, getAllProducts } from '../../../store';
 import { INVOICE_TYPES, getAccountById, formatCurrency } from '../../../utils';
 import { getPrintSettings } from '../../../utils/printSettings';
 import { getClientCredit, planCreditApplication } from '../../../utils/clientCredit';
@@ -17,16 +16,39 @@ const resolvePrefix = (type) => {
   };
 };
 
+// Snapshot the current purchase price of each product onto the line items of a
+// bill before saving. Once stamped, `costAtSale` never changes — so profit
+// computed later on old bills stays stable even if the product's purchase
+// price is edited in Inventory.
+async function stampCostAtSale(items) {
+  if (!Array.isArray(items) || items.length === 0) return items;
+  let products = [];
+  try { products = await getAllProducts(); } catch { /* offline — skip stamp */ }
+  const byId = new Map(products.map(p => [p.id, p]));
+  const byName = new Map(products.map(p => [(p.name || '').trim().toLowerCase(), p]));
+
+  return items.map(it => {
+    if (it == null) return it;
+    // Already stamped (e.g. editing a bill saved after this shipped) — leave it.
+    if (Number.isFinite(Number(it.costAtSale)) && Number(it.costAtSale) > 0) return it;
+    const prod = (it.productId && byId.get(it.productId))
+      || byName.get((it.name || '').trim().toLowerCase());
+    const cost = Number(prod?.purchasePrice);
+    if (!Number.isFinite(cost) || cost <= 0) return it;
+    return { ...it, costAtSale: cost };
+  });
+}
+
 export function useInvoicePersistence({
-  form,                          // return value of useInvoiceForm (required)
-  totals,                        // totals object from useInvoiceTotals (required)
+  form,
+  totals,
   profile = null,
   editingBill = null,
-  syncStock = null,              // async (items) => void — from useProductSearch
-  clientSearch = null,           // return value of useClientSearch (optional)
+  syncStock = null,
+  clientSearch = null,
 } = {}) {
   const [saving, setSaving] = useState(false);
-  const [autoSaveStatus, setAutoSaveStatus] = useState('idle'); // 'idle' | 'saving' | 'saved'
+  const [autoSaveStatus, setAutoSaveStatus] = useState('idle');
   const [allBills, setAllBills] = useState([]);
   const [creditToApply, setCreditToApply] = useState(0);
 
@@ -40,7 +62,6 @@ export function useInvoicePersistence({
 
   useEffect(() => { refreshBills(); }, [refreshBills]);
 
-  // ---- Client credit (amount available from overpayments / credit notes) ------
   const clientCredit = useMemo(() => {
     const name = form.client?.name;
     if (!name?.trim()) return { available: 0, sources: [] };
@@ -48,7 +69,6 @@ export function useInvoicePersistence({
     return getClientCredit(name, otherBills);
   }, [form.client?.name, allBills, editingBill]);
 
-  // Auto-apply available credit once per client when the option is on.
   useEffect(() => {
     if (editingBill) return;
     if (!form.invoiceOptions.autoApplyClientCredit) {
@@ -62,10 +82,7 @@ export function useInvoicePersistence({
     setCreditToApply(cap > 0.005 ? cap : 0);
   }, [form.client?.name, clientCredit.available, form.invoiceOptions.autoApplyClientCredit, editingBill, totals.total]);
 
-  // ---- LOAD / DUPLICATE / CONVERT ----------------------------------------------
   useEffect(() => {
-    // A sessionStorage draft was restored by useInvoiceForm — it wins over the
-    // (possibly stale) editingBill for this mount.
     if (form.draftInitialized.current) {
       form.draftInitialized.current = false;
       return;
@@ -91,7 +108,6 @@ export function useInvoicePersistence({
           mergedOpts = { ...DEFAULT_OPTIONS, ...persisted, ...d.invoiceOptions };
         } catch { mergedOpts = { ...DEFAULT_OPTIONS, ...d.invoiceOptions }; }
 
-        // Repair a stale/missing payment-account snapshot from the bill's profile.
         const billSnap = d.invoiceOptions.paymentAccountSnapshot;
         const billSelId = d.invoiceOptions.selectedAccountId;
         const snapshotIsStale = billSnap && billSelId && billSnap.id && billSnap.id !== billSelId;
@@ -103,7 +119,6 @@ export function useInvoicePersistence({
       }
 
       if (editingBill._isDuplicate) {
-        // DUPLICATE / CONVERT — keep the data, mint a fresh number + date.
         const convertType = editingBill._convertToType;
         const type = convertType || d.invoiceType || 'tax-invoice';
         if (convertType) {
@@ -122,7 +137,6 @@ export function useInvoicePersistence({
         form.setDetails(d.details);
       }
     } else if (!form.details.invoiceNumber) {
-      // NEW INVOICE — preview the next number without reserving it.
       const { prefix, explicitPrefix } = resolvePrefix(form.invoiceType);
       getNextInvoiceNumber(prefix, { peek: true, explicitPrefix }).then(num => {
         form.setDetails(prev => ({ ...prev, invoiceNumber: num }));
@@ -132,15 +146,6 @@ export function useInvoicePersistence({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editingBill]);
 
-  // ---- SAVE -----------------------------------------------------------------------
-  /**
-   * Persist the invoice. Returns the saved bill on success, null on a handled
-   * failure (e.g. unrecoverable 409); unexpected errors are rethrown.
-   *
-   * @param {boolean} skipStockDeduction  true for auto-save — stock only moves
-   *                                      on explicit Save / Save & Download.
-   * @param {object}  extraPatch          e.g. { printedCount, lastPrintedAt }
-   */
   const saveInvoice = async (skipStockDeduction = false, extraPatch = {}) => {
     const {
       invoiceType, client, details, items, customTerms, customNotes,
@@ -149,19 +154,22 @@ export function useInvoicePersistence({
 
     let finalInvoiceNumber = details.invoiceNumber;
 
-    // 1. Atomically reserve the number on FIRST save (the displayed number was
-    //    only peeked — concurrent users must not receive the same one).
     if (!editingBill && !form.numberReserved.current) {
       try {
         const { prefix, explicitPrefix } = resolvePrefix(invoiceType);
         finalInvoiceNumber = await getNextInvoiceNumber(prefix, { explicitPrefix });
         form.setDetails(prev => ({ ...prev, invoiceNumber: finalInvoiceNumber }));
         form.numberReserved.current = true;
-      } catch { /* fall through with peeked number */ }
+      } catch { /* fall through */ }
     }
 
-    // 2. Snapshot the payment account so this invoice's PDF keeps rendering the
-    //    same bank/UPI details even if the profile is edited later.
+    // NEW: stamp costAtSale BEFORE assembling the bill. For auto-saves we skip
+    // this — the price snapshot only needs to be correct at final save time,
+    // and skipping saves a products round-trip on every debounce tick.
+    const itemsWithCost = skipStockDeduction
+      ? items
+      : await stampCostAtSale(items);
+
     const priorSnapshot = invoiceOptions.paymentAccountSnapshot;
     const priorMatchesSelection = priorSnapshot && priorSnapshot.id === invoiceOptions.selectedAccountId;
     const snapAccount = priorMatchesSelection
@@ -169,13 +177,10 @@ export function useInvoicePersistence({
       : getAccountById(profile, invoiceOptions.selectedAccountId);
     const invoiceOptionsWithSnapshot = { ...invoiceOptions, paymentAccountSnapshot: snapAccount || null };
 
-    // 3. Plan client-credit application (new bills only).
     const creditPlan = (!editingBill && creditToApply > 0.005)
       ? planCreditApplication(client.name, allBills, creditToApply, finalInvoiceNumber)
       : null;
 
-    // 4. Merge payments recorded server-side since this edit session opened
-    //    (deduped by receiptNo / id / amount+date+mode fingerprint).
     const seedPayments = editingBill?.payments ? [...editingBill.payments] : [];
     if (editingBill?.id) {
       try {
@@ -191,11 +196,10 @@ export function useInvoicePersistence({
               && (p.mode || '') === (fp.mode || '')));
           if (!dup) seedPayments.push(fp);
         }
-      } catch { /* offline — keep local payments */ }
+      } catch { /* offline */ }
     }
     if (creditPlan?.targetEntry) seedPayments.push(creditPlan.targetEntry);
 
-    // 5. Payment status from merged payments vs grand total.
     const seedPaidAmount = seedPayments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
     const billTotalForStatus = Number(totals.total) || 0;
     const computedStatus = seedPaidAmount >= billTotalForStatus - 0.005 && billTotalForStatus > 0
@@ -205,7 +209,6 @@ export function useInvoicePersistence({
       ? 'overdue'
       : computedStatus;
 
-    // 6. Assemble the bill record (shape consumed by Dashboard / GSTReturns / Reports).
     const bill = {
       id: finalInvoiceNumber,
       clientName: client.name,
@@ -224,18 +227,17 @@ export function useInvoicePersistence({
       data: {
         profile, client,
         details: { ...details, invoiceNumber: finalInvoiceNumber },
-        items, totals, invoiceType, customTerms, customNotes, internalNote,
+        items: itemsWithCost,     // ← stamped items go into the bill
+        totals, invoiceType, customTerms, customNotes, internalNote,
         extraSections, invoiceOptions: invoiceOptionsWithSnapshot, taxInclusive,
       },
     };
 
     const shouldOverwrite = !!editingBill || hasBeenSaved.current;
 
-    // 7. Persist — with duplicate-invoice-number recovery for brand-new bills.
     try {
       await saveBill(bill, { overwrite: shouldOverwrite });
 
-      // Patch the source bills the credit was consumed from.
       if (creditPlan?.sourcePatches?.length) {
         try {
           for (const { updatedBill } of creditPlan.sourcePatches) {
@@ -252,7 +254,6 @@ export function useInvoicePersistence({
         }
       }
 
-      // Remember the client's preferred paper size / currency for next time.
       if (clientSearch?.selectedClientId) {
         const cli = clientSearch.savedClients.find(c => c.id === clientSearch.selectedClientId);
         if (cli) {
@@ -269,7 +270,6 @@ export function useInvoicePersistence({
     } catch (err) {
       if (err?.status === 409) {
         if (!editingBill && !shouldOverwrite) {
-          // Someone else took the number between peek and save — walk forward.
           const { prefix, explicitPrefix } = resolvePrefix(invoiceType);
           let nextNum = bill.id;
           let success = false;
@@ -304,7 +304,6 @@ export function useInvoicePersistence({
       }
     }
 
-    // 8. Recurring template (auto-generates future copies of this invoice).
     if (invoiceOptions.recurring?.enabled) {
       try {
         const rec = invoiceOptions.recurring;
@@ -335,7 +334,7 @@ export function useInvoicePersistence({
           invoiceType,
           profileId: profile?.id || null,
           profileBusinessName: profile?.businessName || null,
-          items: items.map(i => ({ ...i })),
+          items: itemsWithCost.map(i => ({ ...i })),
           customTerms,
           customNotes,
           extraSections,
@@ -348,7 +347,6 @@ export function useInvoicePersistence({
       }
     }
 
-    // 9. Inventory ledger — revert previous state, apply current (see useProductSearch).
     if (!skipStockDeduction && syncStock) {
       await syncStock(items);
     }
@@ -356,11 +354,9 @@ export function useInvoicePersistence({
     return bill;
   };
 
-  // Keep a live ref so the debounced auto-save always calls the latest closure.
   const saveInvoiceRef = useRef(saveInvoice);
   saveInvoiceRef.current = saveInvoice;
 
-  // ---- AUTO-SAVE (2s debounce, meaningful invoices only, no stock movement) ------
   useEffect(() => {
     if (!form.hasInitialized.current) return;
     form.isDirty.current = true;
@@ -369,8 +365,6 @@ export function useInvoicePersistence({
       setAutoSaveStatus(s => (s === 'saved' ? 'idle' : s));
       return;
     }
-    // Brand-new unsaved bill: the sessionStorage draft is enough until the
-    // user explicitly saves (keeps invoice numbers gapless).
     if (!editingBill && !hasBeenSaved.current) {
       setAutoSaveStatus('saved');
       setTimeout(() => setAutoSaveStatus(s => (s === 'saved' ? 'idle' : s)), 2000);
@@ -401,10 +395,8 @@ export function useInvoicePersistence({
     saving, setSaving,
     autoSaveStatus,
     hasBeenSaved,
-    // client credit
     clientCredit,
     creditToApply, setCreditToApply,
-    // data
     allBills,
     refreshBills,
   };

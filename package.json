@@ -1,9 +1,9 @@
 {
-  "name": "free-gst-billing-software",
-  "version": "1.10.43",
+  "name": "arth-sutra",
+  "version": "1.2.0",
   "description": "Free, open-source GST invoice & billing software for India. Tax Invoice, Proforma, Credit Note, Bill of Supply, Delivery Challan, GSTR-1 / GSTR-3B JSON exports, GSTR-2B reconciliation, e-Way Bill, TDS / TCS reports (Form 26Q / 27EQ), multi-currency for 22 countries, per-line custom units, rich-text Terms with 13 India presets, granular backup with optional Google Drive sync. Offline-first PWA. By ARTH.",
   "author": "Arthupadhyay <Contact:arth14deepak@gmail.com>",
-  "license": "MIT",
+  "license": "apche 2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/arthupadhyay/ArthSutra.git"

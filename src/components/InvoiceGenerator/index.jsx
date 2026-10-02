@@ -170,6 +170,7 @@ const LineItem = memo(function LineItem({
   item, invoiceOptions, taxInclusive, showGST, taxLabel, units, countryTaxRates, filterUnitsByMode, invoiceMode,
   currency, profileCountry, suggestions, onFieldChange, onSelectProduct, onSetProductSearch,
   onAddCustomUnit, onRemoveCustomUnit, onRemove, clampNonNeg, isLastRow, onAddRow,
+  onRebalanceBatch,
 }) {
   const handleRowKeyDown = (e) => {
     if (e.key !== 'Enter' || e.shiftKey || !isLastRow) return;
@@ -244,7 +245,12 @@ const LineItem = memo(function LineItem({
       {/* Qty */}
       <div className="li-field li-field--xs">
         <label className="li-label">Qty</label>
-        <input type="number" min="0" step="any" className="li-input" value={item.quantity} onChange={(e) => onFieldChange(item.id, 'quantity', clampNonNeg(e.target.value))} />
+        <input
+          type="number" min="0" step="any" className="li-input"
+          value={item.quantity}
+          onChange={(e) => onFieldChange(item.id, 'quantity', clampNonNeg(e.target.value))}
+          onBlur={() => onRebalanceBatch?.(item.id)}
+        />
       </div>
 
       {/* Unit */}
@@ -385,6 +391,8 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
 
   const products = useProductSearch({
     updateItem: form.updateItem,
+    setItems: form.setItems,
+    items: form.items,
     countryTaxRates: form.countryTaxRates,
     editingBill,
   });
@@ -1049,7 +1057,7 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
               </label>
             </div>
             {form.items.map((item, idx) => (
-              <LineItem key={item.id} item={item} invoiceOptions={form.invoiceOptions} taxInclusive={form.taxInclusive} showGST={form.showGST} taxLabel={form.taxLabel} units={units} countryTaxRates={form.countryTaxRates} filterUnitsByMode={filterUnitsByMode} invoiceMode={form.invoiceOptions.invoiceMode} currency={form.invoiceOptions.currency} profileCountry={profile?.country} suggestions={products.getSuggestions(item.id)} onFieldChange={handleItemChange} onSelectProduct={products.selectProduct} onSetProductSearch={products.setProductSearch} onAddCustomUnit={handleAddCustomUnit} onRemoveCustomUnit={handleRemoveCustomUnit} onRemove={form.removeItem} clampNonNeg={form.clampNonNeg} isLastRow={idx === form.items.length - 1} onAddRow={form.addItem} />
+              <LineItem key={item.id} item={item} invoiceOptions={form.invoiceOptions} taxInclusive={form.taxInclusive} showGST={form.showGST} taxLabel={form.taxLabel} units={units} countryTaxRates={form.countryTaxRates} filterUnitsByMode={filterUnitsByMode} invoiceMode={form.invoiceOptions.invoiceMode} currency={form.invoiceOptions.currency} profileCountry={profile?.country} suggestions={products.getSuggestions(item.id)} onFieldChange={handleItemChange} onSelectProduct={products.selectProduct} onSetProductSearch={products.setProductSearch} onRebalanceBatch={products.rebalanceBatches} onAddCustomUnit={handleAddCustomUnit} onRemoveCustomUnit={handleRemoveCustomUnit} onRemove={form.removeItem} clampNonNeg={form.clampNonNeg} isLastRow={idx === form.items.length - 1} onAddRow={form.addItem} />
             ))}
             <button className="btn btn-secondary mt-2" onClick={form.addItem}><Plus size={18} /> Add Item</button>
 

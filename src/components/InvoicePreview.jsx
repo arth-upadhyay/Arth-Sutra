@@ -1,44 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import QRCode from 'qrcode';
 import DOMPurify from 'dompurify';
-import { numberToWords, INVOICE_TYPES, getCountryConfig, CURRENCY_NAMES, getAccountById, getPaperSize, resolveLineDiscount } from '../utils';
-
-// ============================================================================
-// InvoicePreview — Marg-style GST invoice.
-//
-// v1.10.44 — Same template. Additions only. Nothing removed.
-//
-// KEPT AS-IS (template identity preserved):
-//   • Full pharma/Marg column set: Sn | Qty | OMRP | Product | Batch | Exp.
-//     | HSN | MRP | Rate | Dis | SGST% | CGST% | Amount
-//   • "Pharmaceutical Distributors" line + Licence No. defaults
-//   • Blank spacer row pushing totals to page bottom
-//   • Per-slab GST breakdown table (CLASS(gst%) | TOTAL | SCH | DISC |
-//     SGST | CGST | TOTAL GST)
-//   • Right-hand summary (SUB TOTAL / SGST PAYBLE / CGST PAYBLE /
-//     ADD/LESS / GRAND TOTAL)
-//   • Bank-details + Terms + Signature footer
-//   • "created by Arth Upadhyay || ph:9425877961" branding line
-//
-// ADDED (previously computed-but-thrown-away or just missing):
-//   • DOMPurify sanitize on customTerms / customNotes / extraSections
-//   • UPI QR actually renders in the bank block
-//   • Logo renders next to business name
-//   • Signature image renders above "Authorized Signatory"
-//   • Currency symbol comes from options.currency (was hardcoded "Rs.")
-//   • IGST% header swap for interstate invoices
-//   • UTGST / cess / TCS / TDS / invoice-discount rows appear ONLY when
-//     they're non-zero — zero-value invoices look byte-identical to before
-//   • customNotes + extraSections render below the footer if provided
-//   • Every field wrapped in opt('showX', true) — all default ON
-// ============================================================================
-
-const CURRENCY_SYMBOLS = {
-  INR: '₹', USD: '$', EUR: '€', GBP: '£', AED: 'د.إ',
-  SGD: 'S$', AUD: 'A$', CAD: 'C$', JPY: '¥', MYR: 'RM',
-  ZAR: 'R', NGN: '₦', KES: 'KSh', SAR: 'SAR', NPR: 'Rs',
-  BDT: '৳', LKR: 'Rs', PKR: 'Rs', PHP: '₱', IDR: 'Rp', NZD: 'NZ$',
-};
+import { numberToWords, INVOICE_TYPES, getCountryConfig, getAccountById, getPaperSize, resolveLineDiscount } from '../utils';
 
 const SANITIZE_CONFIG = {
   ALLOWED_TAGS: ['p','br','b','strong','i','em','u','ul','ol','li','a','h1','h2','h3','h4','h5','h6','table','thead','tbody','tr','th','td','span','div','blockquote','code','pre','hr'],
@@ -54,7 +17,6 @@ const safeHtml = (html) => {
 
 const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items = [], totals = {}, invoiceType = 'tax-invoice', customTerms, customNotes, extraSections = [], options = {}, previewOnly = false }, ref) => {
 
-  // ── Document title (unchanged) ─────────────────────────────────────────
   const docTitle = options?.customTitle || (
     invoiceType === 'proforma' ? 'PROFORMA INVOICE / ESTIMATE' :
     invoiceType === 'bill-of-supply' ? 'BILL OF SUPPLY' :
@@ -64,7 +26,6 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
     'GST INVOICE'
   );
 
-  // ── Interstate / UT detection (unchanged logic) ────────────────────────
   const businessState = profile?.state?.trim().toLowerCase();
   const clientState = client?.state?.trim().toLowerCase();
   const isInterstate = (typeof totals?.igst === 'number' && totals.igst > 0)
@@ -75,12 +36,9 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
 
   const typeConfig = INVOICE_TYPES[invoiceType] || INVOICE_TYPES['tax-invoice'];
   const sellerCC = getCountryConfig(profile?.country);
-  const isIndia = (profile?.country || 'India') === 'India';
-  const taxLabel = sellerCC?.taxLabel || 'GST';
 
   const account = options.paymentAccountSnapshot || getAccountById(profile, options.selectedAccountId);
 
-  // ── Option toggles — every one defaults ON (identical to current) ──────
   const opt = (key, fallback = true) => options[key] !== undefined ? options[key] : fallback;
   const showGST          = opt('showGST', typeConfig.showGST);
   const showHSN          = opt('showHSN', true);
@@ -93,40 +51,14 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
   const showNotes        = opt('showNotes', true);
   const showExtraSec     = opt('showExtraSections', true);
   const showPoNumber     = opt('showPoNumber', true);
-  const showPharmaFields = opt('showPharmaFields', true); // OMRP / Batch / Exp. / MRP columns
+  const showPharmaFields = opt('showPharmaFields', true);
 
-  const currencyCode = options.currency || sellerCC?.currency || 'INR';
-  const currencySymbol = CURRENCY_SYMBOLS[currencyCode] || (currencyCode + ' ');
+  const amountInWords = (num) => numberToWords(num);
 
-  // ── Amount in words (unchanged) ────────────────────────────────────────
-  const amountInWords = (num) => {
-    if (currencyCode === 'INR') return numberToWords(num);
-    const a = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
-    const b = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
-    const convert = (n) => {
-      if (n === 0) return 'Zero';
-      let result = '';
-      if (n >= 1000000) { result += convert(Math.floor(n / 1000000)) + ' Million '; n %= 1000000; }
-      if (n >= 1000) { result += convert(Math.floor(n / 1000)) + ' Thousand '; n %= 1000; }
-      if (n >= 100) { result += a[Math.floor(n / 100)] + ' Hundred '; n %= 100; }
-      if (n >= 20) { result += b[Math.floor(n / 10)] + ' '; if (n % 10) result += a[n % 10] + ' '; }
-      else if (n > 0) { result += a[n] + ' '; }
-      return result.trim();
-    };
-    const names = CURRENCY_NAMES[currencyCode] || { major: currencyCode, minor: 'Cents' };
-    const rounded = Math.round(num * 100) / 100;
-    const whole = Math.floor(rounded);
-    const cents = Math.round((rounded - whole) * 100);
-    let result = convert(whole) + ' ' + names.major;
-    if (cents > 0) result += ' and ' + convert(cents) + ' ' + names.minor;
-    return result + ' Only';
-  };
-
-  // ── UPI QR — was generated but never rendered. Now actually used. ──────
   const [qrDataUrl, setQrDataUrl] = useState('');
   const upiId = account?.upiId || profile?.upiId || '';
   useEffect(() => {
-    if (!showUPI || !upiId || !totals?.total || currencyCode !== 'INR') {
+    if (!showUPI || !upiId || !totals?.total) {
       setQrDataUrl('');
       return;
     }
@@ -134,9 +66,8 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
     QRCode.toDataURL(upiUrl, { width: 120, margin: 1, errorCorrectionLevel: 'M' })
       .then(setQrDataUrl)
       .catch(() => setQrDataUrl(''));
-  }, [showUPI, upiId, profile?.businessName, totals?.total, details?.invoiceNumber, currencyCode]);
+  }, [showUPI, upiId, profile?.businessName, totals?.total, details?.invoiceNumber]);
 
-  // ── Paper size (unchanged) ─────────────────────────────────────────────
   const paperCfg = getPaperSize(options.paperSize, options);
   const isThermal = paperCfg.kind === 'thermal';
   const containerStyle = {
@@ -145,7 +76,6 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
     ...(isThermal ? { fontFamily: '"Courier New", monospace', fontSize: paperCfg.widthMm >= 80 ? '10.5px' : '9px' } : {}),
   };
 
-  // ── Slab breakdown (unchanged math, now UTGST-aware) ───────────────────
   const standardSlabs = [0, 0.1, 0.25, 3, 5, 12, 18, 28];
   const customSlabs = items.map(i => Number(i.taxPercent) || 0).filter(s => s > 0 && !standardSlabs.includes(s));
   const gstSlabs = [...new Set([...standardSlabs, ...customSlabs])].sort((a, b) => a - b);
@@ -174,7 +104,6 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
     return { slab: slab.toFixed(2), total, disc, sgst, cgst, utgst, igst, cess, totalGst: sgst + cgst + utgst + igst + cess };
   });
 
-  // Zero-tax items still count toward subtotal
   let zeroTaxTotal = 0;
   items.forEach(item => {
     if ((Number(item.taxPercent) || 0) === 0) {
@@ -184,7 +113,6 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
     }
   });
 
-  // Vertical sums (matches what's rendered to the penny)
   const sumTotal = slabData.reduce((acc, d) => acc + d.total, 0) + zeroTaxTotal;
   const sumDisc = slabData.reduce((acc, d) => acc + d.disc, 0);
   const sumSgst = slabData.reduce((acc, d) => acc + d.sgst, 0);
@@ -194,7 +122,6 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
   const sumCess = slabData.reduce((acc, d) => acc + d.cess, 0);
   const sumTotalGst = slabData.reduce((acc, d) => acc + d.totalGst, 0);
 
-  // Prefer the totals object when provided (source of truth).
   const displaySubtotal = Number(totals?.taxableAmount ?? sumTotal);
   const displaySgst = Number(totals?.sgst ?? sumSgst);
   const displayCgst = Number(totals?.cgst ?? sumCgst);
@@ -214,19 +141,16 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
     ? Number(totals?.netReceivable ?? (displayGrandTotal - displayTds))
     : displayGrandTotal;
 
-  // Sanitized HTML blobs
   const safeTermsHtml = safeHtml(
     customTerms || '1. Goods once sold will not be taken back & exchanged.<br/>2. Payment should be done within 15 days of bill date.<br/>3. @24% P.A. Interest will be charged if payment not done on time.'
   );
   const safeNotesHtml = customNotes ? safeHtml(customNotes) : '';
 
-  // Column count for the blank spacer row (adjusts if pharma fields hidden)
   const itemColCount = showPharmaFields ? 13 : 8;
 
-  // ── RENDER — same Marg layout, additions only ──────────────────────────
   return (
     <div
-      className="invoice-preview-container sheet marg-layout"
+      className="invoice-preview-container sheet arthsutra-layout"
       ref={ref}
       {...(previewOnly ? {} : { id: 'invoice-preview' })}
       style={{
@@ -241,32 +165,30 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
       }}
     >
       <style>{`
-        .marg-wrapper { border: 1.5px solid #000; padding: 0px; box-sizing: border-box; }
-        .marg-table { width: 100%; border-collapse: collapse; margin-bottom: -1px; }
-        .marg-table th, .marg-table td { border: 1px solid #000; padding: 3px 5px; text-align: left; vertical-align: top; }
-        .marg-table th { font-weight: bold; text-align: center; }
+        .arthsutra-wrapper { border: 1.5px solid #000; padding: 0px; box-sizing: border-box; }
+        .arthsutra-table { width: 100%; border-collapse: collapse; margin-bottom: -1px; }
+        .arthsutra-table th, .arthsutra-table td { border: 1px solid #000; padding: 3px 5px; text-align: left; vertical-align: top; }
+        .arthsutra-table th { font-weight: bold; text-align: center; }
         .text-center { text-align: center !important; }
         .text-right { text-align: right !important; }
         .font-bold { font-weight: bold !important; }
         .no-border { border: none !important; }
         .no-border-top { border-top: none !important; }
         .no-border-bottom { border-bottom: none !important; }
-        .marg-table tr td:first-child, .marg-table tr th:first-child { border-left: 1px solid #000 !important; }
-        .marg-table tr td:last-child, .marg-table tr th:last-child { border-right: 1px solid #000 !important; }
+        .arthsutra-table tr td:first-child, .arthsutra-table tr th:first-child { border-left: 1px solid #000 !important; }
+        .arthsutra-table tr td:last-child, .arthsutra-table tr th:last-child { border-right: 1px solid #000 !important; }
         .ipx-rich p { margin: 0 0 0.35rem; }
         .ipx-rich p:last-child { margin-bottom: 0; }
         .ipx-rich ul, .ipx-rich ol { margin: 0.25rem 0 0.35rem 1.25rem; padding: 0; }
       `}</style>
 
-      <div className="marg-wrapper">
+      <div className="arthsutra-wrapper">
 
-        {/* TOP TITLE */}
         <div className="text-center font-bold" style={{ fontSize: '16px', padding: '5px 0', borderBottom: '1px solid #000', letterSpacing: '0.05em' }}>
           {docTitle}
         </div>
 
-        {/* HEADER: SELLER & BUYER INFO */}
-        <table className="marg-table">
+        <table className="arthsutra-table">
           <tbody>
             <tr>
               <td style={{ width: '50%' }}>
@@ -326,8 +248,7 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
           </tbody>
         </table>
 
-        {/* ITEMS TABLE — same columns, pharma fields optional */}
-        <table className="marg-table">
+        <table className="arthsutra-table">
           <thead>
             <tr>
               <th style={{ width: '3%' }}>Sn.</th>
@@ -383,19 +304,17 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
               );
             })}
 
-            {/* Blank spacer row (unchanged) */}
             <tr style={{ height: '180px' }}>
               <td colSpan={itemColCount}></td>
             </tr>
           </tbody>
         </table>
 
-        {/* BOTTOM TOTALS AND TAX SUMMARY */}
-        <table className="marg-table no-border-top">
+        <table className="arthsutra-table no-border-top">
           <tbody>
             <tr>
               <td style={{ width: '65%', padding: 0, border: 'none' }}>
-                <table className="marg-table" style={{ height: '100%', border: 'none', marginBottom: 0 }}>
+                <table className="arthsutra-table" style={{ height: '100%', border: 'none', marginBottom: 0 }}>
                   <thead>
                     <tr className="font-bold">
                       <td className="no-border-top no-border-left">CLASS(gst%)</td>
@@ -441,7 +360,7 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
                 </table>
               </td>
               <td style={{ width: '35%', padding: 0, border: 'none' }}>
-                <table className="marg-table" style={{ height: '100%', border: 'none', marginBottom: 0 }}>
+                <table className="arthsutra-table" style={{ height: '100%', border: 'none', marginBottom: 0 }}>
                   <tbody>
                     <tr>
                       <td className="no-border-top">SUB TOTAL</td>
@@ -516,21 +435,19 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
           </tbody>
         </table>
 
-        {/* AMOUNT IN WORDS */}
         {showAmountWords && (
-          <table className="marg-table" style={{ borderTop: '1px solid #000' }}>
+          <table className="arthsutra-table" style={{ borderTop: '1px solid #000' }}>
             <tbody>
               <tr>
                 <td colSpan={3} className="font-bold" style={{ padding: '4px', borderBottom: '1px solid #000' }}>
-                  {currencyCode === 'INR' ? 'Rs.' : currencySymbol} {amountInWords(displayGrandTotal)}
+                  Rs. {amountInWords(displayGrandTotal)}
                 </td>
               </tr>
             </tbody>
           </table>
         )}
 
-        {/* FOOTER: TERMS, BANK, SIGNATURE */}
-        <table className="marg-table" style={{ borderTop: '2px solid #000' }}>
+        <table className="arthsutra-table" style={{ borderTop: '2px solid #000' }}>
           <tbody>
             <tr>
               <td style={{ width: '40%', padding: '4px', borderRight: '1px solid #000', borderBottom: 'none', borderLeft: 'none' }}>
@@ -543,7 +460,7 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
                   <div className="font-bold">{profile?.businessName || 'Business Name'}</div>
                   <div className="font-bold">{account?.bankName || profile?.bankName || 'Bank Name'}</div>
                   <div className="font-bold">A/C NO. {account?.accountNumber || profile?.accountNumber || ''}</div>
-                  <div className="font-bold">{sellerCC?.bankLabel || 'IFSC CODE'} {(account?.ifsc || profile?.ifsc || '')}</div>
+                  <div className="font-bold">IFSC CODE {(account?.ifsc || profile?.ifsc || '')}</div>
                   {showUPI && qrDataUrl && (
                     <div style={{ textAlign: 'center', marginTop: '6px' }}>
                       <img src={qrDataUrl} alt="UPI QR" style={{ width: '70px', height: '70px', display: 'inline-block' }} />
@@ -557,7 +474,7 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
                   <div className="font-bold" style={{ textAlign: 'right', fontSize: '10px' }}>
                     For {profile?.businessName || 'Shree enterprises'}
                   </div>
-                                  {profile?.signature ? (
+                  {profile?.signature ? (
                     <img src={profile.signature} alt="Signature" style={{ maxHeight: '45px', maxWidth: '100%', display: 'inline-block', margin: '6px 0' }} />
                   ) : (
                     <div style={{ height: '45px' }} />
@@ -569,9 +486,8 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
           </tbody>
         </table>
 
-        {/* CUSTOM NOTES (only if provided) */}
         {showNotes && safeNotesHtml && (
-          <table className="marg-table" style={{ borderTop: '1px solid #000' }}>
+          <table className="arthsutra-table" style={{ borderTop: '1px solid #000' }}>
             <tbody>
               <tr>
                 <td style={{ padding: '4px' }}>
@@ -583,9 +499,8 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
           </table>
         )}
 
-        {/* EXTRA SECTIONS (only if provided) */}
         {showExtraSec && Array.isArray(extraSections) && extraSections.length > 0 && (
-          <table className="marg-table" style={{ borderTop: '1px solid #000' }}>
+          <table className="arthsutra-table" style={{ borderTop: '1px solid #000' }}>
             <tbody>
               {extraSections.map((sec, i) => {
                 const content = typeof sec === 'string' ? sec : (sec?.content || '');
@@ -607,7 +522,6 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
 
       </div>
 
-      {/* BRANDING FOOTER (unchanged) */}
       <div style={{ textAlign: 'center', fontSize: '10px', fontStyle: 'italic', marginTop: '4px', color: '#333' }}>
         created by Arth Upadhyay || ph:9425877961
       </div>

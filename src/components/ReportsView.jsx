@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { TrendingUp, TrendingDown, Wallet, BarChart3, Clock, Search, X, Users, Package } from 'lucide-react';
-import { getAllBills, getAllExpenses } from '../store';
+import { getAllBills, getAllExpenses, getAllProducts } from '../store';
 import { formatCurrency, getFYOptions } from '../utils';
 import { toast } from './Toast';
 
@@ -16,9 +16,25 @@ const getBillCurrency = (b) => b.currency || b.data?.invoiceOptions?.currency ||
 // excluded from aging entirely.
 const isCreditNote = (b) => (b.invoiceType || b.data?.invoiceType) === 'credit-note';
 
+// Line-level cost lookup. Prefers the frozen `costAtSale` stamped on the
+// invoice line at save time (post-v1.11 bills). Falls back to the product's
+// current purchasePrice for older bills saved before cost stamping shipped.
+// Returns 0 if neither exists — matches the Dashboard's behaviour, and the
+// caller treats a 0-cost line as missing cost rather than free inventory.
+const costForLine = (it, prodById, prodByName) => {
+  const stamped = Number(it.costAtSale);
+  if (Number.isFinite(stamped) && stamped > 0) return stamped;
+  const prod = (it.productId && prodById.get(it.productId))
+    || prodByName.get((it.name || '').trim().toLowerCase());
+  const current = Number(prod?.purchasePrice);
+  if (Number.isFinite(current) && current > 0) return current;
+  return 0;
+};
+
 export default function ReportsView() {
   const [bills, setBills] = useState([]);
   const [expenses, setExpenses] = useState([]);
+  const [products, setProducts] = useState([]);
   const [activeTab, setActiveTab] = useState('pl');
   const [filterMode, setFilterMode] = useState('fy');
   const [fyFilter, setFyFilter] = useState('');
@@ -43,9 +59,14 @@ export default function ReportsView() {
 
   const loadData = async () => {
     try {
-      const [billData, expData] = await Promise.all([getAllBills(), getAllExpenses()]);
+      const [billData, expData, productData] = await Promise.all([
+        getAllBills(),
+        getAllExpenses(),
+        getAllProducts().catch(() => []),
+      ]);
       setBills(billData);
       setExpenses(expData);
+      setProducts(productData);
     } catch {
       toast('Failed to load data', 'error');
     }
@@ -99,15 +120,41 @@ export default function ReportsView() {
   const totalTaxCollected = revenueTax - creditNoteTax;
   const revenueExTax = totalRevenue - totalTaxCollected;
 
+  // Cost of Goods Sold — computed with the exact same formula the Dashboard's
+  // Gross Profit card uses, so the two numbers match to the paisa. Credit-note
+  // items subtract from COGS because they represent inventory coming back.
+  const prodById = new Map(products.map(p => [p.id, p]));
+  const prodByName = new Map(products.map(p => [(p.name || '').trim().toLowerCase(), p]));
+
+  const accumulateCOGS = (list) => {
+    let sum = 0;
+    for (const b of list) {
+      for (const it of (b.data?.items || [])) {
+        const qty = Number(it.quantity) || 0;
+        if (qty <= 0) continue;
+        sum += qty * costForLine(it, prodById, prodByName);
+      }
+    }
+    return sum;
+  };
+
+  const cogsSales = accumulateCOGS(salesBills);
+  const cogsCreditNotes = accumulateCOGS(creditNotes);
+  const totalCOGS = cogsSales - cogsCreditNotes;
+  const grossProfit = revenueExTax - totalCOGS;
+
   const totalExpenseAmount = periodExpenses.reduce((s, e) => s + (e.amount || 0), 0);
   const totalExpenseGST = periodExpenses.reduce((s, e) => s + (e.gstAmount || 0), 0);
   const expenseExGST = totalExpenseAmount - totalExpenseGST;
-  const netProfit = revenueExTax - expenseExGST;
+  // Net Profit = Gross Profit − Expenses (ex-GST). Previously this was
+  // revenueExTax − expenseExGST, which ignored inventory cost entirely and
+  // reported a fictional profit. Corrected here to match proper accounting.
+  const netProfit = grossProfit - expenseExGST;
 
   // Monthly breakdown
   const monthlyPL = {};
   const ensureMonth = (key) => {
-    if (!monthlyPL[key]) monthlyPL[key] = { revenue: 0, tax: 0, expense: 0, expGst: 0 };
+    if (!monthlyPL[key]) monthlyPL[key] = { revenue: 0, tax: 0, expense: 0, expGst: 0, cogs: 0 };
     return monthlyPL[key];
   };
   salesBills.forEach(b => {
@@ -115,12 +162,22 @@ export default function ReportsView() {
     const m = ensureMonth(b.invoiceDate.substring(0, 7));
     m.revenue += b.totalAmount || 0;
     m.tax += b.totalTaxAmount || 0;
+    for (const it of (b.data?.items || [])) {
+      const qty = Number(it.quantity) || 0;
+      if (qty <= 0) continue;
+      m.cogs += qty * costForLine(it, prodById, prodByName);
+    }
   });
   creditNotes.forEach(b => {
     if (!b.invoiceDate) return;
     const m = ensureMonth(b.invoiceDate.substring(0, 7));
     m.revenue -= b.totalAmount || 0;
     m.tax -= b.totalTaxAmount || 0;
+    for (const it of (b.data?.items || [])) {
+      const qty = Number(it.quantity) || 0;
+      if (qty <= 0) continue;
+      m.cogs -= qty * costForLine(it, prodById, prodByName);
+    }
   });
   periodExpenses.forEach(e => {
     if (!e.date) return;
@@ -357,9 +414,19 @@ export default function ReportsView() {
                     <td style={{ padding: '0.6rem 0', fontWeight: 500, color: 'var(--text-secondary)' }}>Less: Tax Collected</td>
                     <td style={{ padding: '0.6rem 0', textAlign: 'right', color: '#dc2626' }}>-{formatCurrency(totalTaxCollected, currencyFilter)}</td>
                   </tr>
-                  <tr style={{ borderBottom: '2px solid var(--border)' }}>
+                  <tr style={{ borderBottom: '1px solid var(--border)' }}>
                     <td style={{ padding: '0.6rem 0', fontWeight: 700 }}>Net Revenue</td>
                     <td style={{ padding: '0.6rem 0', textAlign: 'right', fontWeight: 700 }}>{formatCurrency(revenueExTax, currencyFilter)}</td>
+                  </tr>
+                  <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                    <td style={{ padding: '0.6rem 0', fontWeight: 500, color: 'var(--text-secondary)' }}>Less: Cost of Goods Sold</td>
+                    <td style={{ padding: '0.6rem 0', textAlign: 'right', color: '#dc2626' }}>-{formatCurrency(totalCOGS, currencyFilter)}</td>
+                  </tr>
+                  <tr style={{ borderBottom: '2px solid var(--border)' }}>
+                    <td style={{ padding: '0.6rem 0', fontWeight: 700 }}>Gross Profit</td>
+                    <td style={{ padding: '0.6rem 0', textAlign: 'right', fontWeight: 700, color: grossProfit >= 0 ? '#059669' : '#dc2626' }}>
+                      {formatCurrency(grossProfit, currencyFilter)}
+                    </td>
                   </tr>
                   <tr style={{ borderBottom: '1px solid var(--border)' }}>
                     <td style={{ padding: '0.6rem 0', fontWeight: 500, color: 'var(--text-secondary)' }}>Total Expenses</td>
@@ -390,11 +457,12 @@ export default function ReportsView() {
             <div className="glass-panel">
               <div className="table-header"><h3>Monthly Breakdown</h3></div>
               <div className="table-scroll">
-                <table className="data-table" style={{ minWidth: '600px' }}>
+                <table className="data-table" style={{ minWidth: '700px' }}>
                   <thead>
                     <tr>
                       <th>Month</th>
                       <th style={{ textAlign: 'right' }}>Revenue</th>
+                      <th style={{ textAlign: 'right' }}>COGS</th>
                       <th style={{ textAlign: 'right' }}>Expenses</th>
                       <th style={{ textAlign: 'right' }}>Profit/Loss</th>
                     </tr>
@@ -403,13 +471,15 @@ export default function ReportsView() {
                     {monthlyKeys.map(key => {
                       const m = monthlyPL[key];
                       const rev = m.revenue - m.tax;
+                      const cogs = m.cogs;
                       const exp = m.expense - m.expGst;
-                      const pl = rev - exp;
+                      const pl = rev - cogs - exp;
                       const [y, mo] = key.split('-');
                       return (
                         <tr key={key}>
                           <td className="font-medium">{MONTHS[parseInt(mo) - 1]} {y}</td>
                           <td style={{ textAlign: 'right' }}>{formatCurrency(rev, currencyFilter)}</td>
+                          <td style={{ textAlign: 'right', color: '#dc2626' }}>-{formatCurrency(cogs, currencyFilter)}</td>
                           <td style={{ textAlign: 'right' }}>{formatCurrency(exp, currencyFilter)}</td>
                           <td style={{ textAlign: 'right', fontWeight: 700, color: pl >= 0 ? '#059669' : '#dc2626' }}>
                             {formatCurrency(Math.abs(pl), currencyFilter)}
