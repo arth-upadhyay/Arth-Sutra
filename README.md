@@ -1,256 +1,184 @@
 
+# Arth Sutra
 
-# ArthSutra bascally means arth's system in sanskrit 
+GST billing  inventory  and returns software for Indian small businesses Runs entirely on your own computer.
 
-**ARTH's SYSTEM** — a free, open-source, offline-first GST billing & invoicing application built for Indian small and medium businesses.
+| | |
+|---|---|
+| Version | v1.2.0 |
+| Platform | India only · A4 invoices only |
+| Stack | React 19 + Vite 7 frontend · Express 5 backend · Node.js 18+ |
+| Storage | Plain JSON files under `data/` |
+| License | Apache 2.0 |
 
-# note:
+**First launch:** enter the password `ARTH`. You will then be able to set your own password, which is used from then on.
 
-**the first time you open the arthsutra it will ask for the password enter-(ARTH) as its only one time after that you will get a option to  enter your open password and that password will be till forever**
+created for small buisnesses who got tired of paying  30k/year to marg/vyapar etc 
 
-## Why this exists
-my father needed a erp for billiing inventory mangment etc like marg erp or tally etc but they charge way too much and they are too much bloated for his needs and charges yearly or monthly 
+## Features
 
+**Billing**
+- Tax invoice, proforma, credit note, bill of supply, delivery challan
+- CGST / SGST / UTGST / IGST split from place of supply
+- HSN / SAC line items with rate suggestion
+- Batch number, expiry, MRP per line item, with FEFO auto-fill
+- Automatic line split when a single batch can't cover the ordered quantity
+- Per-line discounts (₹ / % / with-tax / per-unit) and invoice-level discount
+- TDS / TCS with cumulative-threshold handling
+- Payment account snapshot per invoice
+
+**Inventory**
+- Product catalog with HSN, MRP, selling price, cost price, batch stock
+- Purchase bills with OCR import from a supplier invoice image
+- Stock ledger with FEFO deduction
+- Low-stock alerts
+
+**Compliance**
+- GSTR-1 export (CSV + JSON)
+- GSTR-3B export (CSV + JSON)
+- GSTR-2B reconciliation
+- e-Way Bill JSON (NIC v1.0.1221 schema)
+- Income Tax helper (regime comparison, §44AD/ADA/AE, advance tax)
+
+**Reports**
+- P&L with Cost of Goods Sold
+- Outstanding aging (0–30 / 31–60 / 61–90 / 90+)
+- Client ledger with running Dr/Cr balance
+- Product movement
+- Gross Profit on the dashboard
+
+**Data**
+- Daily backups, 30-day rolling retention
+- Trash bin for invoices (30-day soft delete)
+- Backup / restore as a single JSON file
+- Optional Google Drive upload to your own account
 
 ---
 
-## Current state
-
-| Attribute | Value |
-|-----------|-------|
-| **Version** | v1.1.0 |
-| **Target** | India-only, A4-only, offline-first |
-| **License** | Apache 2.0 |
-| **Stack** | React 19 + Vite 7 · Express 5 · Node.js 18+ |
-| **Storage** | Local JSON files under `data/` (no database server) |
-
-### What works
-
-- Tax invoices, proforma / estimate, credit note, bill of supply, delivery challan
-- Automatic CGST / SGST / IGST split based on place of supply
-- HSN / SAC line items with unit UQC mapping
-- Batch + expiry tracking on line items
-- Custom units (Carat, Bundle, Bushel, …) saved per device
-- Multi-business profile switcher
-- Client directory with statement PDF (running Dr/Cr ledger)
-- Expense tracker with ITC classification
-- Purchase bills with automated stock ledger updates
-- Recurring invoices with due-date advance
-- Payment receipts with printable voucher
-- Reports: P&L, outstanding aging, client analytics, product performance
-- GST Returns: GSTR-1 CSV + JSON, GSTR-3B CSV + JSON, GSTR-2B reconciliation
-- E-Way Bill JSON (NIC portal v1.0.1221 schema)
-- Income Tax Helper: Old vs New regime, presumptive §44AD/ADA/AE, advance tax
-- Backup / restore as a single JSON file, optional Google Drive copy
-- Auto-backup rotation (last 30 days) + 30-day soft-delete Trash Bin
-- PWA install (Windows / macOS / Linux)
-- Light + dark mode
-- 100% offline. No telemetry, no analytics, no external calls.
-
----
-
-## Getting started
+## Install
 
 ### Prerequisites
 
-- **Node.js 18 or newer** — [nodejs.org](https://nodejs.org)
-- A modern browser (Chrome, Edge, Firefox, Safari)
+- Node.js 18 or newer
+- A modern browser
 
-### Install (Windows)
+### Windows
 
-1. Download the ZIP from the green **Code** button → **Download ZIP**, unzip.
-2. Double-click **`Install ArthSutra.bat`**.
-3. A desktop icon appears. Open it.
+1. Download the repo (Code → Download ZIP) and unzip it.
+2. Double-click `Install ArthSutra.bat`.
+3. A desktop icon is created. Open it.
 
-> Windows may show **"Windows protected your PC"** — click *More info* → *Run anyway*. This is normal for unsigned open-source apps.
+Windows may show "Windows protected your PC" — click **More info → Run anyway**. This is expected for unsigned open-source software.
 
-### Run on subsequent sessions
+To stop the server, run `Stop ArthSutra.bat`.
 
-Double-click the desktop icon, or run **`Start ArthSutra Server.bat`** from the install folder. To stop the server, run **`Stop ArthSutra.bat`**.
+### macOS / Linux
 
-### Install (macOS / Linux)
-
-```bash
+bash
 git clone https://github.com/arth-upadhyay/Arth-Sutra.git
 cd Arth-Sutra
 npm install
 npm start
-```
 
-Open http://localhost:47371 in your browser.
 
-Development
+Then open `http://localhost:47371`.
 
-```bash
+### Development
+
+bash
 npm run dev      # Vite dev server + Express daemon, hot reload
 npm run build    # production bundle
-npm test         # run vitest suite
-```
+npm test         # vitest
+
+
+The server starts on port `47371`. If it's taken, it scans up to `47421`, and persists the chosen port to `data/port.txt`.
 
 ---
 
-Architecture
+## How it works
 
-```
-Arth-Sutra/
-├── server.js                    Express daemon (JSON API + filesystem bridge)
-├── data/                        User data (gitignored)
-│   ├── bills.json
-│   ├── clients.json
-│   ├── products.json
-│   ├── profiles.json
-│   ├── expenses.json
-│   ├── purchases.json
-│   ├── recurring.json
-│   ├── receipts.json
-│   ├── templates.json
-│   └── meta.json                Settings, counters, region, modules
-├── Saved Invoices/              PDF archive (gitignored)
-├── Trash/                       Soft-deleted PDFs, 30-day retention (gitignored)
-├── public/
-│   └── tesseract/               Bundled OCR assets (worker, core WASM, eng)
-├── scripts/                     Build + test utilities
-├── src/
-│   ├── main.jsx                 React entry + service worker registration
-│   ├── App.jsx                  Root layout, sidebar, routing
-│   ├── index.css                Global stylesheet
-│   ├── store.js                 Frontend wrapper around the JSON API
-│   ├── utils.js                 Formatting, GST math, states, units
-│   ├── utils/
-│   │   ├── printSettings.js     App-wide print defaults
-│   │   ├── itr.js               Income Tax slab engine
-│   │   ├── clientCredit.js      Overpayment / credit note math
-│   │   ├── hsnRates.js          HSN → GST rate lookup
-│   │   └── share.js             WhatsApp / email helpers
-│   ├── components/
-│   │   ├── Dashboard/
-│   │   │   ├── index.jsx
-│   │   │   ├── constants.jsx
-│   │   │   ├── ReceiptModal.jsx
-│   │   │   └── hooks/
-│   │   │       ├── useDashboardMetrics.js
-│   │   │       ├── useInvoiceFilters.js
-│   │   │       ├── useInvoiceActions.js
-│   │   │       ├── useDashboardAlerts.js
-│   │   │       └── useReceiptModal.js
-│   │   ├── InvoiceGenerator/
-│   │   │   ├── index.jsx
-│   │   │   └── hooks/
-│   │   │       ├── useInvoiceForm.js
-│   │   │       ├── useInvoiceTotals.js
-│   │   │       ├── useInvoicePersistence.js
-│   │   │       ├── useClientSearch.js
-│   │   │       └── useProductSearch.js
-│   │   ├── GstReturns/
-│   │   │   ├── GstReturns.jsx
-│   │   │   ├── index.js
-│   │   │   ├── constants.js
-│   │   │   ├── components/StepList.jsx
-│   │   │   ├── hooks/useGstReturns.js
-│   │   │   └── utils/gstHelpers.js
-│   │   ├── InvoicePreview.jsx   Printable PDF template
-│   │   ├── IncomeTax.jsx        Regime / presumptive / advance tax
-│   │   ├── SettingsView.jsx     All app settings
-│   │   ├── PrintSettings.jsx    Print & PDF preferences
-│   │   ├── ClientsView.jsx
-│   │   ├── InventoryView.jsx
-│   │   ├── ExpenseTracker.jsx
-│   │   ├── PurchaseBills.jsx
-│   │   ├── ReceiptVoucher.jsx
-│   │   ├── RecurringInvoices.jsx
-│   │   ├── ReportsView.jsx
-│   │   ├── UserGuideView.jsx
-│   │   ├── WelcomeGuide.jsx
-│   │   ├── SetupWizard.jsx
-│   │   ├── LockScreen.jsx
-│   │   ├── BillOCR.jsx
-│   │   ├── ClientModal.jsx
-│   │   ├── ConfirmModal.jsx
-│   │   ├── HelpButton.jsx
-│   │   ├── PageHeader.jsx
-│   │   ├── PrintPreviewModal.jsx
-│   │   ├── Toast.jsx
-│   │   └── utils.test.jsx
-│   └── userGuideContent.js      Static guide content
-├── Install ArthSutra.bat        Windows installer
-├── Start ArthSutra Server.bat   Windows server launcher
-├── Stop ArthSutra.bat           Windows server stopper
-├── start-server-silent.bat      Boot-time silent launcher
-├── vite.config.js
-└── package.json
-```
+### Data storage
 
-Data flow
+All data is stored as individual JSON files under `data/`:
 
-1. User enters invoice data in InvoiceGenerator/index.jsx.
-2. All state lives in useInvoiceForm (single source of truth).
-3. useInvoiceTotals recomputes CGST / SGST / IGST / cess / TCS / TDS on every keystroke using computeInvoiceTotals from utils.js.
-4. useInvoicePersistence writes the bill via store.js → POST /api/bills.
-5. Express daemon writes data/bills.json synchronously.
-6. InvoicePreview.jsx renders the printable layout with the same props that were used to compute the totals.
-7. generateSingleBillPdfBlob uses html2canvas → jsPDF → POST /api/save-pdf to persist the physical PDF to Saved Invoices/.
 
----
+data/
+├── bills/          one file per invoice
+├── clients/
+├── products/
+├── purchases/
+├── expenses/
+├── recurring/
+├── receipts/
+├── profiles/
+├── templates/
+├── backups/        dated snapshots, last 30 days
+├── trash/          soft-deleted bills
+├── meta.json       counters, settings
+└── errors.log
 
-What was recently cleaned up
 
-Refactor: A4-only
+PDFs are written to `Saved Invoices/<client>/<month>/`. Deleted PDFs go to `Trash/`.
 
-· PAPER_SIZES reduced to a single A4 entry.
-· getPaperSize() now returns A4 unconditionally.
-· All .paper-thermal*, .paper-a5*, .paper-letter, .paper-legal, .paper-b5, .paper-custom CSS blocks deleted.
-· Thermal-specific settings in printSettings.js removed (fontFamily, fontSize, fontWeight, allCaps, lineSpacing, contrast, cutMark, feedLines, qrSize, thermalPrintMode, thermalBufferSafe, …).
-· Thermal print branch in InvoiceGenerator removed.
-· PrintSettings.jsx sections for thermal typography, layout, and content deleted.
+Nothing in `data/` or `Saved Invoices/` is committed to git.
 
-Refactor: Dead print settings removed
+### Frontend
 
-Unused keys purged from DEFAULT_PRINT_SETTINGS:
+- `src/store.js` — wraps the HTTP API
+- `src/utils.js` — GST math, state codes, formatting
+- `src/utils/printSettings.js` — invoice layout defaults
+- `src/components/InvoiceGenerator/` — invoice form and hooks
+- `src/components/Dashboard/` — dashboard and metrics hooks
+- `src/components/GstReturns/` — GSTR exports
+- `src/components/InvoicePreview.jsx` — the printable template
 
-· watermark, multi-copy, page numbers, margins, barcode/QR
-· letterhead, signature image, terms-on-separate-page
-· feedback QR, user-colour overrides, row density
-· date/number formatting, custom tax rate editor, saved templates
+### Backend
 
-Refactor: Dead UI removed
+`server.js` is a single Express 5 process that:
 
-· DESIGN_PRESETS array and the "Visual style" grid deleted from PrintSettings.jsx.
-· BUSINESS_PRESETS grid deleted.
-· ExtraFieldsEditor, SavedTemplatesEditor, ColorRow, CustomListEditor component definitions removed.
-· ACCENT_PRESETS, PDF_STYLES arrays removed from InvoiceGenerator.
-· Aging PDF (duplicate of Statement PDF) removed from ClientsView.
+- Serves the built React bundle from `dist/`
+- Reads and writes JSON files under `data/`
+- Writes files atomically (`.tmp` → rename)
+- Binds to `127.0.0.1` only
+- Runs a daily backup at boot and every 24 hours
+- Rejects cross-origin requests from anything other than localhost
 
-Refactor: Monoliths split into folders
+The invoice counter (`POST /api/meta/:key/increment`) is atomic because the read-modify-write is fully synchronous.
 
-Old file New structure LOC removed
-src/components/Dashboard.jsx src/components/Dashboard/ + hooks 1,165
-src/components/InvoiceGenerator.jsx src/components/InvoiceGenerator/ + hooks 3,191
-src/components/GstReturns.jsx src/components/GstReturns/ + hooks + helpers 979
+### Request flow on invoice save
 
-Root-level duplicates UserGuideView.jsx and WelcomeGuide.jsx were also removed (the canonical copies live in src/components/).
+1. `useInvoiceForm` holds the form state.
+2. `useInvoiceTotals` recomputes tax on every keystroke via `computeInvoiceTotals()` in `utils.js`.
+3. On Save, `useInvoicePersistence` reserves an invoice number, stamps `costAtSale` on each line from the current `product.purchasePrice`, and POSTs to `/api/bills`.
+4. `syncStock(items)` deducts quantities from the correct batches and rewrites the product records.
+5. Save & Download renders the preview with html2canvas, writes a PDF with jsPDF, and POSTs it to `/api/save-pdf`.
 
-Fixes
+### FEFO batch selection
 
-· PurchaseBills.jsx no longer applies a hardcoded 30% markup when a purchase is recorded. Selling price is now set equal to purchase price on first sync; the user overrides via the Products page.
-· RecurringInvoices.generateNow() now populates data.totals on the generated bill so downstream reports don't crash.
-· Currency column removed from Reports (India-only → always INR).
-· ClientModal.jsx no longer carries per-client paper size / currency / auto-print preferences.
+When a product is picked on a line:
 
-Security notes
+1. Batches with `quantity <= 0` or past expiry are excluded.
+2. Remaining batches are sorted by expiry ascending.
+3. The earliest-expiry batch fills `batch`, `expiry`, `mrp`, `omrp` on the line.
+4. If the ordered quantity exceeds that batch's stock, on blur the line splits into two rows — one per batch — so old stock goes out first.
+5. If total stock across all batches is still short, the save is blocked.
 
-· All data stays on the local machine. The only outbound network calls are: Google Drive upload (opt-in), GitHub release check, and the optional Google Fonts stylesheet.
-· The local Express daemon binds to 127.0.0.1 only.
-· The Content Security Policy in index.html blocks all inline <script> tags, restricts connect-src to localhost and Google APIs, and disables object-src.
-· The invoice template still uses dangerouslySetInnerHTML for the Terms & Conditions field. Until that is sanitised, do not paste untrusted content into Terms.
+### Invoice numbers
 
-**for any bugs or issues** 
-Open an issue at github.com/arth-upadhyay/Arth-Sutra/issues with:
+Numbers are reserved atomically through `/api/meta/:key/increment` on first save. Displayed numbers before save are previews only (`peek: true`) and don't consume counter values. Cancelled forms don't burn numbers.
 
-· The action that triggered it
-· What you expected
-· What actually happened
-· Browser console output if any
+### Gross profit
 
-Email: arth14deepak@gmail.com 
+Every invoice line stores `costAtSale` at save time. Changing a product's purchase price later does not change saved invoices. The dashboard computes `Σ (rate − costAtSale) × qty` across the active filter. Bills saved before this feature fall back to the product's current `purchasePrice`.
 
-Apache License 2.0
+### Backup and trash
+
+- Daily snapshot to `data/backups/<date>/`, kept for 30 days
+- Deleted invoices moved to `data/trash/`, kept for 30 days, restorable
+- Manual full export produces a single JSON file containing all collections plus selected localStorage keys
+
+Email: arth14deepak@gmail.com
+
+## License
+
+Apache 2.0. See `LICENSE`.
