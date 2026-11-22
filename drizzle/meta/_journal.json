@@ -8,6 +8,13 @@
       "when": 1795374982668,
       "tag": "0000_soft_bloodaxe",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1795376629395,
+      "tag": "0001_motionless_mister_fear",
+      "breakpoints": true
     }
   ]
 }

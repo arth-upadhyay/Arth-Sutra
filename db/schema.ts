@@ -173,3 +173,18 @@ export const meta = sqliteTable('meta', {
   key:    text('key').primaryKey(),
   value:  text('value').notNull().default(''),
 });
+
+// ─── Cryptographically Auditable Event Log ──────────────────────────────────
+// Append-only audit trail using SHA-256 hash chaining to ensure tamper-evident
+// records for Bills, Products, and Purchases.
+export const auditLogs = sqliteTable('audit_logs', {
+  id:           integer('id').primaryKey({ autoIncrement: true }),
+  entityType:   text('entity_type').notNull(),
+  entityId:     text('entity_id').notNull(),
+  action:       text('action').notNull(),
+  payload:      text('payload').notNull(),
+  previousHash: text('previous_hash').notNull(),
+  currentHash:  text('current_hash').notNull(),
+  timestamp:    text('timestamp').notNull(),
+});
+

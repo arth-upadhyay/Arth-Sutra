@@ -183,6 +183,17 @@ CREATE TABLE IF NOT EXISTS meta (
   value TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  entity_type   TEXT NOT NULL,
+  entity_id     TEXT NOT NULL,
+  action        TEXT NOT NULL,
+  payload       TEXT NOT NULL,
+  previous_hash TEXT NOT NULL,
+  current_hash  TEXT NOT NULL,
+  timestamp     TEXT NOT NULL
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_bills_invoice_date   ON bills(invoice_date);
 CREATE INDEX IF NOT EXISTS idx_bills_is_trashed     ON bills(is_trashed);
@@ -193,6 +204,8 @@ CREATE INDEX IF NOT EXISTS idx_expenses_date        ON expenses(date);
 CREATE INDEX IF NOT EXISTS idx_receipts_date        ON receipts(date);
 CREATE INDEX IF NOT EXISTS idx_recurring_active     ON recurring(active);
 CREATE INDEX IF NOT EXISTS idx_recurring_next_date  ON recurring(next_date);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_entity    ON audit_logs(entity_type, entity_id);
 `;
 
 // Execute all CREATE TABLE + CREATE INDEX statements
@@ -201,7 +214,7 @@ sqlite.exec(CREATE_TABLES_SQL);
 // Re-export schema tables for convenient imports
 export {
   bills, clients, products, purchases, expenses,
-  receipts, profiles, templates, recurring, meta,
+  receipts, profiles, templates, recurring, meta, auditLogs,
 } from './schema.js';
 
 // Export the raw sqlite connection for backup (file copy) operations
