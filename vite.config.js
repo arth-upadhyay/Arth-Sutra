@@ -282,6 +282,10 @@ export default defineConfig({
       '/api': {
         target: `http://localhost:${activeExpressPort}`,
         changeOrigin: true,
+      },
+      '/ws': {
+        target: `ws://localhost:${activeExpressPort}`,
+        ws: true,
       }
     }
   }

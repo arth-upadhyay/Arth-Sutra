@@ -6,6 +6,7 @@ import HelpButton from '../HelpButton';
 import { formatCurrency, INVOICE_TYPES, getFYOptions } from '../../utils';
 import { toast } from '../Toast';
 import { getAllProducts } from '../../store';
+import { useAuth } from '../../context/AuthContext';
 
 // Local Dashboard components & constants
 import ReceiptModal from './ReceiptModal';
@@ -329,6 +330,7 @@ function FinancialHealthChart({ months }) {
 // Main Dashboard Component
 // ---------------------------------------------------------------------------
 export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
+  const { isAdmin } = useAuth();
   const metrics = useDashboardMetrics() || {};
   const bills = metrics.bills || [];
   const stats = metrics.stats || { byCurrency: {}, count: 0 };
@@ -833,8 +835,11 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
             <button type="button" className="erp-mini-btn" disabled={actions.bulkBusy} onClick={actions.bulkExportJSON}>
               <FileText size={12} /> Export JSON (निर्यात)</button>
             <button type="button" className="erp-mini-btn" disabled={actions.bulkBusy} onClick={() => actions.bulkExportPDF()}><Download size={12} /> Bulk PDF (थोक PDF)</button>
-            <button type="button" className="erp-mini-btn danger" disabled={actions.bulkBusy} onClick={actions.bulkDelete}>
-              <Trash2 size={12} /> Delete (हटाएं)</button>
+            {isAdmin && (
+              <button type="button" className="erp-mini-btn danger" disabled={actions.bulkBusy} onClick={actions.bulkDelete}>
+                <Trash2 size={12} /> Delete (हटाएं)
+              </button>
+            )}
             <button type="button" className="icon-btn" onClick={actions.clearSelection} style={{ marginLeft: 'auto' }}>
               <X size={14} />
             </button>
@@ -930,7 +935,9 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
                             </button>
                           )}
                           <button className="icon-btn icon-btn-blue" onClick={() => actions.shareEmail(bill)} title="Email"><Mail size={14} /></button>
-                          <button className="icon-btn icon-btn-red" onClick={() => actions.handleDelete(bill)} title="Delete"><Trash2 size={14} /></button>
+                          {isAdmin && (
+                            <button className="icon-btn icon-btn-red" onClick={() => actions.handleDelete(bill)} title="Delete"><Trash2 size={14} /></button>
+                          )}
                         </div>
                       </td>}
                     </tr>

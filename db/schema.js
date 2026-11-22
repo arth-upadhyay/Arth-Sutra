@@ -188,3 +188,19 @@ export const auditLogs = sqliteTable('audit_logs', {
   timestamp:    text('timestamp').notNull(),
 });
 
+// ─── Backend Idempotency Request Logs (Offline PWA Write-Behind) ───────────
+export const requestLogs = sqliteTable('request_logs', {
+  key:       text('key').primaryKey(),
+  response:  text('response').notNull(),
+  timestamp: text('timestamp').notNull(),
+});
+
+// ─── Users (RBAC: ADMIN, ACCOUNTANT, CLERK) ─────────────────────────────────
+export const users = sqliteTable('users', {
+  id:           integer('id').primaryKey({ autoIncrement: true }),
+  username:     text('username').notNull().unique(),
+  passwordHash: text('password_hash').notNull(),
+  role:         text('role').notNull().default('CLERK'),
+  createdAt:    text('created_at').notNull(),
+});
+

@@ -1,12 +1,16 @@
 import LockScreen from './components/LockScreen';
 import { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react';
-import { Home, FileText, Settings, Plus, Users, Package, BarChart3, Wallet, RefreshCw, Receipt, BookOpen, Download, X, ShoppingCart, ChevronDown, Building2, Pencil, HelpCircle, Search, Command, Bell, Calculator } from 'lucide-react';
+import { Home, FileText, Settings, Plus, Users, Package, BarChart3, Wallet, RefreshCw, Receipt, BookOpen, Download, X, ShoppingCart, ChevronDown, Building2, Pencil, HelpCircle, Search, Command, Bell, Calculator, GitCompare, LogOut, Shield } from 'lucide-react';
 import { getAllProfiles, saveProfile, getEnabledModules, getAllBills, getAllProducts, getStockAlertSettings, getAllClients } from './store';
 import { isModuleEnabled, getUpcomingFilings } from './utils';
 import Dashboard from './components/Dashboard';
 import InvoiceGenerator from './components/InvoiceGenerator';
-import ToastContainer from './components/Toast';
+import ToastContainer, { toast } from './components/Toast';
 import ConfirmModalContainer from './components/ConfirmModal';
+import { useSocket } from './hooks/useSocket';
+import { useAuth } from './context/AuthContext';
+import LoginScreen from './components/LoginScreen';
+import { replaySyncQueue } from './utils/offlineSync';
 const SettingsView = lazy(() => import('./components/SettingsView'));
 const ClientsView = lazy(() => import('./components/ClientsView'));
 const InventoryView = lazy(() => import('./components/InventoryView'));
@@ -17,6 +21,7 @@ const ReceiptVoucher = lazy(() => import('./components/ReceiptVoucher'));
 const GSTReturns = lazy(() => import('./components/GSTReturns'));
 const IncomeTax = lazy(() => import('./components/IncomeTax'));
 const PurchaseBills = lazy(() => import('./components/PurchaseBills'));
+const ReconView = lazy(() => import('./components/ReconView'));
 const UserGuideView = lazy(() => import('./components/UserGuideView'));
 
 function ViewLoading() {
@@ -35,15 +40,42 @@ function ViewLoading() {
 }
 
 function App() {
+  const { user, isAuthenticated, loading: authLoading, logout, isAdmin } = useAuth();
+
   const [isUnlocked, setIsUnlocked] = useState(() => {
     return sessionStorage.getItem('fgsb_unlocked') === 'true';
   });
+
+  // Background Sync (Phase 2): replay offline IndexedDB mutations upon reconnecting
+  useEffect(() => {
+    const handleOnline = () => {
+      toast('Internet connection restored. Syncing offline data...', 'info', 3000);
+      replaySyncQueue();
+    };
+    const handleSyncComplete = (e) => {
+      const count = e.detail?.count || 0;
+      toast(`Successfully synced ${count} offline change(s)!`, 'success', 3500);
+      setDataVersion(v => v + 1);
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('syncComplete', handleSyncComplete);
+
+    if (navigator.onLine) {
+      replaySyncQueue();
+    }
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('syncComplete', handleSyncComplete);
+    };
+  }, []);
 
   const [currentView, setCurrentView] = useState(() => {
     try {
       const params = new URLSearchParams(window.location.search);
       const v = params.get('view');
-      const valid = ['dashboard', 'new', 'clients', 'inventory', 'expenses', 'purchases', 'recurring', 'receipts', 'reports', 'filing', 'incometax', 'guide', 'settings'];
+      const valid = ['dashboard', 'new', 'clients', 'inventory', 'expenses', 'purchases', 'recon', 'recurring', 'receipts', 'reports', 'filing', 'incometax', 'guide', 'settings'];
       if (v && valid.includes(v)) {
         window.history.replaceState({}, '', window.location.pathname);
         return v;
@@ -79,6 +111,51 @@ function App() {
   const [paletteIdx, setPaletteIdx] = useState(0);
   const [searchCorpus, setSearchCorpus] = useState({ bills: [], clients: [], products: [] });
   const [showShortcutsHelp, setShowShortcutsHelp] = useState(false);
+  const [dataVersion, setDataVersion] = useState(0);
+
+  // Feature #3: Real-Time Multi-User Sync via WebSockets
+  useSocket(useCallback((event) => {
+    if (!event || !event.type) return;
+
+    if (event.type === 'BILL_CREATED') {
+      const invNum = event.data?.invoiceNumber || event.data?.id || '';
+      toast(`Invoice #${invNum} created on another device`, 'info', 4000);
+      setDataVersion(v => v + 1);
+      window.dispatchEvent(new CustomEvent('fgsb-sync-event', { detail: event }));
+    } else if (event.type === 'BILL_UPDATED') {
+      const invNum = event.data?.invoiceNumber || event.data?.id || '';
+      toast(`Invoice #${invNum} updated on another device`, 'info', 4000);
+      setDataVersion(v => v + 1);
+      window.dispatchEvent(new CustomEvent('fgsb-sync-event', { detail: event }));
+    } else if (event.type === 'BILL_DELETED') {
+      toast(`An invoice was removed on another device`, 'warning', 4000);
+      setDataVersion(v => v + 1);
+      window.dispatchEvent(new CustomEvent('fgsb-sync-event', { detail: event }));
+    } else if (event.type === 'PRODUCT_CREATED' || event.type === 'PRODUCT_UPDATED') {
+      const pName = event.data?.name || 'Product';
+      toast(`"${pName}" updated on another device`, 'info', 4000);
+      setDataVersion(v => v + 1);
+      window.dispatchEvent(new CustomEvent('fgsb-sync-event', { detail: event }));
+    } else if (event.type === 'PRODUCT_DELETED') {
+      toast(`A product was removed on another device`, 'warning', 4000);
+      setDataVersion(v => v + 1);
+      window.dispatchEvent(new CustomEvent('fgsb-sync-event', { detail: event }));
+    } else if (event.type === 'PURCHASE_CREATED' || event.type === 'PURCHASE_UPDATED') {
+      const sup = event.data?.supplierName || 'Purchase';
+      toast(`Purchase from ${sup} updated on another device`, 'info', 4000);
+      setDataVersion(v => v + 1);
+      window.dispatchEvent(new CustomEvent('fgsb-sync-event', { detail: event }));
+    } else if (event.type === 'PURCHASE_DELETED') {
+      toast(`A purchase bill was removed on another device`, 'warning', 4000);
+      setDataVersion(v => v + 1);
+      window.dispatchEvent(new CustomEvent('fgsb-sync-event', { detail: event }));
+    } else if (event.type === 'CLIENT_UPDATED' || event.type === 'CLIENT_CREATED') {
+      const cName = event.data?.name || 'Client';
+      toast(`Client "${cName}" updated on another device`, 'info', 4000);
+      setDataVersion(v => v + 1);
+      window.dispatchEvent(new CustomEvent('fgsb-sync-event', { detail: event }));
+    }
+  }, []));
 
   const [enabledModules, setEnabledModulesState] = useState(() => getEnabledModules());
 
@@ -179,13 +256,14 @@ function App() {
     { id: 'inventory', icon: Package, label: 'Products', module: 'inventory' },
     { id: 'expenses', icon: Wallet, label: 'Expenses', module: 'expenses' },
     { id: 'purchases', icon: ShoppingCart, label: 'Purchases', module: 'purchases' },
+    { id: 'recon', icon: GitCompare, label: 'Reconciliation', module: 'purchases', minRole: ['ADMIN', 'ACCOUNTANT'] },
     { id: 'recurring', icon: RefreshCw, label: 'Recurring', module: 'recurring' },
     { id: 'receipts', icon: Receipt, label: 'Receipts', module: 'receipts' },
     { id: 'reports', icon: BarChart3, label: 'Reports', module: 'reports' },
     { id: 'filing', icon: BookOpen, label: 'GST Returns', module: 'gstReturns' },
     { id: 'incometax', icon: Calculator, label: 'Income Tax', module: 'incomeTax' },
     { id: 'guide', icon: HelpCircle, label: 'User Guide', module: 'dashboard' },
-  ].filter(item => showIfModule(item.module)), [showIfModule, handleNewInvoice]);
+  ].filter(item => showIfModule(item.module) && (!item.minRole || item.minRole.includes(user?.role))), [showIfModule, handleNewInvoice, user?.role]);
 
   const paletteActions = useMemo(() => {
     const acts = [
@@ -303,7 +381,7 @@ function App() {
     compute();
     const interval = setInterval(compute, 10 * 60 * 1000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [isUnlocked, currentView]);
+  }, [isUnlocked, currentView, dataVersion]);
 
   useEffect(() => {
     if (!isUnlocked || !showPalette) return;
@@ -318,7 +396,7 @@ function App() {
         products: products.slice(0, 200),
       });
     });
-  }, [isUnlocked, showPalette]);
+  }, [isUnlocked, showPalette, dataVersion]);
 
   useEffect(() => {
     let cancelled = false;
@@ -517,6 +595,14 @@ function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [showPalette, paletteIdx, filteredPalette]);
 
+  if (authLoading) {
+    return <ViewLoading />;
+  }
+
+  if (!isAuthenticated) {
+    return <LoginScreen />;
+  }
+
   if (!isUnlocked) {
     return <LockScreen onUnlock={handleUnlock} />;
   }
@@ -672,6 +758,50 @@ function App() {
                 }} title="Update available" />
               )}
             </button>
+            {user && (
+              <div style={{
+                padding: '0.5rem 0.75rem',
+                borderRadius: '8px',
+                background: 'var(--bg-muted, rgba(255,255,255,0.05))',
+                border: '1px solid var(--border, rgba(255,255,255,0.1))',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '0.35rem',
+                margin: '0.25rem 0',
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontWeight: 600, fontSize: '0.8rem', color: 'var(--text)' }}>{user.username}</span>
+                  <span style={{
+                    fontSize: '0.65rem',
+                    fontWeight: 700,
+                    padding: '1px 5px',
+                    borderRadius: '4px',
+                    background: user.role === 'ADMIN' ? '#dbeafe' : user.role === 'ACCOUNTANT' ? '#ecfdf5' : '#f1f5f9',
+                    color: user.role === 'ADMIN' ? '#1e40af' : user.role === 'ACCOUNTANT' ? '#065f46' : '#475569',
+                  }}>
+                    {user.role}
+                  </span>
+                </div>
+                <button
+                  onClick={logout}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.35rem',
+                    background: 'none',
+                    border: 'none',
+                    color: '#ef4444',
+                    cursor: 'pointer',
+                    padding: 0,
+                    fontSize: '0.75rem',
+                    fontWeight: 600,
+                  }}
+                  title="Sign out of Arth-Sutra"
+                >
+                  <LogOut size={13} /> Sign Out
+                </button>
+              </div>
+            )}
             <div className={`server-status server-status-${serverStatus}`}>
               <span className="server-status-dot" />
               {serverStatus === 'online' ? 'App Ready' : serverStatus === 'offline' ? 'App Not Running' : 'Connecting...'}
@@ -708,6 +838,7 @@ function App() {
           {currentView === 'inventory' && <InventoryView />}
           {currentView === 'expenses' && <ExpenseTracker />}
           {currentView === 'purchases' && <PurchaseBills />}
+          {currentView === 'recon' && <ReconView />}
           {currentView === 'recurring' && <RecurringInvoices onEdit={handleEditInvoice} />}
           {currentView === 'receipts' && <ReceiptVoucher />}
           {currentView === 'reports' && <ReportsView />}

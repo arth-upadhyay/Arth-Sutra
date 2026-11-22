@@ -1,18 +1,28 @@
 import express from 'express';
+import http from 'http';
+import { WebSocketServer, WebSocket } from 'ws';
+import multer from 'multer';
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { eq, ne, sql, desc, asc } from 'drizzle-orm';
+import dotenv from 'dotenv';
+dotenv.config();
+
 import { computeInvoiceTotals } from './src/utils.js';
+import { reconcileGstr2b } from './utils/recon.js';
 
 // ── Database (Drizzle + better-sqlite3) ────────────────────────────────────
 import {
   db, sqlite, DB_PATH, DATA_DIR,
   bills, clients, products, purchases, expenses,
   receipts, profiles, templates, recurring, meta, auditLogs,
+  requestLogs, users,
 } from './db/index.js';
 import { logEvent, verifyAuditChain } from './db/auditEngine.js';
+import { encryptProfileBankDetails, decryptProfileBankDetails } from './utils/crypto.js';
+import { hashPassword, comparePassword, generateToken, verifyToken, ROLES } from './utils/auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -31,6 +41,77 @@ const STARTING_PORT = persistedPort || DEFAULT_PORT;
 const MAX_PORT_SCAN = 50;
 
 const app = express();
+const httpServer = http.createServer(app);
+
+// ── WebSocket Server for Real-Time Multi-User Sync with JWT Auth ───────────
+const wss = new WebSocketServer({ server: httpServer });
+
+wss.on('connection', (ws, req) => {
+  try {
+    const url = new URL(req.url, 'http://127.0.0.1');
+    const token = url.searchParams.get('token');
+    if (!token) {
+      ws.close(4001, 'Unauthorized: Missing token');
+      return;
+    }
+    const decoded = verifyToken(token);
+    ws.user = decoded;
+    ws.send(JSON.stringify({
+      type: 'CONNECTED',
+      user: decoded.username,
+      role: decoded.role,
+      timestamp: new Date().toISOString(),
+    }));
+  } catch (err) {
+    ws.close(4001, 'Unauthorized: Invalid token');
+  }
+});
+
+function broadcast(type, data) {
+  const payload = JSON.stringify({ type, data, timestamp: new Date().toISOString() });
+  for (const client of wss.clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      try {
+        client.send(payload);
+      } catch { /* ignore individual write errors */ }
+    }
+  }
+}
+
+// ── Multer in-memory storage for GSTR-2B file uploads ─────────────────────
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB limit
+});
+
+// ── Authentication & RBAC Middlewares ──────────────────────────────────────
+function requireAuth(req, res, next) {
+  const authHeader = req.headers['authorization'] || req.headers['Authorization'];
+  if (!authHeader || typeof authHeader !== 'string' || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Unauthorized: Missing or invalid token' });
+  }
+
+  const token = authHeader.slice(7).trim();
+  try {
+    const decoded = verifyToken(token);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Unauthorized: ' + err.message });
+  }
+}
+
+function requireRole(allowedRoles) {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    if (!allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({ error: 'Forbidden: Insufficient privileges' });
+    }
+    next();
+  };
+}
 
 // ── CORS lockdown (localhost only) ─────────────────────────────────────────
 app.use((req, res, next) => {
@@ -47,13 +128,168 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Idempotency-Key');
   }
   if (req.method === 'OPTIONS') return res.status(204).end();
   next();
 });
 
 app.use(express.json({ limit: '5mb' }));
+
+// ── Backend Idempotency Middleware (for Offline PWA Write-Behind) ───────────
+app.use((req, res, next) => {
+  const method = req.method.toUpperCase();
+  if (!['POST', 'PUT', 'DELETE'].includes(method)) {
+    return next();
+  }
+
+  const idempotencyKey = req.headers['x-idempotency-key'];
+  if (!idempotencyKey) {
+    return next();
+  }
+
+  try {
+    const existing = db.select().from(requestLogs).where(eq(requestLogs.key, idempotencyKey)).get();
+    if (existing) {
+      res.setHeader('X-Cache', 'IDEMPOTENT-HIT');
+      try {
+        const parsed = JSON.parse(existing.response);
+        return res.status(parsed.status || 200).json(parsed.body !== undefined ? parsed.body : parsed);
+      } catch {
+        return res.send(existing.response);
+      }
+    }
+  } catch (err) {
+    console.warn('Idempotency lookup error:', err);
+  }
+
+  // Intercept response to store result
+  const originalJson = res.json.bind(res);
+  const originalSend = res.send.bind(res);
+
+  res.json = function (body) {
+    try {
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        db.insert(requestLogs).values({
+          key: idempotencyKey,
+          response: JSON.stringify({ status: res.statusCode, body }),
+          timestamp: new Date().toISOString(),
+        }).onConflictDoNothing().run();
+      }
+    } catch (saveErr) {
+      console.warn('Failed to store idempotency record:', saveErr);
+    }
+    return originalJson(body);
+  };
+
+  res.send = function (body) {
+    try {
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        db.insert(requestLogs).values({
+          key: idempotencyKey,
+          response: JSON.stringify({ status: res.statusCode, body }),
+          timestamp: new Date().toISOString(),
+        }).onConflictDoNothing().run();
+      }
+    } catch (saveErr) {
+      console.warn('Failed to store idempotency record:', saveErr);
+    }
+    return originalSend(body);
+  };
+
+  next();
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Authentication Endpoints
+// ════════════════════════════════════════════════════════════════════════════
+
+app.post('/api/auth/login', async (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Username and password are required' });
+  }
+
+  try {
+    const user = db.select().from(users).where(eq(users.username, username)).get();
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid username or password' });
+    }
+
+    const matches = await comparePassword(password, user.passwordHash);
+    if (!matches) {
+      return res.status(401).json({ error: 'Invalid username or password' });
+    }
+
+    const token = generateToken(user);
+    res.json({
+      token,
+      user: { id: user.id, username: user.username, role: user.role },
+    });
+  } catch (err) {
+    errRes(res, 500, 'server-error', err);
+  }
+});
+
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  res.json({ user: req.user });
+});
+
+app.get('/api/auth/users', requireAuth, requireRole(['ADMIN']), (req, res) => {
+  try {
+    const rows = db.select({
+      id: users.id,
+      username: users.username,
+      role: users.role,
+      createdAt: users.createdAt,
+    }).from(users).all();
+    res.json(rows);
+  } catch (err) {
+    errRes(res, 500, 'server-error', err);
+  }
+});
+
+app.post('/api/auth/users', requireAuth, requireRole(['ADMIN']), async (req, res) => {
+  const { username, password, role } = req.body || {};
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Username and password are required' });
+  }
+
+  try {
+    const validRoles = ['ADMIN', 'ACCOUNTANT', 'CLERK'];
+    const userRole = validRoles.includes(role) ? role : 'CLERK';
+
+    const existing = db.select().from(users).where(eq(users.username, username)).get();
+    if (existing) {
+      return res.status(409).json({ error: 'Username already exists' });
+    }
+
+    const passwordHash = await hashPassword(password);
+    const result = db.insert(users).values({
+      username,
+      passwordHash,
+      role: userRole,
+      createdAt: new Date().toISOString(),
+    }).run();
+
+    res.json({ success: true, id: result.lastInsertRowid, username, role: userRole });
+  } catch (err) {
+    errRes(res, 500, 'server-error', err);
+  }
+});
+
+app.delete('/api/auth/users/:id', requireAuth, requireRole(['ADMIN']), (req, res) => {
+  try {
+    const targetId = Number(req.params.id);
+    if (req.user.id === targetId) {
+      return res.status(400).json({ error: 'Cannot delete your own admin account' });
+    }
+    db.delete(users).where(eq(users.id, targetId)).run();
+    res.json({ success: true });
+  } catch (err) {
+    errRes(res, 500, 'server-error', err);
+  }
+});
 
 // ── Path-safety helpers (unchanged from original) ─────────────────────────
 
@@ -216,7 +452,13 @@ app.post('/api/bills', (req, res) => {
   const bill = req.body;
   if (!bill || !bill.id) return res.status(400).json({ error: 'Bill must have an id' });
 
+  // Encrypt snapshot bank details before storing and hashing in audit log
+  if (bill.profile) {
+    bill.profile = encryptProfileBankDetails(bill.profile);
+  }
+
   const overwrite = req.query.overwrite === '1' || req.query.overwrite === 'true';
+  let action = 'CREATE';
 
   try {
     db.transaction((tx) => {
@@ -231,7 +473,7 @@ app.post('/api/bills', (req, res) => {
         throw err;
       }
 
-      const action = existing ? 'UPDATE' : 'CREATE';
+      action = existing ? 'UPDATE' : 'CREATE';
 
       tx.insert(bills).values({
         id: bill.id,
@@ -279,6 +521,7 @@ app.post('/api/bills', (req, res) => {
       logEvent('bill', bill.id, action, bill, tx);
     });
 
+    broadcast(action === 'UPDATE' ? 'BILL_UPDATED' : 'BILL_CREATED', bill);
     res.json({ success: true });
   } catch (err) {
     if (err.statusCode === 409) {
@@ -351,6 +594,8 @@ app.delete('/api/bills/:id', (req, res) => {
       }
     });
 
+    broadcast('BILL_DELETED', { id, permanent: req.query.permanent === '1', trashed: req.query.permanent !== '1' });
+
     if (req.query.permanent === '1') {
       return res.json({ success: true, permanent: true });
     }
@@ -371,11 +616,13 @@ const DEFAULT_PROFILE = {
 };
 
 app.get('/api/profile', (req, res) => {
-  res.json(getMetaValue('profile', DEFAULT_PROFILE));
+  const raw = getMetaValue('profile', DEFAULT_PROFILE);
+  res.json(decryptProfileBankDetails(raw));
 });
 
-app.post('/api/profile', (req, res) => {
-  setMetaValue('profile', req.body);
+app.post('/api/profile', requireAuth, requireRole(['ADMIN', 'ACCOUNTANT']), (req, res) => {
+  const encrypted = encryptProfileBankDetails(req.body);
+  setMetaValue('profile', encrypted);
   res.json({ success: true });
 });
 
@@ -424,11 +671,13 @@ app.post('/api/clients', (req, res) => {
       licence: client.licence || '',
     },
   }).run();
+  broadcast('CLIENT_UPDATED', client);
   res.json({ success: true, id: client.id });
 });
 
 app.delete('/api/clients/:id', (req, res) => {
   db.delete(clients).where(eq(clients.id, req.params.id)).run();
+  broadcast('CLIENT_DELETED', { id: req.params.id });
   res.json({ success: true });
 });
 
@@ -480,11 +729,12 @@ app.get('/api/products', (req, res) => {
 app.post('/api/products', (req, res) => {
   const product = req.body;
   if (!product.id) product.id = 'prod_' + Date.now();
+  let action = 'CREATE';
 
   try {
     db.transaction((tx) => {
       const existing = tx.select({ id: products.id }).from(products).where(eq(products.id, product.id)).get();
-      const action = existing ? 'UPDATE' : 'CREATE';
+      action = existing ? 'UPDATE' : 'CREATE';
 
       tx.insert(products).values({
         id: product.id,
@@ -523,6 +773,7 @@ app.post('/api/products', (req, res) => {
       logEvent('product', product.id, action, product, tx);
     });
 
+    broadcast(action === 'UPDATE' ? 'PRODUCT_UPDATED' : 'PRODUCT_CREATED', product);
     res.json({ success: true, id: product.id });
   } catch (err) {
     errRes(res, 500, 'server-error', err);
@@ -535,6 +786,7 @@ app.delete('/api/products/:id', (req, res) => {
       tx.delete(products).where(eq(products.id, req.params.id)).run();
       logEvent('product', req.params.id, 'DELETE', { id: req.params.id }, tx);
     });
+    broadcast('PRODUCT_DELETED', { id: req.params.id });
     res.json({ success: true });
   } catch (err) {
     errRes(res, 500, 'server-error', err);
@@ -555,7 +807,7 @@ app.get('/api/expenses', (req, res) => {
   })));
 });
 
-app.post('/api/expenses', (req, res) => {
+app.post('/api/expenses', requireAuth, requireRole(['ADMIN', 'ACCOUNTANT']), (req, res) => {
   const expense = req.body;
   if (!expense.id) expense.id = 'exp_' + Date.now();
   db.insert(expenses).values({
@@ -592,7 +844,7 @@ app.post('/api/expenses', (req, res) => {
   res.json({ success: true, id: expense.id });
 });
 
-app.delete('/api/expenses/:id', (req, res) => {
+app.delete('/api/expenses/:id', requireAuth, requireRole(['ADMIN', 'ACCOUNTANT']), (req, res) => {
   db.delete(expenses).where(eq(expenses.id, req.params.id)).run();
   res.json({ success: true });
 });
@@ -701,14 +953,15 @@ app.get('/api/purchases', (req, res) => {
   res.json(rows.map(purchaseRowToObj));
 });
 
-app.post('/api/purchases', (req, res) => {
+app.post('/api/purchases', requireAuth, requireRole(['ADMIN', 'ACCOUNTANT']), (req, res) => {
   const purchase = req.body;
   if (!purchase.id) purchase.id = 'pur_' + Date.now();
+  let action = 'CREATE';
 
   try {
     db.transaction((tx) => {
       const existing = tx.select({ id: purchases.id }).from(purchases).where(eq(purchases.id, purchase.id)).get();
-      const action = existing ? 'UPDATE' : 'CREATE';
+      action = existing ? 'UPDATE' : 'CREATE';
 
       tx.insert(purchases).values({
         id: purchase.id,
@@ -749,18 +1002,20 @@ app.post('/api/purchases', (req, res) => {
       logEvent('purchase', purchase.id, action, purchase, tx);
     });
 
+    broadcast(action === 'UPDATE' ? 'PURCHASE_UPDATED' : 'PURCHASE_CREATED', purchase);
     res.json({ success: true, id: purchase.id });
   } catch (err) {
     errRes(res, 500, 'server-error', err);
   }
 });
 
-app.delete('/api/purchases/:id', (req, res) => {
+app.delete('/api/purchases/:id', requireAuth, requireRole(['ADMIN', 'ACCOUNTANT']), (req, res) => {
   try {
     db.transaction((tx) => {
       tx.delete(purchases).where(eq(purchases.id, req.params.id)).run();
       logEvent('purchase', req.params.id, 'DELETE', { id: req.params.id }, tx);
     });
+    broadcast('PURCHASE_DELETED', { id: req.params.id });
     res.json({ success: true });
   } catch (err) {
     errRes(res, 500, 'server-error', err);
@@ -773,63 +1028,65 @@ app.delete('/api/purchases/:id', (req, res) => {
 
 app.get('/api/profiles', (req, res) => {
   const rows = db.select().from(profiles).orderBy(asc(profiles.businessName)).all();
-  res.json(rows.map(profileRowToObj));
+  res.json(rows.map(profileRowToObj).map(decryptProfileBankDetails));
 });
 
-app.post('/api/profiles', (req, res) => {
+app.post('/api/profiles', requireAuth, requireRole(['ADMIN', 'ACCOUNTANT']), (req, res) => {
   const prof = req.body;
   if (!prof.id) prof.id = 'biz_' + Date.now();
+  const encrypted = encryptProfileBankDetails(prof);
+
   db.insert(profiles).values({
-    id: prof.id,
-    businessName: prof.businessName || '',
-    address: prof.address || '',
-    city: prof.city || '',
-    pin: prof.pin || '',
-    state: prof.state || '',
-    country: prof.country || '',
-    gstin: prof.gstin || '',
-    pan: prof.pan || '',
-    email: prof.email || '',
-    phone: prof.phone || '',
-    bankName: prof.bankName || '',
-    accountNumber: prof.accountNumber || '',
-    ifsc: prof.ifsc || '',
-    swift: prof.swift || '',
-    logo: prof.logo || '',
-    signature: prof.signature || '',
-    upiId: prof.upiId || '',
-    googleClientId: prof.googleClientId || '',
-    googleDriveFolder: prof.googleDriveFolder || 'GST Billing Invoices',
-    paymentAccounts: JSON.stringify(prof.paymentAccounts || []),
+    id: encrypted.id,
+    businessName: encrypted.businessName || '',
+    address: encrypted.address || '',
+    city: encrypted.city || '',
+    pin: encrypted.pin || '',
+    state: encrypted.state || '',
+    country: encrypted.country || '',
+    gstin: encrypted.gstin || '',
+    pan: encrypted.pan || '',
+    email: encrypted.email || '',
+    phone: encrypted.phone || '',
+    bankName: encrypted.bankName || '',
+    accountNumber: encrypted.accountNumber || '',
+    ifsc: encrypted.ifsc || '',
+    swift: encrypted.swift || '',
+    logo: encrypted.logo || '',
+    signature: encrypted.signature || '',
+    upiId: encrypted.upiId || '',
+    googleClientId: encrypted.googleClientId || '',
+    googleDriveFolder: encrypted.googleDriveFolder || 'GST Billing Invoices',
+    paymentAccounts: typeof encrypted.paymentAccounts === 'string' ? encrypted.paymentAccounts : JSON.stringify(encrypted.paymentAccounts || []),
   }).onConflictDoUpdate({
     target: profiles.id,
     set: {
-      businessName: prof.businessName || '',
-      address: prof.address || '',
-      city: prof.city || '',
-      pin: prof.pin || '',
-      state: prof.state || '',
-      country: prof.country || '',
-      gstin: prof.gstin || '',
-      pan: prof.pan || '',
-      email: prof.email || '',
-      phone: prof.phone || '',
-      bankName: prof.bankName || '',
-      accountNumber: prof.accountNumber || '',
-      ifsc: prof.ifsc || '',
-      swift: prof.swift || '',
-      logo: prof.logo || '',
-      signature: prof.signature || '',
-      upiId: prof.upiId || '',
-      googleClientId: prof.googleClientId || '',
-      googleDriveFolder: prof.googleDriveFolder || 'GST Billing Invoices',
-      paymentAccounts: JSON.stringify(prof.paymentAccounts || []),
+      businessName: encrypted.businessName || '',
+      address: encrypted.address || '',
+      city: encrypted.city || '',
+      pin: encrypted.pin || '',
+      state: encrypted.state || '',
+      country: encrypted.country || '',
+      gstin: encrypted.gstin || '',
+      pan: encrypted.pan || '',
+      email: encrypted.email || '',
+      phone: encrypted.phone || '',
+      bankName: encrypted.bankName || '',
+      accountNumber: encrypted.accountNumber || '',
+      ifsc: encrypted.ifsc || '',
+      swift: encrypted.swift || '',
+      logo: encrypted.logo || '',
+      signature: encrypted.signature || '',
+      upiId: encrypted.upiId || '',
+      googleClientId: encrypted.googleClientId || '',
+      googleDriveFolder: encrypted.googleDriveFolder || 'GST Billing Invoices',
+      paymentAccounts: typeof encrypted.paymentAccounts === 'string' ? encrypted.paymentAccounts : JSON.stringify(encrypted.paymentAccounts || []),
     },
   }).run();
-  res.json({ success: true, id: prof.id });
+  res.json({ success: true, id: encrypted.id });
 });
 
-app.delete('/api/profiles/:id', (req, res) => {
+app.delete('/api/profiles/:id', requireAuth, requireRole(['ADMIN']), (req, res) => {
   db.delete(profiles).where(eq(profiles.id, req.params.id)).run();
   res.json({ success: true });
 });
@@ -1386,6 +1643,7 @@ app.post('/api/trash/:id/restore', (req, res) => {
       logEvent('bill', req.params.id, 'UPDATE', { id: req.params.id, isTrashed: false, restored: true }, tx);
     });
 
+    broadcast('BILL_UPDATED', { id: req.params.id, isTrashed: false, restored: true });
     res.json({ success: true });
   } catch (err) { errRes(res, 500, 'server-error', err); }
 });
@@ -1396,6 +1654,7 @@ app.delete('/api/trash/:id', (req, res) => {
       tx.delete(bills).where(eq(bills.id, req.params.id)).run();
       logEvent('bill', req.params.id, 'DELETE', { id: req.params.id, permanent: true, fromTrash: true }, tx);
     });
+    broadcast('BILL_DELETED', { id: req.params.id, permanent: true, fromTrash: true });
     res.json({ success: true });
   } catch (err) { errRes(res, 500, 'server-error', err); }
 });
@@ -1419,6 +1678,75 @@ app.get('/api/audit/verify', (req, res) => {
     const result = verifyAuditChain(db);
     res.json(result);
   } catch (err) {
+    errRes(res, 500, 'server-error', err);
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// AI-Powered GSTR-2B Reconciliation
+// ════════════════════════════════════════════════════════════════════════════
+
+app.post('/api/recon/gstr2b', requireAuth, requireRole(['ADMIN', 'ACCOUNTANT']), upload.single('file'), (req, res) => {
+  try {
+    let rawJson = null;
+
+    if (req.file) {
+      const content = req.file.buffer.toString('utf-8');
+      try {
+        rawJson = JSON.parse(content);
+      } catch (err) {
+        return res.status(400).json({ error: 'Uploaded file is not valid JSON' });
+      }
+    } else if (req.body) {
+      if (typeof req.body === 'string') {
+        try {
+          rawJson = JSON.parse(req.body);
+        } catch (err) {
+          return res.status(400).json({ error: 'Invalid JSON payload' });
+        }
+      } else if (typeof req.body === 'object') {
+        // In case express parsed JSON body or form-data body string
+        if (req.body.gstr2b) {
+          rawJson = typeof req.body.gstr2b === 'string' ? JSON.parse(req.body.gstr2b) : req.body.gstr2b;
+        } else {
+          rawJson = req.body;
+        }
+      }
+    }
+
+    if (!rawJson || (typeof rawJson === 'object' && Object.keys(rawJson).length === 0)) {
+      return res.status(400).json({ error: 'No GSTR-2B data provided. Upload a JSON file or post JSON body.' });
+    }
+
+    // Retrieve local purchases from SQLite
+    const purchaseRows = db.select().from(purchases).all();
+    const localPurchases = purchaseRows.map((p) => {
+      let parsedData = {};
+      try {
+        parsedData = typeof p.data === 'string' ? JSON.parse(p.data) : (p.data || {});
+      } catch { /* ignore */ }
+      return {
+        id: p.id,
+        supplierName: p.supplierName || parsedData.supplierName || '',
+        supplierGstin: p.supplierGstin || parsedData.supplierGstin || '',
+        invoiceNumber: p.invoiceNumber || parsedData.invoiceNumber || '',
+        date: p.date || parsedData.date || '',
+        taxableAmount: p.taxableAmount || parsedData.taxableAmount || 0,
+        totalTax: p.totalTax || parsedData.totalTax || 0,
+        totalAmount: p.totalAmount || parsedData.totalAmount || 0,
+        paymentStatus: p.paymentStatus || parsedData.paymentStatus || 'Unpaid',
+        items: p.items || parsedData.items || [],
+        note: p.note || parsedData.note || '',
+      };
+    });
+
+    const reconciliation = reconcileGstr2b(rawJson, localPurchases);
+    res.json({
+      success: true,
+      ...reconciliation,
+    });
+  } catch (err) {
+    console.error('Reconciliation error:', err);
     errRes(res, 500, 'server-error', err);
   }
 });
@@ -1708,6 +2036,7 @@ async function processDueRecurring() {
         }).where(eq(recurring.id, tpl.id)).run();
       })();
 
+      broadcast('BILL_CREATED', bill);
       fired += 1;
     } catch (err) {
       logFatal(err, 'recurring');
@@ -1726,7 +2055,7 @@ async function processDueRecurring() {
 
 let activeServer = null;
 function startServer(port) {
-  const server = app.listen(port, '127.0.0.1', () => {
+  const server = httpServer.listen(port, '127.0.0.1', () => {
     activeServer = server;
     try { fs.writeFileSync(PORT_FILE, String(port), 'utf-8'); } catch { /* ignore */ }
     console.log(`\n  ArthSutra running at http://localhost:${port}`);
@@ -1749,6 +2078,7 @@ function startServer(port) {
 
 function gracefulShutdown(signal) {
   console.log(`\n  Received ${signal}, closing connections...`);
+  try { wss.close(); } catch { /* ignore */ }
   // Close SQLite cleanly
   try { sqlite.close(); } catch { /* ignore */ }
   if (!activeServer) { process.exit(0); return; }

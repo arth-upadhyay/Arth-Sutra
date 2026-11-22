@@ -1,3 +1,5 @@
+import { offlineFetch } from './utils/offlineSync.js';
+
 // File-based storage via local Express API server
 // All data persists as JSON files in the ./data/ folder
 
@@ -35,7 +37,7 @@ const REBRAND_MIGRATION_FLAG = 'arthsutra_rebrand_migrated_v1';
 })();
 
 async function apiFetch(url, options = {}) {
-  const res = await fetch(url, {
+  const res = await offlineFetch(url, {
     headers: { 'Content-Type': 'application/json' },
     ...options,
   });

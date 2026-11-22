@@ -194,6 +194,20 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   timestamp     TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS request_logs (
+  key       TEXT PRIMARY KEY,
+  response  TEXT NOT NULL,
+  timestamp TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS users (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  username      TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  role          TEXT NOT NULL DEFAULT 'CLERK',
+  created_at    TEXT NOT NULL
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_bills_invoice_date   ON bills(invoice_date);
 CREATE INDEX IF NOT EXISTS idx_bills_is_trashed     ON bills(is_trashed);
@@ -215,6 +229,7 @@ sqlite.exec(CREATE_TABLES_SQL);
 export {
   bills, clients, products, purchases, expenses,
   receipts, profiles, templates, recurring, meta, auditLogs,
+  requestLogs, users,
 } from './schema.js';
 
 // Export the raw sqlite connection for backup (file copy) operations
