@@ -32,3 +32,8 @@ dist/
 # OS
 Thumbs.db
 .DS_Store
+
+# Build output
+dist/
+release/
+dist_electron/
