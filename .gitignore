@@ -16,6 +16,8 @@ data/
 Thumbs.db
 # User data — never commit
 data/
+data_backup_*/
+*.sqlite*
 Saved Invoices/
 Trash/
 *.pdf

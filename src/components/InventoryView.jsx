@@ -6,7 +6,8 @@ import { toast } from './Toast';
 import { confirmAction } from './ConfirmModal';
 
 const emptyForm = {
-  name: '', hsn: '', purchasePrice: '', sellingPrice: '', taxPercent: '', unit: 'Nos', stock: '', description: '',
+  name: '', hsn: '', pkg: '', purchasePrice: '', sellingPrice: '', taxPercent: '',
+  unit: 'Nos', stock: '', description: '',
 };
 
 export default function InventoryView() {
@@ -36,7 +37,8 @@ export default function InventoryView() {
   const filtered = search.trim()
     ? products.filter(p =>
         (p.name || '').toLowerCase().includes(search.toLowerCase()) ||
-        (p.hsn || '').toLowerCase().includes(search.toLowerCase())
+        (p.hsn || '').toLowerCase().includes(search.toLowerCase()) ||
+        (p.pkg || '').toLowerCase().includes(search.toLowerCase())
       )
     : products;
 
@@ -50,8 +52,8 @@ export default function InventoryView() {
     setForm({
       name: product.name || '',
       hsn: product.hsn || '',
+      pkg: product.pkg || '',
       purchasePrice: product.purchasePrice ?? '',
-      // Legacy products only had `rate` — treat it as selling price.
       sellingPrice: product.sellingPrice ?? product.rate ?? '',
       taxPercent: product.taxPercent || '',
       unit: product.unit || 'Nos',
@@ -80,9 +82,10 @@ export default function InventoryView() {
         ...(editingId ? { id: editingId } : {}),
         name: form.name.trim(),
         hsn: form.hsn.trim(),
+        pkg: form.pkg.trim(),
         purchasePrice,
         sellingPrice,
-        rate: sellingPrice, // legacy mirror
+        rate: sellingPrice,
         taxPercent: form.taxPercent ? parseFloat(form.taxPercent) : 0,
         unit: form.unit,
         stock: form.stock ? parseFloat(form.stock) : 0,
@@ -157,9 +160,10 @@ export default function InventoryView() {
         await saveProduct({
           name,
           hsn: row.hsn || row['hsn code'] || row.sac || '',
+          pkg: row.pkg || row.packaging || '',
           purchasePrice,
           sellingPrice,
-          rate: sellingPrice, // legacy mirror
+          rate: sellingPrice,
           taxPercent,
           unit: row.unit || 'Nos',
           stock: num(row.stock || row.quantity),
@@ -193,17 +197,15 @@ export default function InventoryView() {
         </div>
       </div>
 
-      {/* Search */}
       <div className="glass-panel p-4 mb-6">
         <div className="search-box" style={{ maxWidth: '400px' }}>
           <Search size={16} className="search-icon" />
-          <input type="text" placeholder="Search by name or HSN..." value={search}
+          <input type="text" placeholder="Search by name, HSN or PKG..." value={search}
             onChange={e => setSearch(e.target.value)} className="search-input" />
           {search && <button className="icon-btn" onClick={() => setSearch('')} title="Clear search" aria-label="Clear search"><X size={14} /></button>}
         </div>
       </div>
 
-      {/* Add/Edit Modal */}
       {showForm && (
         <div className="modal-overlay" onClick={closeForm}>
           <div className="modal-content" onClick={e => e.stopPropagation()}>
@@ -212,12 +214,17 @@ export default function InventoryView() {
               <div className="form-group" style={{ gridColumn: 'span 2' }}>
                 <label className="form-label">Product / Service Name *</label>
                 <input type="text" className="form-input" value={form.name}
-                  onChange={e => updateField('name', e.target.value)} placeholder="e.g. Web Development" />
+                  onChange={e => updateField('name', e.target.value)} placeholder="e.g. NihaL 5ML Ribbon Pack" />
               </div>
               <div className="form-group">
                 <label className="form-label">HSN / SAC Code</label>
                 <input type="text" className="form-input" value={form.hsn}
-                  onChange={e => updateField('hsn', e.target.value)} placeholder="e.g. 998314" />
+                  onChange={e => updateField('hsn', e.target.value)} placeholder="e.g. 90183100" />
+              </div>
+              <div className="form-group">
+                <label className="form-label" title="Packaging descriptor — e.g. 25 TEST, 100 CAP, 10 VIAL. Shown as a column on the diagnostic invoice layout.">PKG</label>
+                <input type="text" className="form-input" value={form.pkg}
+                  onChange={e => updateField('pkg', e.target.value)} placeholder="e.g. 25 TEST" />
               </div>
               <div className="form-group">
                 <label className="form-label">Purchase Price</label>
@@ -269,7 +276,6 @@ export default function InventoryView() {
         </div>
       )}
 
-      {/* Product Table */}
       <div className="glass-panel">
         <div className="table-header"><h3>Products & Services</h3></div>
         {filtered.length === 0 ? (
@@ -287,6 +293,7 @@ export default function InventoryView() {
                 <tr>
                   <th>Name</th>
                   <th>HSN/SAC</th>
+                  <th>PKG</th>
                   <th>Rate</th>
                   <th>GST %</th>
                   <th>Unit</th>
@@ -299,6 +306,7 @@ export default function InventoryView() {
                   <tr key={product.id}>
                     <td className="font-medium" title={product.description || ''}>{product.name}</td>
                     <td className="text-muted">{product.hsn || '-'}</td>
+                    <td className="text-muted">{product.pkg || '-'}</td>
                     <td className="font-bold">{
                       (() => {
                         const r = product.sellingPrice ?? product.rate;

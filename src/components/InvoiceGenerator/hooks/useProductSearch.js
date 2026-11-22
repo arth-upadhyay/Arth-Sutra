@@ -6,36 +6,24 @@ import { toast } from '../components/../../Toast';
 // FEFO helpers — pure functions, no React
 // ============================================================================
 
-/**
- * Parse "MM/YY" or "MM/YYYY" into a comparable number (year*12 + month).
- * Unparseable → Infinity so they sort last (and don't block the queue).
- */
 function parseExpiry(exp) {
   if (!exp) return Infinity;
   const m = String(exp).trim().match(/^(\d{1,2})[\/\-](\d{2,4})$/);
   if (!m) return Infinity;
   const month = parseInt(m[1], 10);
   let year = parseInt(m[2], 10);
-  if (year < 100) year += 2000;   // "31" → 2031, "25" → 2025
+  if (year < 100) year += 2000;
   if (month < 1 || month > 12) return Infinity;
   return year * 12 + month;
 }
 
-/**
- * True if the batch expiry is strictly in a past month.
- * "09/26" is valid through end of Sept 2026 (today 2026-09 → not expired).
- */
 function isExpired(exp, now = new Date()) {
   const v = parseExpiry(exp);
-  if (!isFinite(v)) return false;  // can't parse → don't filter out
+  if (!isFinite(v)) return false;
   const nowVal = now.getFullYear() * 12 + (now.getMonth() + 1);
   return v < nowVal;
 }
 
-/**
- * Return FEFO-usable batches: qty > 0, has batchNo, not expired,
- * sorted earliest-expiry-first.
- */
 function usableBatches(product) {
   if (!Array.isArray(product?.batches)) return [];
   return product.batches
@@ -45,12 +33,6 @@ function usableBatches(product) {
     .sort((a, b) => parseExpiry(a.expiry) - parseExpiry(b.expiry));
 }
 
-/**
- * FEFO allocate `qty` units across batches.
- * Returns array of { batchNo, expiry, quantity } whose quantities sum to qty,
- * or null if total usable stock < qty.
- * qty <= 0 → returns [].
- */
 function allocateFefo(product, qty) {
   const need = Number(qty) || 0;
   if (need <= 0) return [];
@@ -74,9 +56,9 @@ function allocateFefo(product, qty) {
 // ============================================================================
 
 export function useProductSearch({
-  updateItem,                          // (itemId, field, value) — from useInvoiceForm
-  setItems,                            // NEW — raw setItems from useInvoiceForm (for row splits)
-  items = [],                          // NEW — current form items
+  updateItem,
+  setItems,
+  items = [],
   countryTaxRates = [0, 5, 12, 18, 28],
   editingBill = null,
   lowStockThreshold = 5,
@@ -84,14 +66,12 @@ export function useProductSearch({
   const [products, setProducts] = useState([]);
   const [productSearch, setProductSearch] = useState({ itemId: null, query: '' });
 
-  // ---- Baseline of already-deducted quantities -----------------------------------
   const previouslyDeductedItems = useRef(
     editingBill && !editingBill._isDuplicate && !editingBill._convertToType
       ? JSON.parse(JSON.stringify(editingBill.data?.items || []))
       : [],
   );
 
-  // Re-seed the baseline when a DIFFERENT bill is loaded into the form.
   const lastEditingBillId = useRef(null);
   useEffect(() => {
     const currentId = editingBill?.id || null;
@@ -104,7 +84,6 @@ export function useProductSearch({
     }
   }, [editingBill]);
 
-  // ---- Catalog ---------------------------------------------------------------------
   useEffect(() => {
     getAllProducts().then(setProducts).catch(() => {});
   }, []);
@@ -113,7 +92,6 @@ export function useProductSearch({
     return getAllProducts().then(setProducts).catch(() => {});
   }, []);
 
-  // ---- Autocomplete ------------------------------------------------------------------
   const onNameTyped = useCallback((itemId, value) => {
     updateItem?.(itemId, 'name', value);
     setProductSearch({ itemId, query: value });
@@ -131,15 +109,11 @@ export function useProductSearch({
       .slice(0, 5);
   }, [productSearch.itemId, productSearch.query, products]);
 
-  // ---- Fill a line from a picked product (FEFO batch + mrp/omrp + hsn/rate) ----------
   const selectProduct = useCallback((itemId, product) => {
     const salePrice = Number(product.sellingPrice ?? product.rate ?? 0);
-    // Product-level mrp if it's ever set; otherwise fall back to sale price.
-    // Once the user types a real MRP, syncStock learns it onto the product.
     const mrpValue = Number(product.mrp) > 0 ? Number(product.mrp) : salePrice;
     const omrpValue = Number(product.omrp) > 0 ? Number(product.omrp) : 0;
 
-    // FEFO: earliest-expiry batch with stock
     const fefo = usableBatches(product)[0] || null;
 
     updateItem?.(itemId, 'name', product.name);
@@ -150,6 +124,7 @@ export function useProductSearch({
     if (product.unit) updateItem?.(itemId, 'unit', product.unit);
     updateItem?.(itemId, 'mrp', mrpValue);
     updateItem?.(itemId, 'omrp', omrpValue);
+    updateItem?.(itemId, 'pkg', product.pkg || '');
     if (fefo) {
       updateItem?.(itemId, 'batch', fefo.batchNo);
       updateItem?.(itemId, 'expiry', fefo.expiry);
@@ -158,9 +133,6 @@ export function useProductSearch({
     setProductSearch({ itemId: null, query: '' });
   }, [updateItem, countryTaxRates]);
 
-  // ---- FEFO rebalance for one row (splits if needed) --------------------------------
-  // Called on qty blur. Uses the freshest `items` from props (hook re-runs on every
-  // render, so this closure is current). Splits rows via setItems (functional-safe).
   const rebalanceBatches = useCallback((itemId) => {
     if (!setItems) return;
 
@@ -169,7 +141,6 @@ export function useProductSearch({
     const item = items[idx];
     if (!item?.name) return;
 
-    // Resolve product: prefer stored productId, fall back to name match.
     let product = item.productId ? products.find(p => p.id === item.productId) : null;
     if (!product) {
       const lname = item.name.trim().toLowerCase();
@@ -188,7 +159,6 @@ export function useProductSearch({
       return;
     }
 
-    // Single batch — just sync batch/expiry fields, no split.
     if (alloc.length === 1) {
       const b = alloc[0];
       if (item.batch === b.batchNo && item.expiry === b.expiry) return;
@@ -197,9 +167,6 @@ export function useProductSearch({
       return;
     }
 
-    // Multi-batch: split. First allocation keeps the original row id; the rest
-    // become new rows inserted immediately after. All fields (name, hsn, rate,
-    // discount, tax%, unit, mrp) are copied; only batch/expiry/qty differ.
     const newRows = alloc.map((a, i) => ({
       ...item,
       id: i === 0 ? item.id : `split_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`,
@@ -216,7 +183,6 @@ export function useProductSearch({
     toast(`Split into ${alloc.length} batches (FEFO).`, 'info');
   }, [items, products, updateItem, setItems]);
 
-  // ---- Stock deduction ledger ---------------------------------------------------------
   const syncStock = useCallback(async (currentItems) => {
     try {
       const currentProducts = await getAllProducts();
@@ -241,7 +207,6 @@ export function useProductSearch({
         return byName.get(searchName);
       };
 
-      // 1. REVERT — add back the previous save state.
       for (const oldItem of previouslyDeductedItems.current) {
         const existing = resolveProduct(oldItem.name, oldItem.productId);
         if (!existing) continue;
@@ -260,7 +225,6 @@ export function useProductSearch({
         }
       }
 
-      // 2. APPLY — subtract the current screen state.
       for (const it of currentItems.filter(x => x.name)) {
         const qty = Number(it.quantity) || 0;
         const existing = resolveProduct(it.name, it.productId);
@@ -268,11 +232,9 @@ export function useProductSearch({
         const wProd = getWorkingProd(existing);
         if (!Array.isArray(wProd.batches)) wProd.batches = [];
 
-        // Auto-learn MRP / OMRP — these aren't part of the standard product schema,
-        // so the first non-zero value the user types on a line item becomes the
-        // product default and auto-fills next time selectProduct is called.
         if (Number(it.mrp) > 0) wProd.mrp = Number(it.mrp);
         if (Number(it.omrp) > 0) wProd.omrp = Number(it.omrp);
+        if (it.pkg && String(it.pkg).trim()) wProd.pkg = String(it.pkg).trim();
 
         wProd.stock = (Number(wProd.stock) || 0) - qty;
         if (wProd.stock <= lowStockThreshold) {
@@ -294,7 +256,6 @@ export function useProductSearch({
         }
       }
 
-      // 3. SAVE — prune empty batches, upsert touched products, lock the baseline.
       const upserts = [];
       for (const prod of modifiedProducts.values()) {
         if (Array.isArray(prod.batches)) {
@@ -324,21 +285,17 @@ export function useProductSearch({
   }, []);
 
   return {
-    // catalog
     products,
     refreshProducts,
-    // autocomplete
     productSearch,
     setProductSearch,
     onNameTyped,
     getSuggestions,
     selectProduct,
     clearSearch,
-    // stock ledger
     syncStock,
     resetBaseline,
     previouslyDeductedItems,
-    // FEFO
     rebalanceBatches,
     usableBatchesFor: usableBatches,
     allocateFefoFor: allocateFefo,

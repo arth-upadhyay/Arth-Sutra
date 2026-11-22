@@ -24,7 +24,7 @@ const BillOCR = lazy(() => import('./BillOCR'));
 
 const PAYMENT_STATUSES = ['Unpaid', 'Paid', 'Partial'];
 
-const emptyItem = { name: '', hsn: '', quantity: 1, rate: 0, taxPercent: 18, cessPercent: 0, batch: '', expiry: '', mrp: '' };
+const emptyItem = { name: '', hsn: '', pkg: '', quantity: 1, rate: 0, taxPercent: 18, cessPercent: 0, batch: '', expiry: '', mrp: '' };
 
 const emptyForm = {
   date: new Date().toISOString().split('T')[0],
@@ -132,6 +132,10 @@ async function syncProductsFromPurchase({ purchase, editingId, purchases, direct
 
       // Product-level MRP default — first/latest non-zero MRP wins.
       if (lineMrp !== null) wProd.mrp = lineMrp;
+
+      // Product-level PKG — only update if the purchase line provided one, so a
+      // syringe purchase with blank PKG never clobbers an existing value.
+      if (item.pkg) wProd.pkg = String(item.pkg).trim();
     };
 
     const revertLineFromProduct = (wProd, item) => {
@@ -197,6 +201,7 @@ async function syncProductsFromPurchase({ purchase, editingId, purchases, direct
             wProd = {
               name: item.name.trim(),
               hsn: item.hsn || '',
+              pkg: item.pkg || '',
               purchasePrice: item.rate,
               sellingPrice: Number(item.rate) * 1.30,
               rate: Number(item.rate) * 1.30,
@@ -265,6 +270,7 @@ export default function PurchaseBills() {
           return {
             name,
             hsn: it.hsn || '',
+            pkg: '',
             quantity,
             rate,
             taxPercent: Number(it.taxPercent) || 0,
@@ -284,7 +290,7 @@ export default function PurchaseBills() {
     }
     if (!items) {
       if (extracted.grandTotal > 0) {
-        items = [{ name: 'From OCR — split into real items', hsn: '', quantity: 1, rate: extracted.grandTotal, taxPercent: 0, cessPercent: 0, batch: '', expiry: '', mrp: '' }];
+        items = [{ name: 'From OCR — split into real items', hsn: '', pkg: '', quantity: 1, rate: extracted.grandTotal, taxPercent: 0, cessPercent: 0, batch: '', expiry: '', mrp: '' }];
       } else {
         items = [{ ...emptyItem }];
       }
@@ -354,7 +360,7 @@ export default function PurchaseBills() {
       supplierGstin: purchase.supplierGstin || '',
       invoiceNumber: purchase.invoiceNumber || '',
       items: purchase.items && purchase.items.length > 0
-        ? purchase.items.map(i => ({ ...i, batch: i.batch || '', expiry: i.expiry || '', mrp: i.mrp ?? '' }))
+        ? purchase.items.map(i => ({ ...i, pkg: i.pkg || '', batch: i.batch || '', expiry: i.expiry || '', mrp: i.mrp ?? '' }))
         : [{ ...emptyItem }],
       paymentStatus: purchase.paymentStatus || 'Unpaid',
       interstate: !!purchase.interstate,
@@ -472,6 +478,7 @@ export default function PurchaseBills() {
         items: form.items.map(i => ({
           name: (i.name || '').trim(),
           hsn: (i.hsn || '').trim(),
+          pkg: (i.pkg || '').trim(),
           quantity: parseFloat(i.quantity) || 0,
           rate: parseFloat(i.rate) || 0,
           taxPercent: parseFloat(i.taxPercent) || 0,
@@ -646,6 +653,7 @@ export default function PurchaseBills() {
                       <th>#</th>
                       <th>Description</th>
                       <th>HSN</th>
+                      <th>PKG</th>
                       <th>Batch</th>
                       <th>Exp</th>
                       <th style={{ textAlign: 'right' }}>Qty</th>
@@ -664,6 +672,7 @@ export default function PurchaseBills() {
                           <td style={{ color: 'var(--text-muted)' }}>{idx + 1}</td>
                           <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{it.name || '—'}</td>
                           <td style={{ color: 'var(--text-muted)' }}>{it.hsn || '—'}</td>
+                          <td style={{ color: 'var(--text-muted)' }}>{it.pkg || '—'}</td>
                           <td style={{ color: 'var(--text-muted)' }}>{it.batch || '—'}</td>
                           <td style={{ color: 'var(--text-muted)' }}>{it.expiry || '—'}</td>
                           <td style={{ textAlign: 'right' }}>{it.quantity || 0}</td>
@@ -797,6 +806,11 @@ export default function PurchaseBills() {
                   {idx === 0 && <label className="form-label">HSN</label>}
                   <input type="text" className="form-input" value={item.hsn}
                     onChange={e => updateItem(idx, 'hsn', e.target.value)} placeholder="HSN" />
+                </div>
+                <div className="form-group" style={{ flex: 0.9, margin: 0, minWidth: 80 }}>
+                  {idx === 0 && <label className="form-label" title="Packaging — e.g. 25 TEST">PKG</label>}
+                  <input type="text" className="form-input" value={item.pkg || ''}
+                    onChange={e => updateItem(idx, 'pkg', e.target.value)} placeholder="25 TEST" />
                 </div>
                 <div className="form-group" style={{ flex: 1, margin: 0, minWidth: 100 }}>
                   {idx === 0 && <label className="form-label">Batch No.</label>}

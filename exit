@@ -1,0 +1,21 @@
+* [33m254c1b0[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m v1.2.0 — sepia theme, FEFO auto-split, Gross Profit, remove dark mode + wizards
+[31m|[m * [33m5feb2f9[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m Remove multi-payment-account and command palette features
+[31m|[m[31m/[m  
+* [33mb0f6221[m refactor: remove dead comments and non-India logic from src
+* [33m8261966[m Update README with application purpose and pricing details
+* [33m54cdcf2[m Update README.md
+* [33mc7de2e7[m Update README.md
+* [33m30f095e[m Update README to remove known issues and clarify security
+* [33m74455ce[m Revise README with new sections and updates
+* [33m6cbc4bd[m Cleanup README by removing badges and TOC
+* [33m715eeeb[m Enhance README with project details and instructions
+* [33md8c64eb[m Clean up README.md for clarity and conciseness
+* [33m50a1283[m Update version number in README
+* [33mb074fb6[m Fix duplicate entry in README and update structure notes
+* [33mfc675ce[m Delete src/components/GSTReturns.jsx
+* [33m5250cce[m Update README.md
+* [33m73595a2[m[33m ([m[1;33mtag: [m[1;33mV1.1.0[m[33m)[m Fix
+* [33m9ce29c8[m Revise README for comprehensive project overview
+* [33m0d514f5[m refactor: split monolithic components into folders, rewrite README
+* [33mb5eb9d3[m Update README.md
+* [33m53be926[m Fix npm command in installation instructions

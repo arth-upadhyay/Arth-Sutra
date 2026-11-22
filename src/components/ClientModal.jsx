@@ -8,9 +8,10 @@ export default function ClientModal({ show, onClose, onSave, client, isEditing, 
   const emptyForm = {
     name: '', address: '', city: '', pin: '', state: '', gstin: '', email: '', phone: '',
     country: fallbackCountry, isSEZ: false,
-    preferredPaperSize: '',   
-    preferredCurrency: '',    
-    autoPrint: false,          
+    preferredPaperSize: '',
+    preferredCurrency: '',
+    preferredLayoutFormat: '',
+    autoPrint: false,
   };
   const [form, setForm] = useState({ ...emptyForm });
   const [taxIdWarning, setTaxIdWarning] = useState('');
@@ -24,6 +25,7 @@ export default function ClientModal({ show, onClose, onSave, client, isEditing, 
         isSEZ: !!client.isSEZ,
         preferredPaperSize: client.preferredPaperSize || '',
         preferredCurrency: client.preferredCurrency || '',
+        preferredLayoutFormat: client.preferredLayoutFormat || '',
         autoPrint: !!client.autoPrint,
       });
     } else if (show) {
@@ -126,12 +128,23 @@ export default function ClientModal({ show, onClose, onSave, client, isEditing, 
 
           <div className="form-group" style={{ gridColumn: 'span 2', paddingTop: '0.5rem', borderTop: '1px solid var(--border)', marginTop: '0.5rem' }}>
             <div style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.35rem' }}>
-              Print preferences (optional)
+              Invoice preferences (optional)
             </div>
             <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', margin: '0 0 0.5rem' }}>
               Auto-applied when you create a new invoice for this client. Leave blank to use app-wide defaults.
             </p>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.6rem' }}>
+              <div style={{ gridColumn: 'span 2' }}>
+                <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, marginBottom: 3 }}>Preferred invoice layout</label>
+                <select className="form-input" style={{ fontSize: '0.8rem', padding: '0.35rem' }}
+                  value={form.preferredLayoutFormat}
+                  onChange={e => setForm(prev => ({ ...prev, preferredLayoutFormat: e.target.value }))}>
+                  <option value="">Use app default (Pharma)</option>
+                  <option value="pharma">💊 Pharma — Batch, Expiry, OMRP</option>
+                  <option value="diagnostic">🧪 Diagnostic — PKG column</option>
+                  <option value="mixed">🔀 Both — syringes + kits on same invoice</option>
+                </select>
+              </div>
               <div>
                 <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, marginBottom: 3 }}>Preferred paper size</label>
                 <select className="form-input" style={{ fontSize: '0.8rem', padding: '0.35rem' }}

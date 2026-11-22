@@ -6,7 +6,6 @@ import { getNextInvoiceNumber, getTermsTemplates, getInvoiceDisplayOptions, save
 export const DRAFT_KEY = 'gst_invoiceDraft';
 export const OPTIONS_STORAGE_KEY = 'freegstbill_invoiceOptions';
 
-// Mirrors DEFAULT_OPTIONS in InvoiceGenerator.jsx — keep in sync.
 export const DEFAULT_OPTIONS = {
   showGST: true,
   showState: true,
@@ -50,6 +49,7 @@ export const DEFAULT_OPTIONS = {
   invoiceDiscountValue: 0,
   invoiceDiscountType: 'fixed',
   autoApplyClientCredit: false,
+  layoutFormat: 'pharma',
 };
 
 export const EMPTY_CLIENT = {
@@ -75,7 +75,7 @@ export const createEmptyDetails = () => ({
 export const createLineItem = (overrides = {}) => ({
   id: Date.now().toString(),
   name: '', hsn: '', quantity: 1, unit: 'Nos', rate: 0, discount: 0,
-  taxPercent: 18, cessPercent: 0, batch: '', expiry: '', omrp: 0, mrp: 0,
+  taxPercent: 18, cessPercent: 0, batch: '', expiry: '', omrp: 0, mrp: 0, pkg: '',
   ...overrides,
 });
 
@@ -91,11 +91,8 @@ export function clearDraft() {
 }
 
 export function useInvoiceForm({ editingBill = null, profile = null } = {}) {
-  // Draft is read once — a stored draft beats a stale editingBill on the first
-  // render (the persistence hook's hydrate effect skips one run for this).
   const [draft] = useState(() => loadDraft());
 
-  // ---- Core form state ------------------------------------------------------
   const [invoiceType, setInvoiceType] = useState(draft?.invoiceType || 'tax-invoice');
   const [client, setClient] = useState(draft?.client || { ...EMPTY_CLIENT });
   const [details, setDetails] = useState(draft?.details || createEmptyDetails());
@@ -113,23 +110,15 @@ export function useInvoiceForm({ editingBill = null, profile = null } = {}) {
       const saved = localStorage.getItem(OPTIONS_STORAGE_KEY);
       const persisted = saved ? JSON.parse(saved) : {};
       delete persisted.paymentAccountSnapshot;
-      // paperSize forced to 'a4' — storage value ignored
       return { ...DEFAULT_OPTIONS, ...persisted, ...(draft?.invoiceOptions || {}), paperSize: 'a4' };
     } catch { return { ...DEFAULT_OPTIONS, paperSize: 'a4' }; }
   });
 
-  // ---- Refs shared with the persistence hook --------------------------------
   const draftInitialized = useRef(!!draft);
   const isDirty = useRef(false);
   const hasInitialized = useRef(false);
-  // True once the displayed invoice number has been atomically reserved on the
-  // server. Starts true for edits (the number already exists). Flipped false
-  // whenever a new number is only *peeked* (type change / duplicate / new bill).
   const numberReserved = useRef(!!editingBill);
 
-  // ---- Derived: GST visibility + country tax rates ---------------------------
-  // Bill of Supply / Composition / Delivery Challan carry no tax — forcing
-  // showGST=false keeps the totals engine from computing line tax at all.
   const showGST = !(invoiceType === 'bill-of-supply' || invoiceType === 'composition');
 
   const sellerCountryConfig = getCountryConfig(profile?.country);
@@ -155,7 +144,6 @@ export function useInvoiceForm({ editingBill = null, profile = null } = {}) {
     return n;
   }, []);
 
-  // ---- Draft auto-save (sessionStorage, 400ms debounce) ----------------------
   useEffect(() => {
     const t = setTimeout(() => {
       const draftData = {
@@ -168,14 +156,11 @@ export function useInvoiceForm({ editingBill = null, profile = null } = {}) {
   }, [invoiceType, client, details, items, customTerms, customNotes,
       internalNote, extraSections, selectedTermsId, invoiceOptions, taxInclusive]);
 
-  // Init gate: server mirroring + DB auto-save stay quiet for the first 1.5s
-  // so mount-time hydration doesn't trigger writes.
   useEffect(() => {
     const t = setTimeout(() => { hasInitialized.current = true; }, 1500);
     return () => clearTimeout(t);
   }, []);
 
-  // ---- invoiceOptions persistence (localStorage now, server in 800ms) --------
   const optionsPersistTimer = useRef(null);
   useEffect(() => {
     const { paymentAccountSnapshot: _snap, ...persistable } = invoiceOptions;
@@ -189,12 +174,11 @@ export function useInvoiceForm({ editingBill = null, profile = null } = {}) {
     return () => clearTimeout(optionsPersistTimer.current);
   }, [invoiceOptions]);
 
-  // Server-side display options win over localStorage when they differ.
   useEffect(() => {
     getInvoiceDisplayOptions().then(serverOpts => {
       if (!serverOpts) return;
       delete serverOpts.paymentAccountSnapshot;
-      serverOpts.paperSize = 'a4'; // ← ADD THIS LINE — force A4
+      serverOpts.paperSize = 'a4';
       const merged = { ...DEFAULT_OPTIONS, ...serverOpts };
       setInvoiceOptions(prev => {
         const changed = Object.keys(merged).some(k => merged[k] !== prev[k]);
@@ -207,7 +191,6 @@ export function useInvoiceForm({ editingBill = null, profile = null } = {}) {
     }).catch(() => {});
   }, []);
 
-  // Terms templates — default to the first template for a fresh form.
   useEffect(() => {
     getTermsTemplates().then(templates => {
       setTermsTemplates(templates);
@@ -219,7 +202,6 @@ export function useInvoiceForm({ editingBill = null, profile = null } = {}) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ---- Item operations --------------------------------------------------------
   const updateItem = useCallback((id, field, value) => {
     setItems(prev => prev.map(item => (item.id === id ? { ...item, [field]: value } : item)));
   }, []);
@@ -232,7 +214,6 @@ export function useInvoiceForm({ editingBill = null, profile = null } = {}) {
     setItems(prev => [...prev, createLineItem({
       id: newId,
       unit: defaultUnit,
-      // Second-highest configured rate is the app's "usual" GST slab (18% for India).
       taxPercent: showGST ? (countryTaxRates[countryTaxRates.length - 2] ?? 18) : 0,
     })]);
     if (focus) {
@@ -247,14 +228,12 @@ export function useInvoiceForm({ editingBill = null, profile = null } = {}) {
     setItems(prev => (prev.length > 1 ? prev.filter(item => item.id !== id) : prev));
   }, []);
 
-  // Ctrl+Shift+D in the monolith — clone the last row.
   const duplicateLastItem = useCallback(() => {
     setItems(prev => (prev.length === 0
       ? prev
       : [...prev, { ...prev[prev.length - 1], id: Date.now().toString() }]));
   }, []);
 
-  // ---- Options / terms helpers -------------------------------------------------
   const toggleOption = useCallback((key) => {
     setInvoiceOptions(prev => ({ ...prev, [key]: !prev[key] }));
   }, []);
@@ -269,9 +248,6 @@ export function useInvoiceForm({ editingBill = null, profile = null } = {}) {
     if (tpl) setCustomTerms(tpl.content);
   }, [termsTemplates]);
 
-  // ---- Invoice type switch ------------------------------------------------------
-  // Peeks the next number for the new type's prefix and applies the type's
-  // GST visibility defaults. Peek = no counter burn; reservation happens on save.
   const handleTypeChange = useCallback(async (type) => {
     setInvoiceType(type);
     const config = INVOICE_TYPES[type];
@@ -290,21 +266,12 @@ export function useInvoiceForm({ editingBill = null, profile = null } = {}) {
     }
   }, []);
 
-  // ---- Validation ----------------------------------------------------------------
-  // A bill is "meaningful" once it has a client and at least one priced line —
-  // this gates auto-save, the leave-guard and Ctrl+S in the original component.
   const isMeaningfulInvoice = useCallback(() => {
     if (editingBill) return true;
     if (!client?.name?.trim()) return false;
     return items.some(item => (item.name || '').trim() && (item.quantity || 0) * (item.rate || 0) > 0);
   }, [client?.name, items, editingBill]);
 
-  /**
-   * Full pre-save validation. Returns { valid, errors, warnings }.
-   * Errors block saving; warnings are shown but non-blocking (mirrors the
-   * monolith's toast-based soft validation). Pass the totals object from
-   * useInvoiceTotals to include its compliance warnings / needsProfileFix.
-   */
   const validate = useCallback(({ totals } = {}) => {
     const errors = [];
     const warnings = [];
@@ -324,13 +291,11 @@ export function useInvoiceForm({ editingBill = null, profile = null } = {}) {
       errors.push({ field: 'details.invoiceDate', message: 'Invoice date is required' });
     }
 
-    // Soft tax-ID format check (never blocks, same as utils.validateTaxId contract)
     const taxIdCheck = validateTaxId(client?.country || profile?.country, client?.gstin);
     if (!taxIdCheck.ok) {
       warnings.push({ field: 'client.gstin', message: taxIdCheck.message });
     }
 
-    // Compliance signals from the totals engine (missing business state etc.)
     if (totals?.needsProfileFix) {
       errors.push({
         field: 'profile.state',
@@ -359,7 +324,6 @@ export function useInvoiceForm({ editingBill = null, profile = null } = {}) {
   }, []);
 
   return {
-    // state
     invoiceType, setInvoiceType,
     client, setClient,
     details, setDetails,
@@ -372,17 +336,12 @@ export function useInvoiceForm({ editingBill = null, profile = null } = {}) {
     internalNote, setInternalNote,
     extraSections, setExtraSections,
     termsTemplates,
-    // derived
     showGST, countryTaxRates, taxLabel, typeConfig: INVOICE_TYPES[invoiceType] || INVOICE_TYPES['tax-invoice'],
-    // refs (shared with useInvoicePersistence)
     draftInitialized, isDirty, hasInitialized, numberReserved,
-    // actions
     updateItem, addItem, removeItem, duplicateLastItem,
     toggleOption, setOption, handleTermsSelect, handleTypeChange,
     clampNonNeg,
-    // validation
     isMeaningfulInvoice, validate,
-    // draft
     clearDraft, resetForm,
   };
 }

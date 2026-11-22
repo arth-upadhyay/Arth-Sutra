@@ -95,18 +95,6 @@ function RichEditor({ value, onChange, placeholder, toolbar = false }) {
   );
 }
 
-const ACCENT_PRESETS = [
-  { color: '#1e40af', label: 'Blue' }, { color: '#7c3aed', label: 'Purple' }, { color: '#0f766e', label: 'Teal' },
-  { color: '#be123c', label: 'Red' }, { color: '#c2410c', label: 'Orange' }, { color: '#15803d', label: 'Green' },
-  { color: '#0369a1', label: 'Sky' }, { color: '#1e293b', label: 'Dark' },
-];
-
-const PDF_STYLES = [
-  { id: 'classic', label: 'Classic', desc: 'Clean with top accent bar' },
-  { id: 'modern', label: 'Modern', desc: 'Bold header with color block' },
-  { id: 'minimal', label: 'Minimal', desc: 'Simple, borderless layout' },
-];
-
 // ---------------------------------------------------------------------------
 // SuggestingInput — plain .li-* classes (no Tailwind dependency)
 // ---------------------------------------------------------------------------
@@ -170,7 +158,7 @@ const LineItem = memo(function LineItem({
   item, invoiceOptions, taxInclusive, showGST, taxLabel, units, countryTaxRates, filterUnitsByMode, invoiceMode,
   currency, profileCountry, suggestions, onFieldChange, onSelectProduct, onSetProductSearch,
   onAddCustomUnit, onRemoveCustomUnit, onRemove, clampNonNeg, isLastRow, onAddRow,
-  onRebalanceBatch,
+  onRebalanceBatch, showPkgField,
 }) {
   const handleRowKeyDown = (e) => {
     if (e.key !== 'Enter' || e.shiftKey || !isLastRow) return;
@@ -213,6 +201,20 @@ const LineItem = memo(function LineItem({
         <input type="number" min="0" step="any" className="li-input" value={item.mrp ?? 0} onChange={(e) => onFieldChange(item.id, 'mrp', clampNonNeg(e.target.value))} />
       </div>
 
+      {/* PKG — only shown for Diagnostic and Mixed layouts */}
+      {showPkgField && (
+        <div className="li-field li-field--md">
+          <label className="li-label" title="Packaging — e.g. 25 TEST, 100 CAP">PKG</label>
+          <input
+            type="text"
+            className="li-input"
+            value={item.pkg || ''}
+            onChange={(e) => onFieldChange(item.id, 'pkg', e.target.value)}
+            placeholder="25 TEST"
+          />
+        </div>
+      )}
+
       {/* HSN/SAC */}
       {invoiceOptions.showHSN && (
         <div className="li-field li-field--lg" style={{ position: 'relative' }}>
@@ -241,7 +243,6 @@ const LineItem = memo(function LineItem({
           })()}
         </div>
       )}
-
       {/* Qty */}
       <div className="li-field li-field--xs">
         <label className="li-label">Qty</label>
@@ -405,6 +406,7 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
       ...prev,
       paperSize: cli.preferredPaperSize || prev.paperSize || 'a4',
       currency: cli.preferredCurrency || prev.currency || 'INR',
+      layoutFormat: cli.preferredLayoutFormat || prev.layoutFormat || 'pharma',
       clientAutoPrint: !!cli.autoPrint,
     })),
   });
@@ -762,7 +764,7 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
     const preset = TERMS_PRESETS?.[presetKey];
     if (!preset) return;
     const html = Array.isArray(preset)
-      ? `<ol>${preset.map(line => `<li>${line}</li>`).join('')}</ol>`
+      ? `<ol>${preset.map(line => `<li>\${line}</li>`).join('')}</ol>`
       : (typeof preset === 'string' ? preset : (preset.content || ''));
     form.setCustomTerms(html);
     form.setSelectedTermsId('');
@@ -861,6 +863,24 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
                   type="button"
                   className={`type-chip ${form.invoiceOptions.invoiceMode === val ? 'type-chip-active' : ''}`}
                   onClick={() => form.setOption('invoiceMode', val)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div style={{ marginTop: '0.6rem', display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginRight: 4 }}>Layout</span>
+              {[
+                ['pharma', '💊 Pharma', 'Batch · Expiry · OMRP columns — for syringes and medical devices'],
+                ['diagnostic', '🧪 Diagnostic', 'PKG column, no batch — for diagnostic kits and lab reagents'],
+                ['mixed', '🔀 Both', 'Shows both column sets — use when a bill has syringes AND kits'],
+              ].map(([val, label, tip]) => (
+                <button
+                  key={val}
+                  type="button"
+                  title={tip}
+                  className={`type-chip ${(form.invoiceOptions.layoutFormat || 'pharma') === val ? 'type-chip-active' : ''}`}
+                  onClick={() => form.setOption('layoutFormat', val)}
                 >
                   {label}
                 </button>
@@ -1057,7 +1077,7 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
               </label>
             </div>
             {form.items.map((item, idx) => (
-              <LineItem key={item.id} item={item} invoiceOptions={form.invoiceOptions} taxInclusive={form.taxInclusive} showGST={form.showGST} taxLabel={form.taxLabel} units={units} countryTaxRates={form.countryTaxRates} filterUnitsByMode={filterUnitsByMode} invoiceMode={form.invoiceOptions.invoiceMode} currency={form.invoiceOptions.currency} profileCountry={profile?.country} suggestions={products.getSuggestions(item.id)} onFieldChange={handleItemChange} onSelectProduct={products.selectProduct} onSetProductSearch={products.setProductSearch} onRebalanceBatch={products.rebalanceBatches} onAddCustomUnit={handleAddCustomUnit} onRemoveCustomUnit={handleRemoveCustomUnit} onRemove={form.removeItem} clampNonNeg={form.clampNonNeg} isLastRow={idx === form.items.length - 1} onAddRow={form.addItem} />
+              <LineItem key={item.id} item={item} invoiceOptions={form.invoiceOptions} taxInclusive={form.taxInclusive} showGST={form.showGST} taxLabel={form.taxLabel} units={units} countryTaxRates={form.countryTaxRates} filterUnitsByMode={filterUnitsByMode} invoiceMode={form.invoiceOptions.invoiceMode} currency={form.invoiceOptions.currency} profileCountry={profile?.country} suggestions={products.getSuggestions(item.id)} onFieldChange={handleItemChange} onSelectProduct={products.selectProduct} onSetProductSearch={products.setProductSearch} onRebalanceBatch={products.rebalanceBatches} showPkgField={(form.invoiceOptions.layoutFormat || 'pharma') !== 'pharma'} onAddCustomUnit={handleAddCustomUnit} onRemoveCustomUnit={handleRemoveCustomUnit} onRemove={form.removeItem} clampNonNeg={form.clampNonNeg} isLastRow={idx === form.items.length - 1} onAddRow={form.addItem} />
             ))}
             <button className="btn btn-secondary mt-2" onClick={form.addItem}><Plus size={18} /> Add Item</button>
 

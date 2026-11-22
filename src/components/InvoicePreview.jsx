@@ -53,6 +53,8 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
   const showPoNumber     = opt('showPoNumber', true);
   const showPharmaFields = opt('showPharmaFields', true);
 
+  const layoutFormat = options.layoutFormat || 'pharma';
+
   const amountInWords = (num) => numberToWords(num);
 
   const [qrDataUrl, setQrDataUrl] = useState('');
@@ -76,9 +78,10 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
     ...(isThermal ? { fontFamily: '"Courier New", monospace', fontSize: paperCfg.widthMm >= 80 ? '10.5px' : '9px' } : {}),
   };
 
-  const standardSlabs = [0, 0.1, 0.25, 3, 5, 12, 18, 28];
-  const customSlabs = items.map(i => Number(i.taxPercent) || 0).filter(s => s > 0 && !standardSlabs.includes(s));
-  const gstSlabs = [...new Set([...standardSlabs, ...customSlabs])].sort((a, b) => a - b);
+  // Only render slabs that actually appear on this invoice.
+  const gstSlabs = [...new Set(items.map(i => Number(i.taxPercent) || 0))]
+    .filter(s => Number.isFinite(s) && s >= 0)
+    .sort((a, b) => a - b);
   const taxInclusive = !!totals?.taxInclusive;
 
   const slabData = gstSlabs.map(slab => {
@@ -104,16 +107,7 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
     return { slab: slab.toFixed(2), total, disc, sgst, cgst, utgst, igst, cess, totalGst: sgst + cgst + utgst + igst + cess };
   });
 
-  let zeroTaxTotal = 0;
-  items.forEach(item => {
-    if ((Number(item.taxPercent) || 0) === 0) {
-      const lineAmount = (Number(item.quantity) || 0) * (Number(item.rate) || 0);
-      const actualDiscount = resolveLineDiscount(item);
-      zeroTaxTotal += Math.max(0, lineAmount - actualDiscount);
-    }
-  });
-
-  const sumTotal = slabData.reduce((acc, d) => acc + d.total, 0) + zeroTaxTotal;
+  const sumTotal = slabData.reduce((acc, d) => acc + d.total, 0);
   const sumDisc = slabData.reduce((acc, d) => acc + d.disc, 0);
   const sumSgst = slabData.reduce((acc, d) => acc + d.sgst, 0);
   const sumCgst = slabData.reduce((acc, d) => acc + d.cgst, 0);
@@ -146,7 +140,58 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
   );
   const safeNotesHtml = customNotes ? safeHtml(customNotes) : '';
 
-  const itemColCount = showPharmaFields ? 13 : 8;
+  const itemColCount = (() => {
+    let n = 1;
+    if (layoutFormat === 'pharma') {
+      n += 1;
+      if (showPharmaFields) n += 1;
+      n += 1;
+      if (showPharmaFields) n += 1;
+      if (showPharmaFields) n += 1;
+      if (showHSN) n += 1;
+      if (showPharmaFields) n += 1;
+      n += 1;
+      n += 1;
+      if (showGST && !isInterstate) n += 2;
+      if (showGST && isInterstate) n += 1;
+      n += 1;
+    } else if (layoutFormat === 'diagnostic') {
+      n += 1;
+      n += 1;
+      n += 1;
+      if (showHSN) n += 1;
+      n += 1;
+      n += 1;
+      n += 1;
+      if (showGST && !isInterstate) n += 2;
+      if (showGST && isInterstate) n += 1;
+      n += 1;
+    } else {
+      n += 1;
+      n += 1;
+      n += 1;
+      n += 1;
+      n += 1;
+      if (showHSN) n += 1;
+      n += 1;
+      n += 1;
+      n += 1;
+      if (showGST && !isInterstate) n += 2;
+      if (showGST && isInterstate) n += 1;
+      n += 1;
+    }
+    return n;
+  })();
+
+  const lineMetrics = (item) => {
+    const lineAmount = (Number(item.quantity) || 0) * (Number(item.rate) || 0);
+    const discount = resolveLineDiscount(item);
+    const grossAfterDiscount = Math.max(0, lineAmount - discount);
+    const taxRate = Number(item.taxPercent) || 0;
+    const taxableValue = taxInclusive && taxRate > 0 ? grossAfterDiscount / (1 + taxRate / 100) : grossAfterDiscount;
+    const halfRate = taxRate / 2;
+    return { lineAmount, discount, grossAfterDiscount, taxRate, taxableValue, halfRate };
+  };
 
   return (
     <div
@@ -165,7 +210,7 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
       }}
     >
       <style>{`
-        .arthsutra-wrapper { border: 1.5px solid #000; padding: 0px; box-sizing: border-box; }
+        .arthsutra-wrapper { border: 2px solid #000; padding: 0px; box-sizing: border-box; }
         .arthsutra-table { width: 100%; border-collapse: collapse; margin-bottom: -1px; }
         .arthsutra-table th, .arthsutra-table td { border: 1px solid #000; padding: 3px 5px; text-align: left; vertical-align: top; }
         .arthsutra-table th { font-weight: bold; text-align: center; }
@@ -251,20 +296,58 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
         <table className="arthsutra-table">
           <thead>
             <tr>
-              <th style={{ width: '3%' }}>Sn.</th>
-              <th style={{ width: '5%' }}>Qty.</th>
-              {showPharmaFields && <th style={{ width: '6%' }}>OMRP</th>}
-              <th style={{ width: showPharmaFields ? '25%' : 'auto' }}>Product</th>
-              {showPharmaFields && <th style={{ width: '10%' }}>Batch</th>}
-              {showPharmaFields && <th style={{ width: '5%' }}>Exp.</th>}
-              {showHSN && <th style={{ width: '8%' }}>HSN</th>}
-              {showPharmaFields && <th style={{ width: '7%' }}>MRP</th>}
-              <th style={{ width: '7%' }}>Rate</th>
-              <th style={{ width: '4%' }}>Dis</th>
-              {showGST && !isInterstate && <th style={{ width: '5%' }}>SGST%</th>}
-              {showGST && !isInterstate && <th style={{ width: '5%' }}>CGST%</th>}
-              {showGST && isInterstate && <th style={{ width: '5%' }}>IGST%</th>}
-              <th style={{ width: '10%' }}>Amount</th>
+              {layoutFormat === 'pharma' && (
+                <>
+                  <th style={{ width: '3%' }}>Sn.</th>
+                  <th style={{ width: '5%' }}>Qty.</th>
+                  {showPharmaFields && <th style={{ width: '6%' }}>OMRP</th>}
+                  <th style={{ width: showPharmaFields ? '25%' : 'auto' }}>Product</th>
+                  {showPharmaFields && <th style={{ width: '10%' }}>Batch</th>}
+                  {showPharmaFields && <th style={{ width: '5%' }}>Exp.</th>}
+                  {showHSN && <th style={{ width: '8%' }}>HSN</th>}
+                  {showPharmaFields && <th style={{ width: '7%' }}>MRP</th>}
+                  <th style={{ width: '7%' }}>Rate</th>
+                  <th style={{ width: '4%' }}>Dis</th>
+                  {showGST && !isInterstate && <th style={{ width: '5%' }}>SGST%</th>}
+                  {showGST && !isInterstate && <th style={{ width: '5%' }}>CGST%</th>}
+                  {showGST && isInterstate && <th style={{ width: '5%' }}>IGST%</th>}
+                  <th style={{ width: '10%' }}>Amount</th>
+                </>
+              )}
+              {layoutFormat === 'diagnostic' && (
+                <>
+                  <th style={{ width: '3%' }}>Sn.</th>
+                  <th style={{ width: '28%' }}>Product</th>
+                  <th style={{ width: '8%' }}>PKG</th>
+                  <th style={{ width: '5%' }}>Qty.</th>
+                  {showHSN && <th style={{ width: '10%' }}>HSN</th>}
+                  <th style={{ width: '8%' }}>MRP</th>
+                  <th style={{ width: '8%' }}>Rate</th>
+                  <th style={{ width: '5%' }}>Dis</th>
+                  {showGST && !isInterstate && <th style={{ width: '5%' }}>SGST%</th>}
+                  {showGST && !isInterstate && <th style={{ width: '5%' }}>CGST%</th>}
+                  {showGST && isInterstate && <th style={{ width: '6%' }}>IGST%</th>}
+                  <th style={{ width: '12%' }}>Amount</th>
+                </>
+              )}
+              {layoutFormat === 'mixed' && (
+                <>
+                  <th style={{ width: '3%' }}>Sn.</th>
+                  <th style={{ width: '20%' }}>Product</th>
+                  <th style={{ width: '7%' }}>PKG</th>
+                  {showPharmaFields && <th style={{ width: '9%' }}>Batch</th>}
+                  {showPharmaFields && <th style={{ width: '5%' }}>Exp.</th>}
+                  <th style={{ width: '4%' }}>Qty.</th>
+                  {showHSN && <th style={{ width: '8%' }}>HSN</th>}
+                  <th style={{ width: '6%' }}>MRP</th>
+                  <th style={{ width: '6%' }}>Rate</th>
+                  <th style={{ width: '4%' }}>Dis</th>
+                  {showGST && !isInterstate && <th style={{ width: '5%' }}>SGST%</th>}
+                  {showGST && !isInterstate && <th style={{ width: '5%' }}>CGST%</th>}
+                  {showGST && isInterstate && <th style={{ width: '6%' }}>IGST%</th>}
+                  <th style={{ width: '9%' }}>Amount</th>
+                </>
+              )}
             </tr>
           </thead>
           <tbody>
@@ -273,33 +356,75 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
                 <td colSpan={itemColCount} className="text-center" style={{ padding: '10px', color: '#666' }}>No items</td>
               </tr>
             )}
+
             {items.map((item, index) => {
-              const lineAmount = (Number(item.quantity) || 0) * (Number(item.rate) || 0);
-              const discount = resolveLineDiscount(item);
-              const grossAfterDiscount = Math.max(0, lineAmount - discount);
-              const taxRate = Number(item.taxPercent) || 0;
-              const taxableValue = taxInclusive && taxRate > 0 ? grossAfterDiscount / (1 + taxRate / 100) : grossAfterDiscount;
-              const halfRate = taxRate / 2;
+              const m = lineMetrics(item);
+
+              if (layoutFormat === 'pharma') {
+                return (
+                  <tr key={item.id || index}>
+                    <td className="text-center">{index + 1}.</td>
+                    <td className="text-center">{item.quantity}</td>
+                    {showPharmaFields && <td className="text-right">{item.omrp ? Number(item.omrp).toFixed(2) : '0.00'}</td>}
+                    <td>
+                      {item.name}
+                      {item.description && <div style={{ fontSize: '9px', color: '#555' }}>{item.description}</div>}
+                    </td>
+                    {showPharmaFields && <td>{item.batch || 'N/A'}</td>}
+                    {showPharmaFields && <td className="text-center">{item.expiry || ''}</td>}
+                    {showHSN && <td>{item.hsn}</td>}
+                    {showPharmaFields && <td className="text-right">{Number(item.mrp || 0).toFixed(2)}</td>}
+                    <td className="text-right">{Number(item.rate || 0).toFixed(2)}</td>
+                    <td className="text-right">{m.discount > 0 ? m.discount.toFixed(2) : '0.00'}</td>
+                    {showGST && !isInterstate && <td className="text-right">{m.halfRate > 0 ? m.halfRate.toFixed(2) : '0.00'}</td>}
+                    {showGST && !isInterstate && <td className="text-right">{m.halfRate > 0 ? m.halfRate.toFixed(2) : '0.00'}</td>}
+                    {showGST && isInterstate && <td className="text-right">{m.taxRate > 0 ? m.taxRate.toFixed(2) : '0.00'}</td>}
+                    <td className="text-right">{m.taxableValue.toFixed(2)}</td>
+                  </tr>
+                );
+              }
+
+              if (layoutFormat === 'diagnostic') {
+                return (
+                  <tr key={item.id || index}>
+                    <td className="text-center">{index + 1}.</td>
+                    <td>
+                      {item.name}
+                      {item.description && <div style={{ fontSize: '9px', color: '#555' }}>{item.description}</div>}
+                    </td>
+                    <td className="text-center">{item.pkg || ''}</td>
+                    <td className="text-center">{item.quantity}</td>
+                    {showHSN && <td>{item.hsn}</td>}
+                    <td className="text-right">{Number(item.mrp || 0).toFixed(2)}</td>
+                    <td className="text-right">{Number(item.rate || 0).toFixed(2)}</td>
+                    <td className="text-right">{m.discount > 0 ? m.discount.toFixed(2) : '0.00'}</td>
+                    {showGST && !isInterstate && <td className="text-right">{m.halfRate > 0 ? m.halfRate.toFixed(2) : '0.00'}</td>}
+                    {showGST && !isInterstate && <td className="text-right">{m.halfRate > 0 ? m.halfRate.toFixed(2) : '0.00'}</td>}
+                    {showGST && isInterstate && <td className="text-right">{m.taxRate > 0 ? m.taxRate.toFixed(2) : '0.00'}</td>}
+                    <td className="text-right">{m.taxableValue.toFixed(2)}</td>
+                  </tr>
+                );
+              }
 
               return (
                 <tr key={item.id || index}>
                   <td className="text-center">{index + 1}.</td>
-                  <td className="text-center">{item.quantity}</td>
-                  {showPharmaFields && <td className="text-right">{item.omrp ? Number(item.omrp).toFixed(2) : '0.00'}</td>}
                   <td>
                     {item.name}
                     {item.description && <div style={{ fontSize: '9px', color: '#555' }}>{item.description}</div>}
                   </td>
-                  {showPharmaFields && <td>{item.batch || 'N/A'}</td>}
+                  <td className="text-center">{item.pkg || ''}</td>
+                  {showPharmaFields && <td>{item.batch || ''}</td>}
                   {showPharmaFields && <td className="text-center">{item.expiry || ''}</td>}
+                  <td className="text-center">{item.quantity}</td>
                   {showHSN && <td>{item.hsn}</td>}
-                  {showPharmaFields && <td className="text-right">{Number(item.mrp || 0).toFixed(2)}</td>}
+                  <td className="text-right">{Number(item.mrp || 0).toFixed(2)}</td>
                   <td className="text-right">{Number(item.rate || 0).toFixed(2)}</td>
-                  <td className="text-right">{discount > 0 ? discount.toFixed(2) : '0.00'}</td>
-                  {showGST && !isInterstate && <td className="text-right">{halfRate > 0 ? halfRate.toFixed(2) : '0.00'}</td>}
-                  {showGST && !isInterstate && <td className="text-right">{halfRate > 0 ? halfRate.toFixed(2) : '0.00'}</td>}
-                  {showGST && isInterstate && <td className="text-right">{taxRate > 0 ? taxRate.toFixed(2) : '0.00'}</td>}
-                  <td className="text-right">{taxableValue.toFixed(2)}</td>
+                  <td className="text-right">{m.discount > 0 ? m.discount.toFixed(2) : '0.00'}</td>
+                  {showGST && !isInterstate && <td className="text-right">{m.halfRate > 0 ? m.halfRate.toFixed(2) : '0.00'}</td>}
+                  {showGST && !isInterstate && <td className="text-right">{m.halfRate > 0 ? m.halfRate.toFixed(2) : '0.00'}</td>}
+                  {showGST && isInterstate && <td className="text-right">{m.taxRate > 0 ? m.taxRate.toFixed(2) : '0.00'}</td>}
+                  <td className="text-right">{m.taxableValue.toFixed(2)}</td>
                 </tr>
               );
             })}

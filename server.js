@@ -1,35 +1,24 @@
 import express from 'express';
-// v1.10.0 — `cors` package no longer imported. The CORS-lockdown
-// middleware below is intentionally custom + strict (localhost only)
-// where `cors()` echoed `*` for every origin.
+import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-// v1.10.31 — Data-F3.1: share computeInvoiceTotals with the client so
-// server-generated recurring invoices honour UTGST, cess, RCM, TDS/TCS,
-// discount modes (percent / unit / with-tax), tax-inclusive back-calc,
-// invoice-level discount, and round-off. Previously the recurring auto-fire
-// re-implemented totals inline and silently reintroduced every bug the
-// v1.10.1 extraction fixed. Same source of truth now.
+import { eq, ne, sql, desc, asc } from 'drizzle-orm';
 import { computeInvoiceTotals } from './src/utils.js';
 
+// ── Database (Drizzle + better-sqlite3) ────────────────────────────────────
+import {
+  db, sqlite, DB_PATH, DATA_DIR,
+  bills, clients, products, purchases, expenses,
+  receipts, profiles, templates, recurring, meta,
+} from './db/index.js';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, 'data');
 
-// Port choice — we deliberately default to a high, unusual number rather than
-// the conventional 3001. The 3000-range is heavily used by every other Node /
-// Vite / React / Express app, dev servers, Grafana, etc., which means every
-// other install would land on 3002 / 3003 / etc. and the user would be left
-// guessing which URL is "theirs". 47371 is in IANA's unassigned range
-// (between registered 1024-49151 and dynamic 49152-65535) and isn't claimed
-// by any common software we could find. The persisted `data/port.txt` always
-// wins over this default — so a single user who genuinely needs 47371 for
-// something else can edit that file and we'll respect it forever.
+// Port choice — see original comments. 47371 is in IANA's unassigned range.
 const DEFAULT_PORT = 47371;
-const PORT_FILE = path.join(__dirname, 'data', 'port.txt');
+const PORT_FILE = path.join(DATA_DIR, 'port.txt');
 
-// Read the persisted port (if any) — written once on first successful start
-// and every time we get bumped off our preferred port by EADDRINUSE.
 const persistedPort = (() => {
   try {
     if (!fs.existsSync(PORT_FILE)) return null;
@@ -38,19 +27,11 @@ const persistedPort = (() => {
   } catch { return null; }
 })();
 const STARTING_PORT = persistedPort || DEFAULT_PORT;
-const MAX_PORT_SCAN = 50; // 47371 → 47420 is enough headroom for any conceivable collision
+const MAX_PORT_SCAN = 50;
 
 const app = express();
 
-// v1.10.0 — CORS lockdown. Previously `app.use(cors())` echoed
-// Access-Control-Allow-Origin: *, which meant any site the user visited
-// could `fetch('http://localhost:47371/api/bills')` and read/wipe all
-// data. This is a local desktop-style app: legitimate callers either
-// have no Origin header (same-page fetch from our own served HTML,
-// browsers' XHR to localhost from about:blank tools, curl) or an
-// Origin pointing at http://localhost:<port>. Everything else is
-// rejected. The Vite dev server proxies /api → us so its origin is
-// also localhost.
+// ── CORS lockdown (localhost only) ─────────────────────────────────────────
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   const allow =
@@ -71,61 +52,42 @@ app.use((req, res, next) => {
   next();
 });
 
-// v1.10.0 — Body size lowered from 50mb → 5mb. Legit invoice payloads
-// are single-digit kilobytes; a full import archive with 5000 bills fits
-// comfortably in 2-3mb. 50mb + wildcard CORS previously meant any site
-// could OOM the Node process with a nested-JSON payload.
 app.use(express.json({ limit: '5mb' }));
 
-// Ensure data directory and sub-directories exist
-const DIRS = ['bills', 'clients', 'templates', 'products', 'expenses', 'recurring', 'receipts', 'profiles', 'purchases'];
-for (const dir of DIRS) {
-  const dirPath = path.join(DATA_DIR, dir);
-  if (!fs.existsSync(dirPath)) fs.mkdirSync(dirPath, { recursive: true });
-}
+// ── Path-safety helpers (unchanged from original) ─────────────────────────
 
-// Helper: safe filename from ID (replace slashes, etc.)
 function safeFileName(id) {
   return String(id).replace(/[/\\:*?"<>|]/g, '_');
 }
 
-// v1.10.0 — Path-traversal-safe user-string → single path segment.
-// Strips path separators, drive letters, and every `..` occurrence
-// (including URL-encoded variants after decode). Used for the
-// save-pdf / trash-pdf endpoints that construct paths from query
-// params. Never returns an empty string; falls back to a sentinel so
-// callers can trust the return value for `path.join`.
 function safePathSegment(input, fallback = 'Untitled') {
   if (input === undefined || input === null) return fallback;
   let s;
   try { s = decodeURIComponent(String(input)); } catch { s = String(input); }
-  s = s.replace(/[<>:"/\\|?*\x00-\x1f]/g, '-');    // reserved/control chars
-  s = s.replace(/\.{2,}/g, '-');                    // squash .. and ...
-  s = s.replace(/^[.\s]+|[.\s]+$/g, '');            // trim leading/trailing . and space (Windows reserves)
-  s = s.slice(0, 120);                              // cap length
+  s = s.replace(/[<>:"/\\|?*\x00-\x1f]/g, '-');
+  s = s.replace(/\.{2,}/g, '-');
+  s = s.replace(/^[.\s]+|[.\s]+$/g, '');
+  s = s.slice(0, 120);
   return s || fallback;
 }
 
-// v1.10.0 — Enforce that `resolved` lives strictly inside `root`.
-// Returns true if inside, false otherwise. Callers should reject on
-// false and log server-side.
 function isPathInside(resolved, root) {
   const r = path.resolve(root);
   const p = path.resolve(resolved);
   return p === r || p.startsWith(r + path.sep);
 }
 
-// v1.10.0 — Generic error response helper. Never returns raw Node
-// error messages to the client (they leak absolute filesystem paths,
-// EACCES/EPERM strings that hint at server structure). Server-side
-// logs the full detail; client sees a stable code + generic phrase.
+// ── Error handling (same as original) ─────────────────────────────────────
+
+const ERRORS_LOG = path.join(DATA_DIR, 'errors.log');
+
 function errRes(res, status, code, err) {
   if (err) {
     try {
       const ts = new Date().toISOString();
       const msg = err && err.stack ? err.stack : String(err);
       fs.appendFileSync(ERRORS_LOG, `[${ts}] [api:${code}] ${msg}\n`, 'utf-8');
-    } catch { /* ignore log failures */ }
+    } catch { /* ignore */ }
   }
   const MESSAGES = {
     'bad-request': 'Invalid request',
@@ -139,114 +101,188 @@ function errRes(res, status, code, err) {
   return res.status(status).json({ error: MESSAGES[code] || code, code });
 }
 
-// v1.10.0 — Atomic file write. Writes to `<file>.tmp` then renames
-// over the target so a mid-write crash / power loss cannot leave a
-// truncated file on disk. Critical for META_PATH which stores the
-// invoice counter — a truncated meta.json read back as `{}` reissues
-// invoice numbers from zero.
-function writeFileAtomic(filePath, contents) {
-  const tmp = filePath + '.tmp';
-  fs.writeFileSync(tmp, contents, 'utf-8');
-  fs.renameSync(tmp, filePath);
+// ── DB helper: read a meta value ──────────────────────────────────────────
+
+function getMetaValue(key, fallback = null) {
+  const row = db.select().from(meta).where(eq(meta.key, key)).get();
+  if (!row) return fallback;
+  try { return JSON.parse(row.value); } catch { return row.value; }
 }
 
-// Errors log path — declared here so errRes() can find it. The actual
-// file is created lazily; ERRORS_LOG constant below still points here.
-const ERRORS_LOG = path.join(DATA_DIR, 'errors.log');
-
-// In-memory cache for directory reads — invalidated on write/delete.
-// v1.10.6 — audit L12: added a 5s TTL. Users are documented as being
-// able to hand-edit JSON files in data/*; prior code never noticed
-// external edits until a POST/DELETE happened to invalidate. Now: any
-// cached entry older than 5 seconds is treated as stale and re-read.
-const dirCache = {};
-const DIR_CACHE_TTL_MS = 5000;
-function invalidateCache(dir) { delete dirCache[dir]; }
-
-// Helper: read all JSON files from a directory (cached, 5s TTL)
-function readAllFromDir(dir) {
-  const entry = dirCache[dir];
-  if (entry && (Date.now() - entry.at) < DIR_CACHE_TTL_MS) return entry.value;
-  const dirPath = path.join(DATA_DIR, dir);
-  if (!fs.existsSync(dirPath)) return [];
-  const results = fs.readdirSync(dirPath)
-    .filter(f => f.endsWith('.json'))
-    .map(f => {
-      try { return JSON.parse(fs.readFileSync(path.join(dirPath, f), 'utf-8')); }
-      catch { return null; }
-    })
-    .filter(Boolean);
-  dirCache[dir] = { at: Date.now(), value: results };
-  return results;
+function setMetaValue(key, value) {
+  const str = typeof value === 'object' ? JSON.stringify(value) : String(value);
+  db.insert(meta).values({ key, value: str })
+    .onConflictDoUpdate({ target: meta.key, set: { value: str } })
+    .run();
 }
 
-// Helper: read a single JSON file
-function readJSON(filePath, fallback = null) {
-  try {
-    if (fs.existsSync(filePath)) return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-  } catch { /* ignore */ }
-  return fallback;
+// ── DB helper: reconstruct a bill object from a row ───────────────────────
+// The `data` column holds the ENTIRE original JSON. We parse it and return
+// the full object so the API response is identical to the old JSON-file one.
+
+function billRowToObj(row) {
+  try { return JSON.parse(row.data); } catch { return {}; }
 }
 
-// Helper: write JSON file (with cache invalidation). v1.10.0 — writes
-// atomically via temp+rename so a crash mid-write can't leave a
-// truncated meta.json that resets the invoice counter.
-function writeJSON(filePath, data) {
-  writeFileAtomic(filePath, JSON.stringify(data, null, 2));
-  // Invalidate cache for the parent directory
-  const parentDir = path.basename(path.dirname(filePath));
-  if (DIRS.includes(parentDir)) invalidateCache(parentDir);
+// ── DB helper: reconstruct a purchase/recurring object from a row ─────────
+
+function purchaseRowToObj(row) {
+  return {
+    id: row.id,
+    date: row.date,
+    supplierName: row.supplierName,
+    supplierAddress: row.supplierAddress,
+    supplierGstin: row.supplierGstin,
+    invoiceNumber: row.invoiceNumber,
+    items: safeParseJSON(row.items, []),
+    totalAmount: row.totalAmount,
+    totalTax: row.totalTax,
+    taxableAmount: row.taxableAmount,
+    applyRoundOff: row.applyRoundOff,
+    roundOff: row.roundOff,
+    paymentStatus: row.paymentStatus,
+    interstate: row.interstate,
+    note: row.note,
+  };
 }
 
-// Helper: delete file (with cache invalidation)
-function deleteFile(filePath) {
-  if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-  const parentDir = path.basename(path.dirname(filePath));
-  if (DIRS.includes(parentDir)) invalidateCache(parentDir);
+function productRowToObj(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    hsn: row.hsn,
+    purchasePrice: row.purchasePrice,
+    sellingPrice: row.sellingPrice,
+    rate: row.rate,
+    mrp: row.mrp,
+    taxPercent: row.taxPercent,
+    cessPercent: row.cessPercent,
+    unit: row.unit,
+    stock: row.stock,
+    description: row.description,
+    pkg: row.pkg,
+    batches: safeParseJSON(row.batches, []),
+  };
 }
 
-// ========================
+function profileRowToObj(row) {
+  return {
+    id: row.id,
+    businessName: row.businessName,
+    address: row.address,
+    city: row.city,
+    pin: row.pin,
+    state: row.state,
+    country: row.country,
+    gstin: row.gstin,
+    pan: row.pan,
+    email: row.email,
+    phone: row.phone,
+    bankName: row.bankName,
+    accountNumber: row.accountNumber,
+    ifsc: row.ifsc,
+    swift: row.swift,
+    logo: row.logo,
+    signature: row.signature,
+    upiId: row.upiId,
+    googleClientId: row.googleClientId,
+    googleDriveFolder: row.googleDriveFolder,
+    paymentAccounts: safeParseJSON(row.paymentAccounts, []),
+  };
+}
+
+function recurringRowToObj(row) {
+  try { return JSON.parse(row.data); } catch { return {}; }
+}
+
+function safeParseJSON(str, fallback) {
+  try { return JSON.parse(str); } catch { return fallback; }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // BILLS
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
+
 app.get('/api/bills', (req, res) => {
-  const bills = readAllFromDir('bills');
-  bills.sort((a, b) => new Date(b.invoiceDate) - new Date(a.invoiceDate));
-  res.json(bills);
+  const rows = db.select().from(bills)
+    .where(eq(bills.isTrashed, false))
+    .orderBy(desc(bills.invoiceDate))
+    .all();
+  res.json(rows.map(billRowToObj));
 });
 
 app.post('/api/bills', (req, res) => {
   const bill = req.body;
   if (!bill || !bill.id) return res.status(400).json({ error: 'Bill must have an id' });
-  const filePath = path.join(DATA_DIR, 'bills', safeFileName(bill.id) + '.json');
 
-  // Dupe-check: the invoice-number field is free-text on the client, so a
-  // typo (INV/2026/0007 typed again for a fresh bill) would silently
-  // overwrite the previous saved bill. That's data loss. Require the
-  // client to pass ?overwrite=1 to allow it — used for edits + auto-fire
-  // re-processing. Otherwise refuse with 409 so the UI can prompt the user.
   const overwrite = req.query.overwrite === '1' || req.query.overwrite === 'true';
-  if (!overwrite && fs.existsSync(filePath)) {
-    return res.status(409).json({
-      error: 'A bill with this invoice number already exists',
-      invoiceNumber: bill.id,
-    });
+  if (!overwrite) {
+    const existing = db.select({ id: bills.id }).from(bills)
+      .where(eq(bills.id, bill.id))
+      .get();
+    if (existing) {
+      return res.status(409).json({
+        error: 'A bill with this invoice number already exists',
+        invoiceNumber: bill.id,
+      });
+    }
   }
-  writeJSON(filePath, bill);
+
+  db.insert(bills).values({
+    id: bill.id,
+    clientName: bill.clientName || '',
+    invoiceNumber: bill.invoiceNumber || bill.id,
+    invoiceDate: bill.invoiceDate || '',
+    invoiceType: bill.invoiceType || 'tax-invoice',
+    currency: bill.currency || 'INR',
+    totalAmount: bill.totalAmount || 0,
+    totalTaxAmount: bill.totalTaxAmount || 0,
+    status: bill.status || 'unpaid',
+    paidAmount: bill.paidAmount || 0,
+    printedCount: bill.printedCount || 0,
+    lastPrintedAt: bill.lastPrintedAt || null,
+    generatedFrom: bill.generatedFrom || null,
+    autoGenerated: !!bill.autoGenerated,
+    autoGeneratedAt: bill.autoGeneratedAt || null,
+    isTrashed: false,
+    trashedAt: null,
+    data: JSON.stringify(bill),
+  }).onConflictDoUpdate({
+    target: bills.id,
+    set: {
+      clientName: bill.clientName || '',
+      invoiceNumber: bill.invoiceNumber || bill.id,
+      invoiceDate: bill.invoiceDate || '',
+      invoiceType: bill.invoiceType || 'tax-invoice',
+      currency: bill.currency || 'INR',
+      totalAmount: bill.totalAmount || 0,
+      totalTaxAmount: bill.totalTaxAmount || 0,
+      status: bill.status || 'unpaid',
+      paidAmount: bill.paidAmount || 0,
+      printedCount: bill.printedCount || 0,
+      lastPrintedAt: bill.lastPrintedAt || null,
+      generatedFrom: bill.generatedFrom || null,
+      autoGenerated: !!bill.autoGenerated,
+      autoGeneratedAt: bill.autoGeneratedAt || null,
+      isTrashed: false,
+      trashedAt: null,
+      data: JSON.stringify(bill),
+    },
+  }).run();
+
   res.json({ success: true });
 });
 
-// v1.10.31 — Data-F9.1: block deletion of a bill that's a client-credit
-// SOURCE for another live bill. Deleting it would leave the target bill
-// showing "paid" via credit-applied without a real source, breaking the
-// dual-entry integrity guaranteed by v1.10.24. Client can force-delete
-// by passing `?force=1` (they accept the ledger inconsistency).
+// Credit dependency check — scans all active bills for credit-applied
+// payments referencing the given billId.
 function findCreditDependents(billId) {
   try {
-    const billsDir = path.join(DATA_DIR, 'bills');
+    const rows = db.select({ data: bills.data }).from(bills)
+      .where(eq(bills.isTrashed, false))
+      .all();
     const dependents = [];
-    for (const f of fs.readdirSync(billsDir).filter(n => n.endsWith('.json'))) {
-      let other;
-      try { other = readJSON(path.join(billsDir, f), null); } catch { continue; }
+    for (const row of rows) {
+      const other = billRowToObj(row);
       if (!other || other.id === billId) continue;
       const payments = other.payments || other.data?.payments || [];
       for (const p of payments) {
@@ -265,19 +301,14 @@ function findCreditDependents(billId) {
 }
 
 app.delete('/api/bills/:id', (req, res) => {
-  // v1.9.5 — soft delete: move to data/trash/ instead of unlinking so
-  // users can restore within 30 days. Query ?permanent=1 skips trash and
-  // deletes forever (used by the Trash bin UI's "Delete forever" action).
-  const fname = safeFileName(req.params.id) + '.json';
-  const filePath = path.join(DATA_DIR, 'bills', fname);
-  if (!fs.existsSync(filePath)) return res.json({ success: true });
+  const id = req.params.id;
+  const existing = db.select({ id: bills.id }).from(bills).where(eq(bills.id, id)).get();
+  if (!existing) return res.json({ success: true });
 
-  // v1.10.31 — Data-F9.1: client-credit dependency check. Blocks silent
-  // deletion of a credit source that would leave a paid-via-credit target
-  // bill dangling. Force override via ?force=1.
+  // Credit dependency check
   const force = req.query.force === '1' || req.query.force === 'true';
   if (!force) {
-    const dependents = findCreditDependents(req.params.id);
+    const dependents = findCreditDependents(id);
     if (dependents.length > 0) {
       return res.status(409).json({
         error: 'client-credit-dependency',
@@ -286,24 +317,25 @@ app.delete('/api/bills/:id', (req, res) => {
       });
     }
   }
+
   if (req.query.permanent === '1') {
-    try { fs.unlinkSync(filePath); } catch { /* ignore */ }
+    db.delete(bills).where(eq(bills.id, id)).run();
     return res.json({ success: true, permanent: true });
   }
-  try {
-    const trashDir = path.join(DATA_DIR, 'trash');
-    if (!fs.existsSync(trashDir)) fs.mkdirSync(trashDir, { recursive: true });
-    fs.renameSync(filePath, path.join(trashDir, fname));
-    res.json({ success: true, trashed: true });
-  } catch (err) {
-    errRes(res, 500, 'server-error', err);
-  }
+
+  // Soft delete — mark as trashed
+  db.update(bills).set({
+    isTrashed: true,
+    trashedAt: new Date().toISOString(),
+  }).where(eq(bills.id, id)).run();
+
+  res.json({ success: true, trashed: true });
 });
 
-// ========================
-// PROFILE
-// ========================
-const PROFILE_PATH = path.join(DATA_DIR, 'profile.json');
+// ════════════════════════════════════════════════════════════════════════════
+// PROFILE (singleton — stored in meta table with key 'profile')
+// ════════════════════════════════════════════════════════════════════════════
+
 const DEFAULT_PROFILE = {
   businessName: '', address: '', state: '', gstin: '', pan: '',
   email: '', phone: '', bankName: '', accountNumber: '', ifsc: '',
@@ -311,272 +343,486 @@ const DEFAULT_PROFILE = {
 };
 
 app.get('/api/profile', (req, res) => {
-  res.json(readJSON(PROFILE_PATH, DEFAULT_PROFILE));
+  res.json(getMetaValue('profile', DEFAULT_PROFILE));
 });
 
 app.post('/api/profile', (req, res) => {
-  writeJSON(PROFILE_PATH, req.body);
+  setMetaValue('profile', req.body);
   res.json({ success: true });
 });
 
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
 // CLIENTS
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
+
 app.get('/api/clients', (req, res) => {
-  const clients = readAllFromDir('clients');
-  clients.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-  res.json(clients);
+  const rows = db.select().from(clients).orderBy(asc(clients.name)).all();
+  res.json(rows.map(r => ({
+    id: r.id, name: r.name, address: r.address, city: r.city, pin: r.pin,
+    state: r.state, gstin: r.gstin, country: r.country, email: r.email,
+    phone: r.phone, isSEZ: r.isSEZ, licence: r.licence,
+  })));
 });
 
 app.post('/api/clients', (req, res) => {
   const client = req.body;
   if (!client.id) client.id = 'cli_' + Date.now();
-  const filePath = path.join(DATA_DIR, 'clients', safeFileName(client.id) + '.json');
-  writeJSON(filePath, client);
+  db.insert(clients).values({
+    id: client.id,
+    name: client.name || '',
+    address: client.address || '',
+    city: client.city || '',
+    pin: client.pin || '',
+    state: client.state || '',
+    gstin: client.gstin || '',
+    country: client.country || '',
+    email: client.email || '',
+    phone: client.phone || '',
+    isSEZ: !!client.isSEZ,
+    licence: client.licence || '',
+  }).onConflictDoUpdate({
+    target: clients.id,
+    set: {
+      name: client.name || '',
+      address: client.address || '',
+      city: client.city || '',
+      pin: client.pin || '',
+      state: client.state || '',
+      gstin: client.gstin || '',
+      country: client.country || '',
+      email: client.email || '',
+      phone: client.phone || '',
+      isSEZ: !!client.isSEZ,
+      licence: client.licence || '',
+    },
+  }).run();
   res.json({ success: true, id: client.id });
 });
 
 app.delete('/api/clients/:id', (req, res) => {
-  const filePath = path.join(DATA_DIR, 'clients', safeFileName(req.params.id) + '.json');
-  deleteFile(filePath);
+  db.delete(clients).where(eq(clients.id, req.params.id)).run();
   res.json({ success: true });
 });
 
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
 // TERMS TEMPLATES
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
+
 app.get('/api/templates', (req, res) => {
-  let templates = readAllFromDir('templates');
-  if (templates.length === 0) {
+  let rows = db.select().from(templates).orderBy(asc(templates.name)).all();
+  if (rows.length === 0) {
     // Seed default template
     const defaultTpl = {
       id: 'default',
       name: 'Standard Terms',
-      content: '1. Payment is due within 15 days of invoice date unless otherwise agreed in writing.\n2. Interest @ 18% p.a. will be charged on overdue payments beyond the due date.\n3. The scope of work is limited to what is explicitly mentioned in the project proposal/agreement. Any additional requirements will be quoted and billed separately.\n4. All intellectual property and source code will be transferred to the client only upon receipt of full payment.\n5. We shall not be liable for any delays caused by incomplete or late submission of content, credentials, or approvals from the client\'s end.\n6. Any change requests after project approval may attract additional charges and revised timelines.\n7. This invoice is subject to the jurisdiction of courts at the service provider\'s registered location.\n8. E. & O.E.'
+      content: '1. Payment is due within 15 days of invoice date unless otherwise agreed in writing.\n2. Interest @ 18% p.a. will be charged on overdue payments beyond the due date.\n3. The scope of work is limited to what is explicitly mentioned in the project proposal/agreement. Any additional requirements will be quoted and billed separately.\n4. All intellectual property and source code will be transferred to the client only upon receipt of full payment.\n5. We shall not be liable for any delays caused by incomplete or late submission of content, credentials, or approvals from the client\'s end.\n6. Any change requests after project approval may attract additional charges and revised timelines.\n7. This invoice is subject to the jurisdiction of courts at the service provider\'s registered location.\n8. E. & O.E.',
     };
-    writeJSON(path.join(DATA_DIR, 'templates', 'default.json'), defaultTpl);
-    templates = [defaultTpl];
+    db.insert(templates).values(defaultTpl).run();
+    rows = [defaultTpl];
   }
-  templates.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-  res.json(templates);
+  res.json(rows.map(r => ({ id: r.id, name: r.name, content: r.content })));
 });
 
 app.post('/api/templates', (req, res) => {
   const tpl = req.body;
   if (!tpl.id) tpl.id = 'tpl_' + Date.now();
-  const filePath = path.join(DATA_DIR, 'templates', safeFileName(tpl.id) + '.json');
-  writeJSON(filePath, tpl);
+  db.insert(templates).values({
+    id: tpl.id, name: tpl.name || '', content: tpl.content || '',
+  }).onConflictDoUpdate({
+    target: templates.id,
+    set: { name: tpl.name || '', content: tpl.content || '' },
+  }).run();
   res.json({ success: true, id: tpl.id });
 });
 
 app.delete('/api/templates/:id', (req, res) => {
-  const filePath = path.join(DATA_DIR, 'templates', safeFileName(req.params.id) + '.json');
-  deleteFile(filePath);
+  db.delete(templates).where(eq(templates.id, req.params.id)).run();
   res.json({ success: true });
 });
 
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
 // PRODUCTS / INVENTORY
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
+
 app.get('/api/products', (req, res) => {
-  const products = readAllFromDir('products');
-  products.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-  res.json(products);
+  const rows = db.select().from(products).orderBy(asc(products.name)).all();
+  res.json(rows.map(productRowToObj));
 });
 
 app.post('/api/products', (req, res) => {
   const product = req.body;
   if (!product.id) product.id = 'prod_' + Date.now();
-  const filePath = path.join(DATA_DIR, 'products', safeFileName(product.id) + '.json');
-  writeJSON(filePath, product);
+  db.insert(products).values({
+    id: product.id,
+    name: product.name || '',
+    hsn: product.hsn || '',
+    purchasePrice: product.purchasePrice || 0,
+    sellingPrice: product.sellingPrice || 0,
+    rate: product.rate || 0,
+    mrp: product.mrp || 0,
+    taxPercent: product.taxPercent || 0,
+    cessPercent: product.cessPercent || 0,
+    unit: product.unit || '',
+    stock: product.stock || 0,
+    description: product.description || '',
+    pkg: product.pkg || '',
+    batches: JSON.stringify(product.batches || []),
+  }).onConflictDoUpdate({
+    target: products.id,
+    set: {
+      name: product.name || '',
+      hsn: product.hsn || '',
+      purchasePrice: product.purchasePrice || 0,
+      sellingPrice: product.sellingPrice || 0,
+      rate: product.rate || 0,
+      mrp: product.mrp || 0,
+      taxPercent: product.taxPercent || 0,
+      cessPercent: product.cessPercent || 0,
+      unit: product.unit || '',
+      stock: product.stock || 0,
+      description: product.description || '',
+      pkg: product.pkg || '',
+      batches: JSON.stringify(product.batches || []),
+    },
+  }).run();
   res.json({ success: true, id: product.id });
 });
 
 app.delete('/api/products/:id', (req, res) => {
-  const filePath = path.join(DATA_DIR, 'products', safeFileName(req.params.id) + '.json');
-  deleteFile(filePath);
+  db.delete(products).where(eq(products.id, req.params.id)).run();
   res.json({ success: true });
 });
 
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
 // EXPENSES
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
+
 app.get('/api/expenses', (req, res) => {
-  const expenses = readAllFromDir('expenses');
-  expenses.sort((a, b) => new Date(b.date) - new Date(a.date));
-  res.json(expenses);
+  const rows = db.select().from(expenses).orderBy(desc(expenses.date)).all();
+  res.json(rows.map(r => ({
+    id: r.id, date: r.date, description: r.description, category: r.category,
+    amount: r.amount, gstAmount: r.gstAmount, gstPercent: r.gstPercent,
+    vendorName: r.vendorName, vendorGstin: r.vendorGstin, invoiceNo: r.invoiceNo,
+    paymentMode: r.paymentMode, interstate: r.interstate, note: r.note,
+  })));
 });
 
 app.post('/api/expenses', (req, res) => {
   const expense = req.body;
   if (!expense.id) expense.id = 'exp_' + Date.now();
-  const filePath = path.join(DATA_DIR, 'expenses', safeFileName(expense.id) + '.json');
-  writeJSON(filePath, expense);
+  db.insert(expenses).values({
+    id: expense.id,
+    date: expense.date || '',
+    description: expense.description || '',
+    category: expense.category || '',
+    amount: expense.amount || 0,
+    gstAmount: expense.gstAmount || 0,
+    gstPercent: expense.gstPercent || 0,
+    vendorName: expense.vendorName || '',
+    vendorGstin: expense.vendorGstin || '',
+    invoiceNo: expense.invoiceNo || '',
+    paymentMode: expense.paymentMode || '',
+    interstate: !!expense.interstate,
+    note: expense.note || '',
+  }).onConflictDoUpdate({
+    target: expenses.id,
+    set: {
+      date: expense.date || '',
+      description: expense.description || '',
+      category: expense.category || '',
+      amount: expense.amount || 0,
+      gstAmount: expense.gstAmount || 0,
+      gstPercent: expense.gstPercent || 0,
+      vendorName: expense.vendorName || '',
+      vendorGstin: expense.vendorGstin || '',
+      invoiceNo: expense.invoiceNo || '',
+      paymentMode: expense.paymentMode || '',
+      interstate: !!expense.interstate,
+      note: expense.note || '',
+    },
+  }).run();
   res.json({ success: true, id: expense.id });
 });
 
 app.delete('/api/expenses/:id', (req, res) => {
-  const filePath = path.join(DATA_DIR, 'expenses', safeFileName(req.params.id) + '.json');
-  deleteFile(filePath);
+  db.delete(expenses).where(eq(expenses.id, req.params.id)).run();
   res.json({ success: true });
 });
 
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
 // RECURRING INVOICES
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
+
 app.get('/api/recurring', (req, res) => {
-  const items = readAllFromDir('recurring');
-  items.sort((a, b) => (a.clientName || '').localeCompare(b.clientName || ''));
-  res.json(items);
+  const rows = db.select().from(recurring).orderBy(asc(recurring.clientName)).all();
+  res.json(rows.map(recurringRowToObj));
 });
 
 app.post('/api/recurring', (req, res) => {
   const item = req.body;
   if (!item.id) item.id = 'rec_' + Date.now();
-  const filePath = path.join(DATA_DIR, 'recurring', safeFileName(item.id) + '.json');
-  writeJSON(filePath, item);
+  db.insert(recurring).values({
+    id: item.id,
+    active: item.active !== false,
+    clientName: item.clientName || '',
+    invoiceType: item.invoiceType || 'tax-invoice',
+    nextDate: item.nextDate || '',
+    frequency: item.frequency || 'monthly',
+    data: JSON.stringify(item),
+  }).onConflictDoUpdate({
+    target: recurring.id,
+    set: {
+      active: item.active !== false,
+      clientName: item.clientName || '',
+      invoiceType: item.invoiceType || 'tax-invoice',
+      nextDate: item.nextDate || '',
+      frequency: item.frequency || 'monthly',
+      data: JSON.stringify(item),
+    },
+  }).run();
   res.json({ success: true, id: item.id });
 });
 
 app.delete('/api/recurring/:id', (req, res) => {
-  const filePath = path.join(DATA_DIR, 'recurring', safeFileName(req.params.id) + '.json');
-  deleteFile(filePath);
+  db.delete(recurring).where(eq(recurring.id, req.params.id)).run();
   res.json({ success: true });
 });
 
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
 // RECEIPTS / PAYMENT VOUCHERS
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
+
 app.get('/api/receipts', (req, res) => {
-  const receipts = readAllFromDir('receipts');
-  receipts.sort((a, b) => new Date(b.date) - new Date(a.date));
-  res.json(receipts);
+  const rows = db.select().from(receipts).orderBy(desc(receipts.date)).all();
+  res.json(rows.map(r => ({
+    id: r.id, date: r.date, receiptNo: r.receiptNo, clientName: r.clientName,
+    clientAddress: r.clientAddress, amount: r.amount, paymentMode: r.paymentMode,
+    referenceNo: r.referenceNo, againstInvoice: r.againstInvoice, note: r.note,
+    currency: r.currency, source: r.source, billId: r.billId,
+  })));
 });
 
 app.post('/api/receipts', (req, res) => {
   const receipt = req.body;
   if (!receipt.id) receipt.id = 'rcp_' + Date.now();
-  const filePath = path.join(DATA_DIR, 'receipts', safeFileName(receipt.id) + '.json');
-  writeJSON(filePath, receipt);
+  db.insert(receipts).values({
+    id: receipt.id,
+    date: receipt.date || '',
+    receiptNo: receipt.receiptNo || '',
+    clientName: receipt.clientName || '',
+    clientAddress: receipt.clientAddress || '',
+    amount: receipt.amount || 0,
+    paymentMode: receipt.paymentMode || '',
+    referenceNo: receipt.referenceNo || '',
+    againstInvoice: receipt.againstInvoice || '',
+    note: receipt.note || '',
+    currency: receipt.currency || 'INR',
+    source: receipt.source || '',
+    billId: receipt.billId || '',
+  }).onConflictDoUpdate({
+    target: receipts.id,
+    set: {
+      date: receipt.date || '',
+      receiptNo: receipt.receiptNo || '',
+      clientName: receipt.clientName || '',
+      clientAddress: receipt.clientAddress || '',
+      amount: receipt.amount || 0,
+      paymentMode: receipt.paymentMode || '',
+      referenceNo: receipt.referenceNo || '',
+      againstInvoice: receipt.againstInvoice || '',
+      note: receipt.note || '',
+      currency: receipt.currency || 'INR',
+      source: receipt.source || '',
+      billId: receipt.billId || '',
+    },
+  }).run();
   res.json({ success: true, id: receipt.id });
 });
 
 app.delete('/api/receipts/:id', (req, res) => {
-  const filePath = path.join(DATA_DIR, 'receipts', safeFileName(req.params.id) + '.json');
-  deleteFile(filePath);
+  db.delete(receipts).where(eq(receipts.id, req.params.id)).run();
   res.json({ success: true });
 });
 
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
 // PURCHASES (Purchase Bills for ITC)
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
+
 app.get('/api/purchases', (req, res) => {
-  const purchases = readAllFromDir('purchases');
-  purchases.sort((a, b) => new Date(b.date) - new Date(a.date));
-  res.json(purchases);
+  const rows = db.select().from(purchases).orderBy(desc(purchases.date)).all();
+  res.json(rows.map(purchaseRowToObj));
 });
 
 app.post('/api/purchases', (req, res) => {
   const purchase = req.body;
   if (!purchase.id) purchase.id = 'pur_' + Date.now();
-  const filePath = path.join(DATA_DIR, 'purchases', safeFileName(purchase.id) + '.json');
-  writeJSON(filePath, purchase);
+  db.insert(purchases).values({
+    id: purchase.id,
+    date: purchase.date || '',
+    supplierName: purchase.supplierName || '',
+    supplierAddress: purchase.supplierAddress || '',
+    supplierGstin: purchase.supplierGstin || '',
+    invoiceNumber: purchase.invoiceNumber || '',
+    totalAmount: purchase.totalAmount || 0,
+    totalTax: purchase.totalTax || 0,
+    taxableAmount: purchase.taxableAmount || 0,
+    applyRoundOff: !!purchase.applyRoundOff,
+    roundOff: purchase.roundOff || 0,
+    paymentStatus: purchase.paymentStatus || 'Unpaid',
+    interstate: !!purchase.interstate,
+    note: purchase.note || '',
+    items: JSON.stringify(purchase.items || []),
+  }).onConflictDoUpdate({
+    target: purchases.id,
+    set: {
+      date: purchase.date || '',
+      supplierName: purchase.supplierName || '',
+      supplierAddress: purchase.supplierAddress || '',
+      supplierGstin: purchase.supplierGstin || '',
+      invoiceNumber: purchase.invoiceNumber || '',
+      totalAmount: purchase.totalAmount || 0,
+      totalTax: purchase.totalTax || 0,
+      taxableAmount: purchase.taxableAmount || 0,
+      applyRoundOff: !!purchase.applyRoundOff,
+      roundOff: purchase.roundOff || 0,
+      paymentStatus: purchase.paymentStatus || 'Unpaid',
+      interstate: !!purchase.interstate,
+      note: purchase.note || '',
+      items: JSON.stringify(purchase.items || []),
+    },
+  }).run();
   res.json({ success: true, id: purchase.id });
 });
 
 app.delete('/api/purchases/:id', (req, res) => {
-  const filePath = path.join(DATA_DIR, 'purchases', safeFileName(req.params.id) + '.json');
-  deleteFile(filePath);
+  db.delete(purchases).where(eq(purchases.id, req.params.id)).run();
   res.json({ success: true });
 });
 
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
 // BUSINESS PROFILES (multi-business)
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
+
 app.get('/api/profiles', (req, res) => {
-  const profiles = readAllFromDir('profiles');
-  profiles.sort((a, b) => (a.businessName || '').localeCompare(b.businessName || ''));
-  res.json(profiles);
+  const rows = db.select().from(profiles).orderBy(asc(profiles.businessName)).all();
+  res.json(rows.map(profileRowToObj));
 });
 
 app.post('/api/profiles', (req, res) => {
   const prof = req.body;
   if (!prof.id) prof.id = 'biz_' + Date.now();
-  const filePath = path.join(DATA_DIR, 'profiles', safeFileName(prof.id) + '.json');
-  writeJSON(filePath, prof);
+  db.insert(profiles).values({
+    id: prof.id,
+    businessName: prof.businessName || '',
+    address: prof.address || '',
+    city: prof.city || '',
+    pin: prof.pin || '',
+    state: prof.state || '',
+    country: prof.country || '',
+    gstin: prof.gstin || '',
+    pan: prof.pan || '',
+    email: prof.email || '',
+    phone: prof.phone || '',
+    bankName: prof.bankName || '',
+    accountNumber: prof.accountNumber || '',
+    ifsc: prof.ifsc || '',
+    swift: prof.swift || '',
+    logo: prof.logo || '',
+    signature: prof.signature || '',
+    upiId: prof.upiId || '',
+    googleClientId: prof.googleClientId || '',
+    googleDriveFolder: prof.googleDriveFolder || 'GST Billing Invoices',
+    paymentAccounts: JSON.stringify(prof.paymentAccounts || []),
+  }).onConflictDoUpdate({
+    target: profiles.id,
+    set: {
+      businessName: prof.businessName || '',
+      address: prof.address || '',
+      city: prof.city || '',
+      pin: prof.pin || '',
+      state: prof.state || '',
+      country: prof.country || '',
+      gstin: prof.gstin || '',
+      pan: prof.pan || '',
+      email: prof.email || '',
+      phone: prof.phone || '',
+      bankName: prof.bankName || '',
+      accountNumber: prof.accountNumber || '',
+      ifsc: prof.ifsc || '',
+      swift: prof.swift || '',
+      logo: prof.logo || '',
+      signature: prof.signature || '',
+      upiId: prof.upiId || '',
+      googleClientId: prof.googleClientId || '',
+      googleDriveFolder: prof.googleDriveFolder || 'GST Billing Invoices',
+      paymentAccounts: JSON.stringify(prof.paymentAccounts || []),
+    },
+  }).run();
   res.json({ success: true, id: prof.id });
 });
 
 app.delete('/api/profiles/:id', (req, res) => {
-  const filePath = path.join(DATA_DIR, 'profiles', safeFileName(req.params.id) + '.json');
-  deleteFile(filePath);
+  db.delete(profiles).where(eq(profiles.id, req.params.id)).run();
   res.json({ success: true });
 });
 
-// ========================
-// META (counters, etc.)
-// ========================
-const META_PATH = path.join(DATA_DIR, 'meta.json');
+// ════════════════════════════════════════════════════════════════════════════
+// META (counters, settings)
+// ════════════════════════════════════════════════════════════════════════════
 
 app.get('/api/meta/:key', (req, res) => {
-  const meta = readJSON(META_PATH, {});
-  res.json({ value: meta[req.params.key] ?? null });
+  const val = getMetaValue(req.params.key, null);
+  res.json({ value: val });
 });
 
 app.post('/api/meta/:key', (req, res) => {
-  const meta = readJSON(META_PATH, {});
-  meta[req.params.key] = req.body.value;
-  writeJSON(META_PATH, meta);
+  setMetaValue(req.params.key, req.body.value);
   res.json({ success: true });
 });
 
-// Atomic increment for invoice-number counters. Node's I/O is single-threaded
-// and readJSON / writeJSON are both synchronous (fs.readFileSync /
-// writeFileSync), so wrapping read+write in one handler with no awaits is
-// race-free across concurrent HTTP requests. Closes the
-// "two saves both reading 5, both writing 6" duplicate-invoice-number bug.
+// Atomic increment — better-sqlite3 is synchronous so this is race-free.
 app.post('/api/meta/:key/increment', (req, res) => {
-  const meta = readJSON(META_PATH, {});
-  const current = Number(meta[req.params.key] || 0);
-  const next = current + 1;
-  meta[req.params.key] = next;
-  writeJSON(META_PATH, meta);
-  res.json({ value: next });
+  // Wrap in a transaction for ACID safety
+  const result = sqlite.transaction(() => {
+    const row = db.select().from(meta).where(eq(meta.key, req.params.key)).get();
+    const current = Number(row?.value || 0);
+    const next = current + 1;
+    setMetaValue(req.params.key, next);
+    return next;
+  })();
+  res.json({ value: result });
 });
 
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
 // EXPORT / IMPORT
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
+
 app.get('/api/export', (req, res) => {
   const data = {
-    bills: readAllFromDir('bills'),
-    profile: readJSON(PROFILE_PATH, DEFAULT_PROFILE),
-    clients: readAllFromDir('clients'),
-    termsTemplates: readAllFromDir('templates'),
-    products: readAllFromDir('products'),
-    expenses: readAllFromDir('expenses'),
-    recurring: readAllFromDir('recurring'),
-    receipts: readAllFromDir('receipts'),
-    profiles: readAllFromDir('profiles'),
-    purchases: readAllFromDir('purchases'),
-    meta: readJSON(META_PATH, {}),
+    bills:          db.select().from(bills).where(eq(bills.isTrashed, false)).all().map(billRowToObj),
+    profile:        getMetaValue('profile', DEFAULT_PROFILE),
+    clients:        db.select().from(clients).all().map(r => ({ id: r.id, name: r.name, address: r.address, city: r.city, pin: r.pin, state: r.state, gstin: r.gstin, country: r.country, email: r.email, phone: r.phone, isSEZ: r.isSEZ, licence: r.licence })),
+    termsTemplates: db.select().from(templates).all().map(r => ({ id: r.id, name: r.name, content: r.content })),
+    products:       db.select().from(products).all().map(productRowToObj),
+    expenses:       db.select().from(expenses).all().map(r => ({ id: r.id, date: r.date, description: r.description, category: r.category, amount: r.amount, gstAmount: r.gstAmount, gstPercent: r.gstPercent, vendorName: r.vendorName, vendorGstin: r.vendorGstin, invoiceNo: r.invoiceNo, paymentMode: r.paymentMode, interstate: r.interstate, note: r.note })),
+    recurring:      db.select().from(recurring).all().map(recurringRowToObj),
+    receipts:       db.select().from(receipts).all().map(r => ({ id: r.id, date: r.date, receiptNo: r.receiptNo, clientName: r.clientName, clientAddress: r.clientAddress, amount: r.amount, paymentMode: r.paymentMode, referenceNo: r.referenceNo, againstInvoice: r.againstInvoice, note: r.note, currency: r.currency, source: r.source, billId: r.billId })),
+    profiles:       db.select().from(profiles).all().map(profileRowToObj),
+    purchases:      db.select().from(purchases).all().map(purchaseRowToObj),
+    meta:           (() => {
+      const obj = {};
+      for (const row of db.select().from(meta).all()) {
+        if (row.key === 'profile') continue; // exported separately above
+        try { obj[row.key] = JSON.parse(row.value); } catch { obj[row.key] = row.value; }
+      }
+      return obj;
+    })(),
     exportedAt: new Date().toISOString(),
   };
   res.json(data);
 });
 
 app.post('/api/import', (req, res) => {
-  // v1.10.0 — Match POST /api/bills' overwrite semantics for bills.
-  // v1.10.31 — Data-F5.1 fix: overwrite gating now applies to EVERY
-  // collection, not just bills. Previously clients / templates / products
-  // / expenses / recurring / receipts / profiles / purchases / meta were
-  // ALWAYS overwritten regardless of the `?overwrite` flag. A user
-  // restoring an old backup expecting a bill-only merge lost every new
-  // client / product / template they'd added since the backup — plus the
-  // meta counter reset caused invoice-number 409 loops on next save.
-  // Also v1.10.31 — Data-F12.2: after any import, scan the imported bills
-  // and reconcile the meta counter with each prefix's max existing suffix
-  // so the next reservation doesn't collide.
   const data = req.body;
   const overwrite = req.query.overwrite === '1' || req.query.overwrite === 'true';
   const counts = {
@@ -591,52 +837,164 @@ app.post('/api/import', (req, res) => {
     purchaseCount: 0, purchaseSkipped: 0,
   };
 
-  // Helper: upsert one entity to a directory, honouring the overwrite flag.
-  const upsertOne = (dirName, entity, countKey, skipKey) => {
-    if (!entity?.id) return;
-    const p = path.join(DATA_DIR, dirName, safeFileName(entity.id) + '.json');
-    if (!overwrite && fs.existsSync(p)) { counts[skipKey]++; return; }
-    writeJSON(p, entity);
-    counts[countKey]++;
-  };
+  // Wrap the entire import in a transaction for ACID compliance
+  sqlite.transaction(() => {
 
-  // Profile is a singleton (single file); overwrite-gated same way.
-  if (data.profile) {
-    if (overwrite || !fs.existsSync(PROFILE_PATH)) {
-      writeJSON(PROFILE_PATH, data.profile);
+    // Helper: upsert one entity, honouring the overwrite flag.
+    const upsertEntity = (table, idField, entity, buildValues, countKey, skipKey) => {
+      if (!entity?.id) return;
+      if (!overwrite) {
+        const existing = db.select({ id: idField }).from(table).where(eq(idField, entity.id)).get();
+        if (existing) { counts[skipKey]++; return; }
+      }
+      db.insert(table).values(buildValues(entity))
+        .onConflictDoUpdate({ target: idField, set: buildValues(entity) }).run();
+      counts[countKey]++;
+    };
+
+    // Profile singleton
+    if (data.profile) {
+      if (overwrite || !getMetaValue('profile', null)) {
+        setMetaValue('profile', data.profile);
+      }
     }
-  }
-  (data.bills || []).forEach(b => upsertOne('bills', b, 'billCount', 'billSkipped'));
-  (data.clients || []).forEach(c => upsertOne('clients', c, 'clientCount', 'clientSkipped'));
-  (data.termsTemplates || []).forEach(t => upsertOne('templates', t, 'templateCount', 'templateSkipped'));
-  (data.products || []).forEach(p => upsertOne('products', p, 'productCount', 'productSkipped'));
-  (data.expenses || []).forEach(e => upsertOne('expenses', e, 'expenseCount', 'expenseSkipped'));
-  (data.recurring || []).forEach(r => upsertOne('recurring', r, 'recurringCount', 'recurringSkipped'));
-  (data.receipts || []).forEach(r => upsertOne('receipts', r, 'receiptCount', 'receiptSkipped'));
-  (data.profiles || []).forEach(p => upsertOne('profiles', p, 'profileCount', 'profileSkipped'));
-  (data.purchases || []).forEach(p => upsertOne('purchases', p, 'purchaseCount', 'purchaseSkipped'));
 
-  // meta.json — same gating. Previously always overwrote → counters could
-  // regress below existing bill numbers → collision loop on next save.
-  if (data.meta) {
-    if (overwrite || !fs.existsSync(META_PATH)) {
-      writeJSON(META_PATH, data.meta);
+    // Bills
+    for (const b of (data.bills || [])) {
+      if (!b?.id) continue;
+      if (!overwrite) {
+        const existing = db.select({ id: bills.id }).from(bills).where(eq(bills.id, b.id)).get();
+        if (existing) { counts.billSkipped++; continue; }
+      }
+      db.insert(bills).values({
+        id: b.id, clientName: b.clientName || '', invoiceNumber: b.invoiceNumber || b.id,
+        invoiceDate: b.invoiceDate || '', invoiceType: b.invoiceType || 'tax-invoice',
+        currency: b.currency || 'INR', totalAmount: b.totalAmount || 0,
+        totalTaxAmount: b.totalTaxAmount || 0, status: b.status || 'unpaid',
+        paidAmount: b.paidAmount || 0, printedCount: b.printedCount || 0,
+        lastPrintedAt: b.lastPrintedAt || null, generatedFrom: b.generatedFrom || null,
+        autoGenerated: !!b.autoGenerated, autoGeneratedAt: b.autoGeneratedAt || null,
+        isTrashed: false, trashedAt: null, data: JSON.stringify(b),
+      }).onConflictDoUpdate({
+        target: bills.id,
+        set: {
+          clientName: b.clientName || '', invoiceNumber: b.invoiceNumber || b.id,
+          invoiceDate: b.invoiceDate || '', invoiceType: b.invoiceType || 'tax-invoice',
+          currency: b.currency || 'INR', totalAmount: b.totalAmount || 0,
+          totalTaxAmount: b.totalTaxAmount || 0, status: b.status || 'unpaid',
+          paidAmount: b.paidAmount || 0, printedCount: b.printedCount || 0,
+          lastPrintedAt: b.lastPrintedAt || null, generatedFrom: b.generatedFrom || null,
+          autoGenerated: !!b.autoGenerated, autoGeneratedAt: b.autoGeneratedAt || null,
+          isTrashed: false, trashedAt: null, data: JSON.stringify(b),
+        },
+      }).run();
+      counts.billCount++;
     }
-  }
 
-  // v1.10.31 — Data-F12.2: reconcile meta counter with imported bill nums.
-  // For every bill just imported (or already on disk), extract the numeric
-  // suffix from its invoice number. Bump each `counter_<PREFIX>` in meta
-  // to at least max(existing) so the next reservation doesn't collide.
-  try {
-    const meta = readJSON(META_PATH, {});
-    const billFiles = fs.readdirSync(path.join(DATA_DIR, 'bills')).filter(f => f.endsWith('.json'));
+    // Clients
+    for (const c of (data.clients || [])) {
+      upsertEntity(clients, clients.id, c, (e) => ({
+        id: e.id, name: e.name || '', address: e.address || '', city: e.city || '',
+        pin: e.pin || '', state: e.state || '', gstin: e.gstin || '', country: e.country || '',
+        email: e.email || '', phone: e.phone || '', isSEZ: !!e.isSEZ, licence: e.licence || '',
+      }), 'clientCount', 'clientSkipped');
+    }
+
+    // Templates
+    for (const t of (data.termsTemplates || [])) {
+      upsertEntity(templates, templates.id, t, (e) => ({
+        id: e.id, name: e.name || '', content: e.content || '',
+      }), 'templateCount', 'templateSkipped');
+    }
+
+    // Products
+    for (const p of (data.products || [])) {
+      upsertEntity(products, products.id, p, (e) => ({
+        id: e.id, name: e.name || '', hsn: e.hsn || '',
+        purchasePrice: e.purchasePrice || 0, sellingPrice: e.sellingPrice || 0,
+        rate: e.rate || 0, mrp: e.mrp || 0, taxPercent: e.taxPercent || 0,
+        cessPercent: e.cessPercent || 0, unit: e.unit || '', stock: e.stock || 0,
+        description: e.description || '', pkg: e.pkg || '',
+        batches: JSON.stringify(e.batches || []),
+      }), 'productCount', 'productSkipped');
+    }
+
+    // Expenses
+    for (const e of (data.expenses || [])) {
+      upsertEntity(expenses, expenses.id, e, (x) => ({
+        id: x.id, date: x.date || '', description: x.description || '',
+        category: x.category || '', amount: x.amount || 0, gstAmount: x.gstAmount || 0,
+        gstPercent: x.gstPercent || 0, vendorName: x.vendorName || '',
+        vendorGstin: x.vendorGstin || '', invoiceNo: x.invoiceNo || '',
+        paymentMode: x.paymentMode || '', interstate: !!x.interstate, note: x.note || '',
+      }), 'expenseCount', 'expenseSkipped');
+    }
+
+    // Recurring
+    for (const r of (data.recurring || [])) {
+      upsertEntity(recurring, recurring.id, r, (e) => ({
+        id: e.id, active: e.active !== false, clientName: e.clientName || '',
+        invoiceType: e.invoiceType || 'tax-invoice', nextDate: e.nextDate || '',
+        frequency: e.frequency || 'monthly', data: JSON.stringify(e),
+      }), 'recurringCount', 'recurringSkipped');
+    }
+
+    // Receipts
+    for (const r of (data.receipts || [])) {
+      upsertEntity(receipts, receipts.id, r, (e) => ({
+        id: e.id, date: e.date || '', receiptNo: e.receiptNo || '',
+        clientName: e.clientName || '', clientAddress: e.clientAddress || '',
+        amount: e.amount || 0, paymentMode: e.paymentMode || '',
+        referenceNo: e.referenceNo || '', againstInvoice: e.againstInvoice || '',
+        note: e.note || '', currency: e.currency || 'INR', source: e.source || '',
+        billId: e.billId || '',
+      }), 'receiptCount', 'receiptSkipped');
+    }
+
+    // Profiles (multi-business)
+    for (const p of (data.profiles || [])) {
+      upsertEntity(profiles, profiles.id, p, (e) => ({
+        id: e.id, businessName: e.businessName || '', address: e.address || '',
+        city: e.city || '', pin: e.pin || '', state: e.state || '',
+        country: e.country || '', gstin: e.gstin || '', pan: e.pan || '',
+        email: e.email || '', phone: e.phone || '', bankName: e.bankName || '',
+        accountNumber: e.accountNumber || '', ifsc: e.ifsc || '', swift: e.swift || '',
+        logo: e.logo || '', signature: e.signature || '', upiId: e.upiId || '',
+        googleClientId: e.googleClientId || '',
+        googleDriveFolder: e.googleDriveFolder || 'GST Billing Invoices',
+        paymentAccounts: JSON.stringify(e.paymentAccounts || []),
+      }), 'profileCount', 'profileSkipped');
+    }
+
+    // Purchases
+    for (const p of (data.purchases || [])) {
+      upsertEntity(purchases, purchases.id, p, (e) => ({
+        id: e.id, date: e.date || '', supplierName: e.supplierName || '',
+        supplierAddress: e.supplierAddress || '', supplierGstin: e.supplierGstin || '',
+        invoiceNumber: e.invoiceNumber || '', totalAmount: e.totalAmount || 0,
+        totalTax: e.totalTax || 0, taxableAmount: e.taxableAmount || 0,
+        applyRoundOff: !!e.applyRoundOff, roundOff: e.roundOff || 0,
+        paymentStatus: e.paymentStatus || 'Unpaid', interstate: !!e.interstate,
+        note: e.note || '', items: JSON.stringify(e.items || []),
+      }), 'purchaseCount', 'purchaseSkipped');
+    }
+
+    // Meta
+    if (data.meta) {
+      if (overwrite || db.select().from(meta).all().length === 0) {
+        for (const [key, value] of Object.entries(data.meta)) {
+          setMetaValue(key, value);
+        }
+      }
+    }
+
+    // Post-import counter reconciliation (same logic as original)
+    const allBills = db.select({ data: bills.data }).from(bills)
+      .where(eq(bills.isTrashed, false)).all();
     const maxByPrefix = {};
-    for (const f of billFiles) {
-      let bill;
-      try { bill = readJSON(path.join(DATA_DIR, 'bills', f), null); } catch { continue; }
+    for (const row of allBills) {
+      const bill = billRowToObj(row);
       const num = String(bill?.invoiceNumber || bill?.id || '');
-      // Extract prefix + last numeric suffix (e.g. INV/2026-27/0007 → prefix INV, suffix 7)
       const m = num.match(/^([A-Z]+)[\W_].*?(\d+)\s*$/i);
       if (!m) continue;
       const prefix = m[1].toUpperCase();
@@ -644,37 +1002,25 @@ app.post('/api/import', (req, res) => {
       if (!Number.isFinite(suffix)) continue;
       if (!maxByPrefix[prefix] || suffix > maxByPrefix[prefix]) maxByPrefix[prefix] = suffix;
     }
-    let metaChanged = false;
     for (const [prefix, maxNum] of Object.entries(maxByPrefix)) {
       const key = `counter_${prefix}`;
-      const existing = Number(meta[key]) || 0;
-      if (maxNum > existing) {
-        meta[key] = maxNum;
-        metaChanged = true;
-      }
+      const existing = Number(getMetaValue(key, 0));
+      if (maxNum > existing) setMetaValue(key, maxNum);
     }
-    if (metaChanged) writeJSON(META_PATH, meta);
-  } catch (err) {
-    console.error('Post-import counter reconciliation failed:', err);
-  }
+  })();
 
   res.json({ ...counts, hasProfile: !!data.profile });
 });
 
-// ========================
-// Save PDF to local folder
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
+// Save PDF to local folder (file system — NOT migrated to SQLite)
+// ════════════════════════════════════════════════════════════════════════════
+
 const INVOICES_DIR = path.join(__dirname, 'Saved Invoices');
 if (!fs.existsSync(INVOICES_DIR)) fs.mkdirSync(INVOICES_DIR, { recursive: true });
 
 app.post('/api/save-pdf', express.raw({ type: 'application/pdf', limit: '20mb' }), (req, res) => {
   try {
-    // v1.10.0 — Path traversal fix. Previous filter stripped
-    // `<>:"/\|?*` but NOT `..`, so `?client=..&month=..&name=x.bat`
-    // resolved to `INVOICES_DIR/../../x.bat` and wrote attacker bytes
-    // above the app root. safePathSegment collapses `..` and control
-    // chars; the resolved-path guard below rejects anything that still
-    // escapes INVOICES_DIR.
     const rawName = req.query.name || `invoice-${Date.now()}.pdf`;
     const safeClient = safePathSegment(req.query.client, 'General');
     const safeMonth = safePathSegment(req.query.month, new Date().toLocaleString('en-IN', { month: 'long', year: 'numeric' }));
@@ -687,20 +1033,17 @@ app.post('/api/save-pdf', express.raw({ type: 'application/pdf', limit: '20mb' }
 
     if (!fs.existsSync(folderPath)) fs.mkdirSync(folderPath, { recursive: true });
     fs.writeFileSync(filePath, req.body);
-    // Don't leak absolute FS path — client only needs to know it saved
-    // and where (relative). Absolute path revealed OS username +
-    // install dir to any origin.
     res.json({ saved: true, relPath: path.relative(__dirname, filePath).split(path.sep).join('/') });
   } catch (err) {
     errRes(res, 500, 'server-error', err);
   }
 });
 
-// ========================
-// Move saved PDF to Trash
-// ========================
-const TRASH_DIR = path.join(__dirname, 'Trash');
+// ════════════════════════════════════════════════════════════════════════════
+// Move saved PDF to Trash (file system operation)
+// ════════════════════════════════════════════════════════════════════════════
 
+const TRASH_DIR = path.join(__dirname, 'Trash');
 if (!fs.existsSync(TRASH_DIR)) fs.mkdirSync(TRASH_DIR, { recursive: true });
 
 app.post('/api/trash-pdf', express.json(), (req, res) => {
@@ -708,14 +1051,10 @@ app.post('/api/trash-pdf', express.json(), (req, res) => {
     const { fileName, clientName } = req.body;
     if (!fileName) return errRes(res, 400, 'bad-request');
 
-    // v1.10.0 — Path traversal fix (see save-pdf comment). Prior code
-    // didn't strip `..` so `fileName: '../../../etc/passwd'` moved
-    // arbitrary local files into the Trash.
     const safeClient = safePathSegment(clientName, 'General');
     const safeName = safePathSegment(fileName, 'Untitled.pdf');
 
     const clientDir = path.join(INVOICES_DIR, safeClient);
-    // Extra guard — reject if the constructed client dir somehow escaped.
     if (!isPathInside(clientDir, INVOICES_DIR)) return errRes(res, 400, 'invalid-path');
     let found = false;
 
@@ -731,12 +1070,8 @@ app.post('/api/trash-pdf', express.json(), (req, res) => {
           const trashFile = path.join(trashPath, safeName);
           if (!isPathInside(trashFile, TRASH_DIR)) return errRes(res, 400, 'invalid-path');
           if (!fs.existsSync(trashPath)) fs.mkdirSync(trashPath, { recursive: true });
-          try {
-            fs.renameSync(filePath, trashFile);
-          } catch {
-            fs.copyFileSync(filePath, trashFile);
-            fs.unlinkSync(filePath);
-          }
+          try { fs.renameSync(filePath, trashFile); }
+          catch { fs.copyFileSync(filePath, trashFile); fs.unlinkSync(filePath); }
           found = true;
           break;
         }
@@ -750,12 +1085,8 @@ app.post('/api/trash-pdf', express.json(), (req, res) => {
         const trashFile = path.join(trashPath, safeName);
         if (isPathInside(trashFile, TRASH_DIR)) {
           if (!fs.existsSync(trashPath)) fs.mkdirSync(trashPath, { recursive: true });
-          try {
-            fs.renameSync(flatPath, trashFile);
-          } catch {
-            fs.copyFileSync(flatPath, trashFile);
-            fs.unlinkSync(flatPath);
-          }
+          try { fs.renameSync(flatPath, trashFile); }
+          catch { fs.copyFileSync(flatPath, trashFile); fs.unlinkSync(flatPath); }
           found = true;
         }
       }
@@ -767,67 +1098,38 @@ app.post('/api/trash-pdf', express.json(), (req, res) => {
   }
 });
 
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
 // Version check
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
+
 const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf-8'));
 
 app.get('/api/version', (req, res) => {
   res.json({ current: pkg.version });
 });
 
-// Replaced update logic to permanently disable external pings
 app.get('/api/check-update', async (req, res) => {
-  res.json({ 
-    current: pkg.version, 
-    latest: pkg.version, 
-    updateAvailable: false, 
-    releaseNotes: null,
-    releaseUrl: null,
-    releasePublishedAt: null,
-    releaseTag: null 
+  res.json({
+    current: pkg.version, latest: pkg.version, updateAvailable: false,
+    releaseNotes: null, releaseUrl: null, releasePublishedAt: null, releaseTag: null,
   });
 });
 
-// ========================
+// ════════════════════════════════════════════════════════════════════════════
 // Serve production build
-// ========================
-// We register BOTH the static middleware and the SPA catch-all unconditionally.
-// The static middleware silently no-ops when dist/ doesn't exist; the catch-all
-// then checks per-request and serves either index.html (build ready) or the
-// friendly "still building" page (build not ready). This means the server can
-// start before `vite build` finishes — common in StackBlitz, Codespaces, or
-// when a user accidentally runs `node server.js` directly — and seamlessly
-// flips to serving the app the moment dist/ appears.
+// ════════════════════════════════════════════════════════════════════════════
+
 const distPath = path.join(__dirname, 'dist');
 const indexPath = path.join(distPath, 'index.html');
-app.use(express.static(distPath, { fallthrough: true })); // fallthrough = ok if dist doesn't exist
+app.use(express.static(distPath, { fallthrough: true }));
 
-// ============================================================
-// v1.9.5 — Automatic daily backup + retention (keep last 30 days).
-// MUST be registered BEFORE the SPA catch-all below, otherwise
-// GET /api/backups and GET /api/trash get swallowed by the catch-all
-// and return 404. Bug discovered by smoke test after v1.9.5 shipped.
-// ============================================================
+// ════════════════════════════════════════════════════════════════════════════
+// Backups — now simplified to SQLite file copy
+// ════════════════════════════════════════════════════════════════════════════
+
 const BACKUPS_DIR = path.join(DATA_DIR, 'backups');
-const BILL_TRASH_DIR = path.join(DATA_DIR, 'trash');
 function ensureDir(p) { if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true }); }
 
-function copyDirRecursive(src, dst) {
-  if (!fs.existsSync(dst)) fs.mkdirSync(dst, { recursive: true });
-  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    const s = path.join(src, entry.name);
-    const d = path.join(dst, entry.name);
-    if (entry.isDirectory()) copyDirRecursive(s, d);
-    else fs.copyFileSync(s, d);
-  }
-}
-
-// v1.10.0 — Local-timezone date, not UTC. Previous code used
-// `new Date().toISOString().split('T')[0]` which flips at midnight UTC
-// (05:30 IST) — an IST reboot at 05:29 vs 05:31 IST computed different
-// "today" values → duplicate backup dirs or a skipped calendar day.
-// Uses the sv-SE locale hack for guaranteed YYYY-MM-DD output.
 function todayLocalIso() {
   return new Date().toLocaleDateString('sv-SE');
 }
@@ -836,27 +1138,24 @@ function runDailyBackup() {
   try {
     ensureDir(BACKUPS_DIR);
     const today = todayLocalIso();
-    const target = path.join(BACKUPS_DIR, today);
+    const target = path.join(BACKUPS_DIR, `${today}.sqlite`);
     if (fs.existsSync(target)) return;
-    ensureDir(target);
-    const entries = fs.readdirSync(DATA_DIR, { withFileTypes: true });
-    for (const entry of entries) {
-      // v1.10.31 — Data-F7.1: `trash` is now INCLUDED in daily backups.
-      // Previously excluded → users restoring last week's backup lost every
-      // bill they'd trashed since, breaking the 30-day soft-delete promise.
-      // We still skip `backups` (no recursion) and log files.
-      if (entry.name === 'backups' || entry.name === 'errors.log' || entry.name === 'port.txt') continue;
-      const src = path.join(DATA_DIR, entry.name);
-      const dst = path.join(target, entry.name);
-      if (entry.isDirectory()) copyDirRecursive(src, dst);
-      else fs.copyFileSync(src, dst);
-    }
+
+    // Use SQLite's backup API — safe even while the DB is in use (WAL mode).
+    // better-sqlite3's .backup() is async; we use the synchronous file-copy
+    // approach after checkpointing WAL so the copy is consistent.
+    sqlite.pragma('wal_checkpoint(TRUNCATE)');
+    fs.copyFileSync(DB_PATH, target);
+
     console.log(`[backup] Daily snapshot saved: ${target}`);
-    const all = fs.readdirSync(BACKUPS_DIR).filter(n => /^\d{4}-\d{2}-\d{2}$/.test(n)).sort();
+
+    // Retention: keep last 30 backups
+    const all = fs.readdirSync(BACKUPS_DIR)
+      .filter(n => /^\d{4}-\d{2}-\d{2}\.sqlite$/.test(n))
+      .sort();
     while (all.length > 30) {
       const oldest = all.shift();
-      const oldestPath = path.join(BACKUPS_DIR, oldest);
-      try { fs.rmSync(oldestPath, { recursive: true, force: true }); } catch { /* ignore */ }
+      try { fs.unlinkSync(path.join(BACKUPS_DIR, oldest)); } catch { /* ignore */ }
     }
   } catch (err) {
     console.warn('[backup] Daily backup failed:', err.message);
@@ -867,24 +1166,21 @@ setTimeout(runDailyBackup, 5000);
 setInterval(runDailyBackup, 24 * 60 * 60 * 1000);
 
 // Backup management endpoints
+
 app.get('/api/backups', (req, res) => {
   try {
     ensureDir(BACKUPS_DIR);
     const list = fs.readdirSync(BACKUPS_DIR)
-      .filter(n => /^\d{4}-\d{2}-\d{2}$/.test(n))
+      .filter(n => /^\d{4}-\d{2}-\d{2}\.sqlite$/.test(n))
       .sort().reverse()
       .map(name => {
         const stat = fs.statSync(path.join(BACKUPS_DIR, name));
-        return { date: name, createdAt: stat.mtime.toISOString() };
+        return { date: name.replace('.sqlite', ''), createdAt: stat.mtime.toISOString() };
       });
     res.json(list);
   } catch (err) { errRes(res, 500, 'server-error', err); }
 });
 
-// v1.10.22 — Manual delete of a specific dated backup. Reported: "add
-// here delete option i know u added 30 days auto delete but manual delete
-// also u add". Guarded by the same path-inside + calendar-date checks the
-// restore endpoint uses so a crafted `:date` cannot escape BACKUPS_DIR.
 app.delete('/api/backups/:date', (req, res) => {
   try {
     const date = req.params.date;
@@ -893,99 +1189,93 @@ app.delete('/api/backups/:date', (req, res) => {
     if (m < 1 || m > 12 || d < 1 || d > 31 || y < 2000 || y > 2100) {
       return errRes(res, 400, 'bad-request');
     }
-    const backupDir = path.join(BACKUPS_DIR, date);
-    if (!isPathInside(backupDir, BACKUPS_DIR)) return errRes(res, 400, 'invalid-path');
-    if (!fs.existsSync(backupDir)) return errRes(res, 404, 'not-found');
-    fs.rmSync(backupDir, { recursive: true, force: true });
+    const backupFile = path.join(BACKUPS_DIR, `${date}.sqlite`);
+    if (!isPathInside(backupFile, BACKUPS_DIR)) return errRes(res, 400, 'invalid-path');
+    if (!fs.existsSync(backupFile)) return errRes(res, 404, 'not-found');
+    fs.unlinkSync(backupFile);
     res.json({ success: true, date });
   } catch (err) { errRes(res, 500, 'server-error', err); }
 });
 
 app.post('/api/backups/:date/restore', (req, res) => {
-  // v1.10.0 — Transactional restore. Prior implementation
-  // `fs.rmSync(dst)` -> `copyDirRecursive(src, dst)`. If copy threw
-  // partway (ENOSPC, EACCES, half-corrupted backup), the user's live
-  // data was already gone and only a partial restore existed. Now: we
-  // rename the current directories to a "pre-restore-<timestamp>"
-  // snapshot inside BACKUPS_DIR, do the copy, and only rmSync the
-  // snapshot on success. If anything throws, we rename the snapshot
-  // back — user is back where they started.
-  let snapshotDir = null;
-  const restoredDirs = [];
   try {
     const date = req.params.date;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return errRes(res, 400, 'bad-request');
-    const backupDir = path.join(BACKUPS_DIR, date);
-    if (!isPathInside(backupDir, BACKUPS_DIR)) return errRes(res, 400, 'invalid-path');
-    if (!fs.existsSync(backupDir)) return errRes(res, 404, 'not-found');
+    const backupFile = path.join(BACKUPS_DIR, `${date}.sqlite`);
+    if (!isPathInside(backupFile, BACKUPS_DIR)) return errRes(res, 400, 'invalid-path');
+    if (!fs.existsSync(backupFile)) return errRes(res, 404, 'not-found');
 
-    // Additional date sanity — a directory can exist with an unrealistic
-    // date planted before hardening. Reject impossible calendar dates.
     const [y, m, d] = date.split('-').map(Number);
     if (m < 1 || m > 12 || d < 1 || d > 31 || y < 2000 || y > 2100) {
       return errRes(res, 400, 'bad-request');
     }
 
-    // Make a snapshot of live data before touching anything.
-    snapshotDir = path.join(BACKUPS_DIR, `pre-restore-${Date.now()}`);
-    ensureDir(snapshotDir);
-    const liveEntries = fs.readdirSync(DATA_DIR, { withFileTypes: true });
-    for (const entry of liveEntries) {
-      if (entry.name === 'backups' || entry.name === 'errors.log' || entry.name === 'port.txt') continue;
-      const src = path.join(DATA_DIR, entry.name);
-      const dst = path.join(snapshotDir, entry.name);
-      if (entry.isDirectory()) copyDirRecursive(src, dst);
-      else fs.copyFileSync(src, dst);
-    }
+    // Create a pre-restore snapshot
+    const preRestorePath = path.join(BACKUPS_DIR, `pre-restore-${Date.now()}.sqlite`);
+    sqlite.pragma('wal_checkpoint(TRUNCATE)');
+    fs.copyFileSync(DB_PATH, preRestorePath);
 
-    // Now do the restore. Track what we replaced so rollback knows
-    // which dirs to nuke first.
-    const backupEntries = fs.readdirSync(backupDir, { withFileTypes: true });
-    for (const entry of backupEntries) {
-      const src = path.join(backupDir, entry.name);
-      const dst = path.join(DATA_DIR, entry.name);
-      if (!isPathInside(dst, DATA_DIR)) continue;
-      if (entry.isDirectory()) {
-        if (fs.existsSync(dst)) fs.rmSync(dst, { recursive: true, force: true });
-        copyDirRecursive(src, dst);
-      } else {
-        fs.copyFileSync(src, dst);
-      }
-      restoredDirs.push(entry.name);
-    }
+    try {
+      // Close current DB, copy backup over, re-open would require restart.
+      // Instead, we do an in-process restore: read the backup DB and copy
+      // all tables into the current DB inside a transaction.
+      const backupDb = new Database(backupFile, { readonly: true });
 
-    // Success — remove the pre-restore snapshot (or keep for a bit? we
-    // remove because the backup itself is still on disk as a rollback
-    // option). Failures below prevent removal.
-    fs.rmSync(snapshotDir, { recursive: true, force: true });
-    res.json({ success: true, restored: date });
-  } catch (err) {
-    // Rollback: put the snapshot back over whatever the restore
-    // half-did. This preserves user data at the cost of losing the
-    // partial restore (which was probably corrupt anyway).
-    if (snapshotDir && fs.existsSync(snapshotDir)) {
-      try {
-        for (const name of restoredDirs) {
-          const dst = path.join(DATA_DIR, name);
-          if (!isPathInside(dst, DATA_DIR)) continue;
-          if (fs.existsSync(dst)) fs.rmSync(dst, { recursive: true, force: true });
-          const snap = path.join(snapshotDir, name);
-          if (fs.existsSync(snap)) {
-            if (fs.statSync(snap).isDirectory()) copyDirRecursive(snap, dst);
-            else fs.copyFileSync(snap, dst);
+      sqlite.transaction(() => {
+        // Clear all tables
+        for (const table of ['bills', 'clients', 'products', 'purchases', 'expenses',
+                             'receipts', 'profiles', 'templates', 'recurring', 'meta']) {
+          sqlite.exec(`DELETE FROM ${table}`);
+        }
+
+        // Copy from backup
+        for (const table of ['bills', 'clients', 'products', 'purchases', 'expenses',
+                             'receipts', 'profiles', 'templates', 'recurring', 'meta']) {
+          const rows = backupDb.prepare(`SELECT * FROM ${table}`).all();
+          if (rows.length === 0) continue;
+          const cols = Object.keys(rows[0]);
+          const placeholders = cols.map(() => '?').join(', ');
+          const insert = sqlite.prepare(
+            `INSERT OR REPLACE INTO ${table} (${cols.join(', ')}) VALUES (${placeholders})`
+          );
+          for (const row of rows) {
+            insert.run(...cols.map(c => row[c]));
           }
         }
-      } catch { /* if rollback fails, snapshot stays on disk for manual recovery */ }
+      })();
+
+      backupDb.close();
+
+      // Success — remove pre-restore snapshot
+      try { fs.unlinkSync(preRestorePath); } catch { /* keep for safety */ }
+      res.json({ success: true, restored: date });
+    } catch (restoreErr) {
+      // Rollback: restore from pre-restore snapshot
+      try {
+        const rollbackDb = new Database(preRestorePath, { readonly: true });
+        sqlite.transaction(() => {
+          for (const table of ['bills', 'clients', 'products', 'purchases', 'expenses',
+                               'receipts', 'profiles', 'templates', 'recurring', 'meta']) {
+            sqlite.exec(`DELETE FROM ${table}`);
+            const rows = rollbackDb.prepare(`SELECT * FROM ${table}`).all();
+            if (rows.length === 0) continue;
+            const cols = Object.keys(rows[0]);
+            const placeholders = cols.map(() => '?').join(', ');
+            const insert = sqlite.prepare(
+              `INSERT OR REPLACE INTO ${table} (${cols.join(', ')}) VALUES (${placeholders})`
+            );
+            for (const row of rows) {
+              insert.run(...cols.map(c => row[c]));
+            }
+          }
+        })();
+        rollbackDb.close();
+      } catch { /* if rollback fails, pre-restore file stays for manual recovery */ }
+      errRes(res, 500, 'server-error', restoreErr);
     }
-    errRes(res, 500, 'server-error', err);
-  }
+  } catch (err) { errRes(res, 500, 'server-error', err); }
 });
 
-// v1.10.6 — audit L11: throttle. Prior code let any caller spam this
-// endpoint and each hit walked the whole data tree + 30-day pruning.
-// The `if (fs.existsSync(target)) return` inside runDailyBackup makes
-// this idempotent per day, but the fs walks still happen. Now: at most
-// one call per 5 seconds; excess return 429 with a hint.
 let __lastBackupNowMs = 0;
 app.post('/api/backups/now', (req, res) => {
   const now = Date.now();
@@ -997,73 +1287,63 @@ app.post('/api/backups/now', (req, res) => {
   res.json({ success: true });
 });
 
-// ---- Trash bin (soft delete for invoices) ---------------------------------
-ensureDir(BILL_TRASH_DIR);
+// ════════════════════════════════════════════════════════════════════════════
+// Trash bin (soft-deleted invoices — now in the bills table with isTrashed=1)
+// ════════════════════════════════════════════════════════════════════════════
 
 app.get('/api/trash', (req, res) => {
   try {
-    ensureDir(BILL_TRASH_DIR);
-    const files = fs.readdirSync(BILL_TRASH_DIR)
-      .filter(n => n.endsWith('.json'))
-      .map(name => {
-        try {
-          const p = path.join(BILL_TRASH_DIR, name);
-          const bill = readJSON(p, null);
-          const stat = fs.statSync(p);
-          return bill ? { ...bill, _trashedAt: stat.mtime.toISOString() } : null;
-        } catch { return null; }
-      })
-      .filter(Boolean);
-    res.json(files);
+    const rows = db.select().from(bills).where(eq(bills.isTrashed, true)).all();
+    res.json(rows.map(row => {
+      const obj = billRowToObj(row);
+      obj._trashedAt = row.trashedAt || null;
+      return obj;
+    }));
   } catch (err) { errRes(res, 500, 'server-error', err); }
 });
 
 app.post('/api/trash/:id/restore', (req, res) => {
   try {
-    const fname = safeFileName(req.params.id) + '.json';
-    const trashPath = path.join(BILL_TRASH_DIR, fname);
-    const billsPath = path.join(DATA_DIR, 'bills', fname);
-    if (!fs.existsSync(trashPath)) return res.status(404).json({ error: 'Not in trash' });
-    fs.renameSync(trashPath, billsPath);
+    const row = db.select({ id: bills.id }).from(bills)
+      .where(eq(bills.id, req.params.id))
+      .get();
+    if (!row) return res.status(404).json({ error: 'Not in trash' });
+
+    db.update(bills).set({
+      isTrashed: false,
+      trashedAt: null,
+    }).where(eq(bills.id, req.params.id)).run();
+
     res.json({ success: true });
   } catch (err) { errRes(res, 500, 'server-error', err); }
 });
 
 app.delete('/api/trash/:id', (req, res) => {
   try {
-    const fname = safeFileName(req.params.id) + '.json';
-    const trashPath = path.join(BILL_TRASH_DIR, fname);
-    if (fs.existsSync(trashPath)) fs.unlinkSync(trashPath);
+    db.delete(bills).where(eq(bills.id, req.params.id)).run();
     res.json({ success: true });
   } catch (err) { errRes(res, 500, 'server-error', err); }
 });
 
+// Auto-purge trashed bills older than 30 days
 function purgeOldTrash() {
   try {
-    ensureDir(BILL_TRASH_DIR);
-    const now = Date.now();
-    const thirtyDays = 30 * 24 * 60 * 60 * 1000;
-    for (const name of fs.readdirSync(BILL_TRASH_DIR)) {
-      const p = path.join(BILL_TRASH_DIR, name);
-      const stat = fs.statSync(p);
-      if (now - stat.mtime.getTime() > thirtyDays) {
-        try { fs.unlinkSync(p); } catch { /* ignore */ }
-      }
-    }
+    const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    // Delete trashed bills whose trashedAt is older than 30 days
+    sqlite.exec(`DELETE FROM bills WHERE is_trashed = 1 AND trashed_at IS NOT NULL AND trashed_at < '${cutoff}'`);
   } catch { /* ignore */ }
 }
 setInterval(purgeOldTrash, 24 * 60 * 60 * 1000);
 
-// v1.10.0 — Health-check endpoint moved here (was registered AFTER the
-// SPA catch-all → every GET /api/health returned "No such endpoint" →
-// the UI's health-banner was permanently broken). Now registered
-// before the catch-all so it actually serves.
+// ════════════════════════════════════════════════════════════════════════════
+// Health check
+// ════════════════════════════════════════════════════════════════════════════
+
 app.get('/api/health', (req, res) => {
   let errorsTail = '';
   try {
     if (fs.existsSync(ERRORS_LOG)) {
       const stat = fs.statSync(ERRORS_LOG);
-      // Read the last 4KB only so a runaway log file can't OOM the response.
       const fd = fs.openSync(ERRORS_LOG, 'r');
       const len = Math.min(stat.size, 4096);
       const buf = Buffer.alloc(len);
@@ -1079,21 +1359,25 @@ app.get('/api/health', (req, res) => {
     pid: process.pid,
     hasRecentErrors: !!errorsTail.trim(),
     errorsTail,
+    storage: 'sqlite',
   });
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// SPA catch-all
+// ════════════════════════════════════════════════════════════════════════════
 
 app.get('{*path}', (req, res) => {
   if (req.path.startsWith('/api')) return res.status(404).json({ error: 'No such endpoint' });
   if (fs.existsSync(indexPath)) {
     return res.sendFile(indexPath);
   }
-  // Build not ready yet — serve friendly waiting page (auto-refreshes every 3s).
   return servePlaceholder(req, res);
 });
 
 function servePlaceholder(req, res) {
-    if (req.path.startsWith('/api')) return res.status(404).json({ error: 'No such endpoint' });
-    res.status(503).send(`<!doctype html>
+  if (req.path.startsWith('/api')) return res.status(404).json({ error: 'No such endpoint' });
+  res.status(503).send(`<!doctype html>
 <html><head><meta charset="utf-8"><title>ArthSutra — building…</title>
 <meta http-equiv="refresh" content="3">
 <style>
@@ -1125,15 +1409,11 @@ function servePlaceholder(req, res) {
 </body></html>`);
 }
 
-// v1.10.0 — Global error handler. Registered LAST so all preceding
-// route handlers can forward errors to it. Express 5 auto-catches
-// synchronous throws and async rejections from route handlers, so we
-// no longer need try/catch around every writeJSON call. Server-side
-// logs full detail; client sees a generic JSON error with a stable
-// code — no leaked stack traces or absolute filesystem paths.
-// Preserves upstream status codes from body-parser (413 payload too
-// large, 400 malformed JSON) so clients can differentiate.
-// eslint-disable-next-line no-unused-vars — 4-arg signature is required by Express
+// ════════════════════════════════════════════════════════════════════════════
+// Global error handler
+// ════════════════════════════════════════════════════════════════════════════
+
+// eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   const status = Number(err && (err.status || err.statusCode)) || 500;
   let code = 'server-error';
@@ -1143,31 +1423,25 @@ app.use((err, req, res, next) => {
   errRes(res, status, code, err);
 });
 
-// ============================================================
+// ════════════════════════════════════════════════════════════════════════════
 // Error log + graceful shutdown
-// ============================================================
-// ERRORS_LOG was declared once at the top of this file (v1.10.0)
-// where errRes() needs it. See line ~145.
+// ════════════════════════════════════════════════════════════════════════════
 
-// v1.10.0 — log rotation. Previously `data/errors.log` grew unbounded;
-// a tight failure loop (e.g. daily backup hitting a corrupted template)
-// would fill the disk. Now we keep only the last ~200KB. Called
-// opportunistically from logFatal — no separate timer.
 const ERRORS_LOG_MAX = 200 * 1024;
 function rotateErrorsIfLarge() {
   try {
     if (!fs.existsSync(ERRORS_LOG)) return;
     const stat = fs.statSync(ERRORS_LOG);
     if (stat.size <= ERRORS_LOG_MAX) return;
-    // Read the tail we want to keep, then rewrite atomically.
     const fd = fs.openSync(ERRORS_LOG, 'r');
     const keep = Buffer.alloc(ERRORS_LOG_MAX);
     fs.readSync(fd, keep, 0, ERRORS_LOG_MAX, stat.size - ERRORS_LOG_MAX);
     fs.closeSync(fd);
-    // Trim to next newline so we don't leave a half-line at the top.
     const s = keep.toString('utf-8');
     const nl = s.indexOf('\n');
-    writeFileAtomic(ERRORS_LOG, (nl >= 0 ? s.slice(nl + 1) : s));
+    const tmp = ERRORS_LOG + '.tmp';
+    fs.writeFileSync(tmp, (nl >= 0 ? s.slice(nl + 1) : s), 'utf-8');
+    fs.renameSync(tmp, ERRORS_LOG);
   } catch { /* ignore */ }
 }
 
@@ -1177,60 +1451,215 @@ function logFatal(err, source = 'fatal') {
     const ts = new Date().toISOString();
     const msg = err && err.stack ? err.stack : String(err);
     fs.appendFileSync(ERRORS_LOG, `[${ts}] [${source}] ${msg}\n`, 'utf-8');
-  } catch { /* nothing we can do if even appending fails */ }
+  } catch { /* nothing we can do */ }
 }
 
-// Last-resort handlers — log the error but do NOT call process.exit so the
-// running server keeps serving healthy requests. Per Node best-practice,
-// uncaughtException leaves the process in an unknown state, so we write the
-// log and let the OS / a wrapper script decide whether to restart.
 process.on('uncaughtException', (err) => logFatal(err, 'uncaughtException'));
 process.on('unhandledRejection', (err) => logFatal(err, 'unhandledRejection'));
 
-// Note: /api/health used to live below the SPA catch-all here, so the
-// catch-all was swallowing every request to it and returning "No such
-// endpoint". Moved above the catch-all in v1.10.0. See earlier in file.
+// ════════════════════════════════════════════════════════════════════════════
+// Recurring invoices — auto-fire on boot + daily interval
+// ════════════════════════════════════════════════════════════════════════════
 
-// Try ports starting from STARTING_PORT (persisted preference) until one is available.
-// Bound to 127.0.0.1 explicitly so the server can NEVER be reached from the LAN —
-// every byte stays on the user's machine, which the privacy promise depends on.
+function advanceDate(dateStr, frequency, interval) {
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return dateStr;
+  const n = Math.max(1, parseInt(interval, 10) || 1);
+  if (frequency === 'weekly') d.setDate(d.getDate() + 7 * n);
+  else if (frequency === 'quarterly') d.setMonth(d.getMonth() + 3 * n);
+  else if (frequency === 'yearly') d.setFullYear(d.getFullYear() + n);
+  else d.setMonth(d.getMonth() + n);
+  return d.toISOString().split('T')[0];
+}
+
+function nextInvoiceNumber(prefix, _settings = {}) {
+  // ACID: runs inside the caller's transaction
+  const metaRow = db.select().from(meta).where(eq(meta.key, `counter_${prefix}`)).get();
+  const settingsRow = db.select().from(meta).where(eq(meta.key, 'invoiceNumberSettings')).get();
+  const cfg = {
+    format: 'branded', brandPrefix: '', separator: '/', showFinYear: true, padDigits: 4,
+    ...(settingsRow ? safeParseJSON(settingsRow.value, {}) : {}),
+  };
+  const next = (Number(metaRow?.value) || 0) + 1;
+  setMetaValue(`counter_${prefix}`, next);
+
+  if (cfg.format === 'random') {
+    return `${cfg.brandPrefix || prefix}${cfg.separator}${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+  }
+  const sep = cfg.separator || '/';
+  const pfx = cfg.brandPrefix || prefix;
+  const padded = String(next).padStart(cfg.padDigits || 4, '0');
+  if (cfg.showFinYear) {
+    const y = new Date().getFullYear();
+    return `${pfx}${sep}${y}-${String(y + 1).slice(-2)}${sep}${padded}`;
+  }
+  return `${pfx}${sep}${padded}`;
+}
+
+async function processDueRecurring() {
+  const today = new Date().toISOString().split('T')[0];
+  const rows = db.select().from(recurring)
+    .where(eq(recurring.active, true))
+    .all();
+  let fired = 0;
+  const yieldToLoop = () => new Promise(r => setImmediate(r));
+
+  for (const row of rows) {
+    await yieldToLoop();
+    const tpl = recurringRowToObj(row);
+    if (!tpl || !tpl.active) continue;
+    if (!tpl.nextDate || tpl.nextDate > today) continue;
+    if (tpl.endMode === 'onDate' && tpl.endDate && today > tpl.endDate) continue;
+    if (tpl.endMode === 'afterN' && tpl.maxOccurrences && (tpl.occurrencesCreated || 0) >= tpl.maxOccurrences) continue;
+
+    try {
+      // Wrap each recurring fire in a transaction: create bill + update template + bump counter
+      sqlite.transaction(() => {
+        // Resolve live profile
+        const profileRows = db.select().from(profiles).all();
+        let profile = profileRows.find(p => p.id && tpl.profileId && p.id === tpl.profileId);
+        if (!profile) profile = profileRows.find(p => (p.businessName || '') === tpl.profileBusinessName);
+        profile = profile ? profileRowToObj(profile) : getMetaValue('profile', {});
+
+        const prefix = (tpl.invoiceType === 'proforma' ? 'EST'
+                     : tpl.invoiceType === 'credit-note' ? 'CN'
+                     : tpl.invoiceType === 'bill-of-supply' ? 'BOS'
+                     : tpl.invoiceType === 'composition' ? 'COMP'
+                     : tpl.invoiceType === 'delivery-challan' ? 'DC'
+                     : 'INV');
+        const invoiceNumber = nextInvoiceNumber(prefix);
+        const invoiceDate = today;
+
+        const client = {
+          name: tpl.clientName,
+          state: tpl.clientState,
+          gstin: tpl.clientGstin,
+          isSEZ: !!tpl.isSEZ,
+        };
+        const details = { placeOfSupply: tpl.placeOfSupply };
+        const invoiceOptions = tpl.invoiceOptions || {};
+        const totals = computeInvoiceTotals({
+          items: tpl.items || [],
+          profile,
+          client,
+          details,
+          showGST: invoiceOptions.showGST !== false,
+          taxInclusive: !!tpl.taxInclusive,
+          invoiceOptions,
+        });
+
+        const bill = {
+          id: invoiceNumber,
+          clientName: tpl.clientName,
+          invoiceNumber,
+          invoiceDate,
+          invoiceType: tpl.invoiceType || 'tax-invoice',
+          currency: (tpl.invoiceOptions && tpl.invoiceOptions.currency) || 'INR',
+          totalAmount: totals.total,
+          totalTaxAmount: totals.totalTaxAmount,
+          status: 'unpaid',
+          paidAmount: 0,
+          payments: [],
+          generatedFrom: tpl.id,
+          autoGenerated: true,
+          autoGeneratedAt: new Date().toISOString(),
+          data: {
+            profile,
+            client: {
+              name: tpl.clientName, state: tpl.clientState, gstin: tpl.clientGstin,
+              address: tpl.clientAddress, country: tpl.clientCountry, city: tpl.clientCity,
+              pin: tpl.clientPin, email: tpl.clientEmail, phone: tpl.clientPhone,
+              isSEZ: tpl.isSEZ,
+            },
+            details: { invoiceNumber, invoiceDate, dueDate: '', placeOfSupply: '' },
+            items: (tpl.items || []).map(i => ({
+              ...i,
+              name: i.name || i.description || '',
+            })),
+            totals,
+            invoiceType: tpl.invoiceType || 'tax-invoice',
+            customTerms: tpl.customTerms || '',
+            customNotes: tpl.customNotes || '',
+            extraSections: tpl.extraSections || [],
+            invoiceOptions: tpl.invoiceOptions || {},
+            taxInclusive: !!tpl.taxInclusive,
+          },
+        };
+
+        // Insert the generated bill
+        db.insert(bills).values({
+          id: bill.id,
+          clientName: bill.clientName || '',
+          invoiceNumber: bill.invoiceNumber,
+          invoiceDate: bill.invoiceDate,
+          invoiceType: bill.invoiceType,
+          currency: bill.currency,
+          totalAmount: bill.totalAmount,
+          totalTaxAmount: bill.totalTaxAmount,
+          status: 'unpaid',
+          paidAmount: 0,
+          printedCount: 0,
+          generatedFrom: bill.generatedFrom,
+          autoGenerated: true,
+          autoGeneratedAt: bill.autoGeneratedAt,
+          isTrashed: false,
+          data: JSON.stringify(bill),
+        }).run();
+
+        // Advance the template
+        tpl.nextDate = advanceDate(tpl.nextDate, tpl.frequency, tpl.interval);
+        tpl.lastGenerated = today;
+        tpl.occurrencesCreated = (tpl.occurrencesCreated || 0) + 1;
+
+        db.update(recurring).set({
+          nextDate: tpl.nextDate,
+          data: JSON.stringify(tpl),
+        }).where(eq(recurring.id, tpl.id)).run();
+      })();
+
+      fired += 1;
+    } catch (err) {
+      logFatal(err, 'recurring');
+    }
+  }
+
+  if (fired > 0) {
+    console.log(`  Auto-generated ${fired} recurring invoice${fired !== 1 ? 's' : ''}.`);
+    setMetaValue('lastRecurringAutoFire', { date: today, count: fired, at: new Date().toISOString() });
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Start server
+// ════════════════════════════════════════════════════════════════════════════
+
 let activeServer = null;
 function startServer(port) {
   const server = app.listen(port, '127.0.0.1', () => {
     activeServer = server;
-    // Persist the chosen port — the .bat launcher reads this for the browser URL.
-    // Writing on EVERY successful boot means: if our preferred 47371 was busy and
-    // we landed on 47372 instead, next launch tries 47372 first (cuts collision
-    // scans in half on repeated reboots of whatever was holding 47371).
     try { fs.writeFileSync(PORT_FILE, String(port), 'utf-8'); } catch { /* ignore */ }
     console.log(`\n  ArthSutra running at http://localhost:${port}`);
-    console.log(`  Data stored in: ${DATA_DIR}\n`);
+    console.log(`  Data stored in: ${DB_PATH}\n`);
   });
   server.on('error', (err) => {
     if (err.code === 'EADDRINUSE' && port < STARTING_PORT + MAX_PORT_SCAN) {
       console.log(`  Port ${port} is busy, trying ${port + 1}...`);
       startServer(port + 1);
     } else if (err.code === 'EADDRINUSE') {
-      // We've exhausted the scan range. Tell the OS to pick anything free — at
-      // this point the user has 50+ apps fighting for the 47371-47421 range,
-      // which we treat as "do whatever works" rather than failing to start.
       console.warn(`  Scanned ${MAX_PORT_SCAN} ports from ${STARTING_PORT} — letting OS assign a free one.`);
       startServer(0);
     } else {
       console.error(`  Failed to start server: ${err.message}`);
-      // Persist the failure so the user has a breadcrumb when the silent
-      // launcher exits without any visible window.
       logFatal(err, 'startup');
       process.exit(1);
     }
   });
 }
 
-// Graceful shutdown — taskkill /f from Stop FreeGSTBill.bat can interrupt a
-// sync write mid-flight. SIGINT (Ctrl+C in foreground) and SIGTERM (clean
-// kill) get a 3-second window to flush.
 function gracefulShutdown(signal) {
   console.log(`\n  Received ${signal}, closing connections...`);
+  // Close SQLite cleanly
+  try { sqlite.close(); } catch { /* ignore */ }
   if (!activeServer) { process.exit(0); return; }
   const force = setTimeout(() => {
     console.warn('  Force-exiting after 3s grace period');
@@ -1246,188 +1675,6 @@ function gracefulShutdown(signal) {
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
-// =====================================================
-// Recurring invoices — auto-fire on boot + daily interval
-// =====================================================
-// For every recurring template with `nextDate <= today` and `active === true`,
-// generate a new invoice (with a fresh sequential number for the matching
-// type prefix and today's date) and advance the template's `nextDate` by its
-// frequency. Honours `endMode` so weekly-for-12-weeks contracts stop themselves.
-//
-// Why server-side (and not in the React app): if the user opens the app on
-// the 5th but the template was due on the 1st, the missed-cycle invoice still
-// fires here. The frontend would only see it if the user happened to open the
-// app between firings — fragile.
-//
-// Why no Windows scheduled task (yet): the server starts on every Windows
-// login via the Startup-folder shortcut, so booting your PC = a check.
-// Long-uptime users get a daily `setInterval` below as a backstop.
-function advanceDate(dateStr, frequency, interval) {
-  const d = new Date(dateStr);
-  if (isNaN(d.getTime())) return dateStr;
-  const n = Math.max(1, parseInt(interval, 10) || 1);
-  if (frequency === 'weekly') d.setDate(d.getDate() + 7 * n);
-  else if (frequency === 'quarterly') d.setMonth(d.getMonth() + 3 * n);
-  else if (frequency === 'yearly') d.setFullYear(d.getFullYear() + n);
-  else d.setMonth(d.getMonth() + n); // default: monthly
-  return d.toISOString().split('T')[0];
-}
-
-function nextInvoiceNumber(prefix, settings = {}) {
-  // Mirror the frontend's getNextInvoiceNumber logic — atomic counter via
-  // meta, applied to the same brandPrefix / separator / padding settings.
-  const key = `counter_${prefix}`;
-  const meta = readJSON(META_PATH, {});
-  const cfg = { format: 'branded', brandPrefix: '', separator: '/', showFinYear: true, padDigits: 4, ...(meta.invoiceNumberSettings || {}) };
-  const next = (Number(meta[key]) || 0) + 1;
-  meta[key] = next;
-  writeJSON(META_PATH, meta);
-  if (cfg.format === 'random') {
-    return `${cfg.brandPrefix || prefix}${cfg.separator}${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
-  }
-  const sep = cfg.separator || '/';
-  const pfx = cfg.brandPrefix || prefix;
-  const padded = String(next).padStart(cfg.padDigits || 4, '0');
-  if (cfg.showFinYear) {
-    const y = new Date().getFullYear();
-    return `${pfx}${sep}${y}-${String(y + 1).slice(-2)}${sep}${padded}`;
-  }
-  return `${pfx}${sep}${padded}`;
-  // Ignored other settings flags — they'd just produce slightly different
-  // formatting; matches frontend behaviour closely enough for the rare
-  // server-side firing.
-}
-
-// v1.10.6 — audit L19: made async and yields between templates via
-// setImmediate. Prior code was one uninterrupted sync loop over every
-// recurring template with sync FS writes; N templates × K items
-// blocked the event loop → HTTP handlers froze until it finished.
-// Now: single-template body is unchanged, but each iteration awaits
-// setImmediate() so pending fetches / API calls get a slot.
-async function processDueRecurring() {
-  const today = new Date().toISOString().split('T')[0];
-  const templates = readAllFromDir('recurring');
-  let fired = 0;
-  const yieldToLoop = () => new Promise(r => setImmediate(r));
-  for (const tpl of templates) {
-    await yieldToLoop();
-    if (!tpl || !tpl.active) continue;
-    if (!tpl.nextDate || tpl.nextDate > today) continue;
-    // End conditions
-    if (tpl.endMode === 'onDate' && tpl.endDate && today > tpl.endDate) continue;
-    if (tpl.endMode === 'afterN' && tpl.maxOccurrences && (tpl.occurrencesCreated || 0) >= tpl.maxOccurrences) continue;
-
-    try {
-      // Resolve a LIVE profile by id or businessName (mirrors v1.4.2
-      // company-name-auto-update behaviour for recurring fires).
-      const profiles = readAllFromDir('profiles');
-      let profile = profiles.find(p => p.id && tpl.profileId && p.id === tpl.profileId)
-                 || profiles.find(p => p.businessName === tpl.profileBusinessName)
-                 || readJSON(PROFILE_PATH, {});
-
-      const prefix = (tpl.invoiceType === 'proforma' ? 'EST'
-                   : tpl.invoiceType === 'credit-note' ? 'CN'
-                   : tpl.invoiceType === 'bill-of-supply' ? 'BOS'
-                   : tpl.invoiceType === 'composition' ? 'COMP'
-                   : tpl.invoiceType === 'delivery-challan' ? 'DC'
-                   : 'INV');
-      const invoiceNumber = nextInvoiceNumber(prefix);
-      const invoiceDate = today;
-
-      // v1.10.31 — Data-F3.1: use shared computeInvoiceTotals so every math
-      // fix (UTGST, cess, RCM, TDS/TCS ₹50L threshold, discount modes,
-      // tax-inclusive, invoice-level discount, round-off) applies here too.
-      // Prior inline math didn't recognise ANY of those and silently produced
-      // wrong tax buckets for recurring bills. All the v1.10.1 audit fixes
-      // were being reintroduced here.
-      const client = {
-        name: tpl.clientName,
-        state: tpl.clientState,
-        gstin: tpl.clientGstin,
-        isSEZ: !!tpl.isSEZ,
-      };
-      const details = { placeOfSupply: tpl.placeOfSupply };
-      const invoiceOptions = tpl.invoiceOptions || {};
-      const totals = computeInvoiceTotals({
-        items: tpl.items || [],
-        profile,
-        client,
-        details,
-        showGST: invoiceOptions.showGST !== false,
-        taxInclusive: !!tpl.taxInclusive,
-        invoiceOptions,
-      });
-      const totalAmount = totals.total;
-      const taxTotal = totals.totalTaxAmount;
-      const subtotal = totals.subtotal;
-      const totalDiscount = totals.totalDiscount;
-
-      const bill = {
-        id: invoiceNumber,
-        clientName: tpl.clientName,
-        invoiceNumber,
-        invoiceDate,
-        invoiceType: tpl.invoiceType || 'tax-invoice',
-        currency: (tpl.invoiceOptions && tpl.invoiceOptions.currency) || 'INR',
-        totalAmount,
-        totalTaxAmount: taxTotal,
-        status: 'unpaid',
-        paidAmount: 0,
-        payments: [],
-        generatedFrom: tpl.id,
-        autoGenerated: true,
-        autoGeneratedAt: new Date().toISOString(),
-        data: {
-          profile,
-          client: {
-            name: tpl.clientName, state: tpl.clientState, gstin: tpl.clientGstin,
-            address: tpl.clientAddress, country: tpl.clientCountry, city: tpl.clientCity,
-            pin: tpl.clientPin, email: tpl.clientEmail, phone: tpl.clientPhone,
-            isSEZ: tpl.isSEZ,
-          },
-          details: { invoiceNumber, invoiceDate, dueDate: '', placeOfSupply: '' },
-          // Normalize item.name from legacy description field (v1.6.7-and-earlier
-          // templates used `description` — auto-fired bills rendered blank rows).
-          items: (tpl.items || []).map(i => ({
-            ...i,
-            name: i.name || i.description || '',
-          })),
-          totals,
-          invoiceType: tpl.invoiceType || 'tax-invoice',
-          customTerms: tpl.customTerms || '',
-          customNotes: tpl.customNotes || '',
-          extraSections: tpl.extraSections || [],
-          invoiceOptions: tpl.invoiceOptions || {},
-          taxInclusive: !!tpl.taxInclusive,
-        },
-      };
-
-      writeJSON(path.join(DATA_DIR, 'bills', safeFileName(invoiceNumber) + '.json'), bill);
-
-      // Advance the template
-      tpl.nextDate = advanceDate(tpl.nextDate, tpl.frequency, tpl.interval);
-      tpl.lastGenerated = today;
-      tpl.occurrencesCreated = (tpl.occurrencesCreated || 0) + 1;
-      writeJSON(path.join(DATA_DIR, 'recurring', safeFileName(tpl.id) + '.json'), tpl);
-
-      fired += 1;
-    } catch (err) {
-      logFatal(err, 'recurring');
-    }
-  }
-  if (fired > 0) {
-    console.log(`  Auto-generated ${fired} recurring invoice${fired !== 1 ? 's' : ''}.`);
-    // Surface the count so the frontend notification centre can pick it up.
-    const meta = readJSON(META_PATH, {});
-    meta.lastRecurringAutoFire = { date: today, count: fired, at: new Date().toISOString() };
-    writeJSON(META_PATH, meta);
-  }
-}
-
 startServer(STARTING_PORT);
-// Fire once after a short delay so the listener is up first; then once a day
-// for users whose server stays up >24h.
-// v1.10.6 — audit L19: async caller. Uncaught rejections logged via
-// the top-level unhandledRejection handler installed above.
 setTimeout(() => { processDueRecurring().catch(err => logFatal(err, 'recurring')); }, 3000);
 setInterval(() => { processDueRecurring().catch(err => logFatal(err, 'recurring')); }, 24 * 60 * 60 * 1000);
