@@ -28,6 +28,8 @@ import './index.css'
 let __updateSW = null;
 window.__fgsbSwUpdateReady = false;
 
+const isElectron = typeof window !== 'undefined' && window.navigator?.userAgent?.includes('Electron');
+
 const hasUnsavedInput = () => {
   try {
     const inputs = document.querySelectorAll('input, textarea, [contenteditable="true"]');
@@ -39,25 +41,36 @@ const hasUnsavedInput = () => {
   } catch { return false; }
 };
 
-__updateSW = registerSW({
-  onNeedRefresh() {
-    window.__fgsbSwUpdateReady = true;
-    window.dispatchEvent(new CustomEvent('fgsb-sw-update-ready'));
-    // If user is on a read-only view, apply immediately — no white-screen
-    // risk from stale hash-mismatched bundle.
-    if (!hasUnsavedInput()) {
-      setTimeout(() => window.__fgsbApplyUpdate?.(), 500);
-      return;
-    }
-    // Otherwise wait 20s — enough to finish typing a line or two, then
-    // auto-apply. User can also blur / navigate to trigger it sooner.
-    setTimeout(() => window.__fgsbApplyUpdate?.(), 20_000);
-  },
-  onOfflineReady() {
-    // Prior console.log removed — production hygiene (v1.9.15 audit L1).
-    window.dispatchEvent(new CustomEvent('fgsb-sw-offline-ready'));
-  },
-});
+if (!isElectron) {
+  __updateSW = registerSW({
+    onNeedRefresh() {
+      window.__fgsbSwUpdateReady = true;
+      window.dispatchEvent(new CustomEvent('fgsb-sw-update-ready'));
+      // If user is on a read-only view, apply immediately — no white-screen
+      // risk from stale hash-mismatched bundle.
+      if (!hasUnsavedInput()) {
+        setTimeout(() => window.__fgsbApplyUpdate?.(), 500);
+        return;
+      }
+      // Otherwise wait 20s — enough to finish typing a line or two, then
+      // auto-apply. User can also blur / navigate to trigger it sooner.
+      setTimeout(() => window.__fgsbApplyUpdate?.(), 20_000);
+    },
+    onOfflineReady() {
+      // Prior console.log removed — production hygiene (v1.9.15 audit L1).
+      window.dispatchEvent(new CustomEvent('fgsb-sw-offline-ready'));
+    },
+  });
+} else {
+  // PWA Fix: In Electron, disable Service Worker and unregister any active ones
+  if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+    navigator.serviceWorker.getRegistrations().then(registrations => {
+      for (const reg of registrations) {
+        reg.unregister().catch(() => {});
+      }
+    }).catch(() => {});
+  }
+}
 
 // Called by whichever UI component (or auto-defer logic) decides now is
 // the right moment to activate the pending SW and reload.
@@ -87,7 +100,7 @@ window.addEventListener('blur', () => {
 //   2. If the loaded main bundle hits a `chunk-load` error (imports
 //      referencing files the SW's cache doesn't have), auto-reload
 //      once — belt-and-braces after case 1.
-if ('serviceWorker' in navigator) {
+if (!isElectron && 'serviceWorker' in navigator) {
   navigator.serviceWorker.getRegistration().then(reg => {
     if (!reg) return;
     // Take the waiting SW live if there is one.

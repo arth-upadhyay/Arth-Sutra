@@ -2,7 +2,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Migration script for Feature #5 & Feature #6:
 // 1. Creates `request_logs` and `users` tables if not present.
-// 2. Seeds default admin user (`admin` / `admin123` hashed with bcrypt).
+// 2. Seeds default admin user (`admin` / `admin123` hashed with bcryptjs).
 // 3. Encrypts existing plaintext bank details in `profiles` and `meta` ('profile').
 // ─────────────────────────────────────────────────────────────────────────────
 

@@ -5,7 +5,7 @@ import multer from 'multer';
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { eq, ne, sql, desc, asc } from 'drizzle-orm';
 import dotenv from 'dotenv';
 dotenv.config();
@@ -41,33 +41,11 @@ const STARTING_PORT = persistedPort || DEFAULT_PORT;
 const MAX_PORT_SCAN = 50;
 
 const app = express();
-const httpServer = http.createServer(app);
-
-// ── WebSocket Server for Real-Time Multi-User Sync with JWT Auth ───────────
-const wss = new WebSocketServer({ server: httpServer });
-
-wss.on('connection', (ws, req) => {
-  try {
-    const url = new URL(req.url, 'http://127.0.0.1');
-    const token = url.searchParams.get('token');
-    if (!token) {
-      ws.close(4001, 'Unauthorized: Missing token');
-      return;
-    }
-    const decoded = verifyToken(token);
-    ws.user = decoded;
-    ws.send(JSON.stringify({
-      type: 'CONNECTED',
-      user: decoded.username,
-      role: decoded.role,
-      timestamp: new Date().toISOString(),
-    }));
-  } catch (err) {
-    ws.close(4001, 'Unauthorized: Invalid token');
-  }
-});
+let activeServer = null;
+let wss = null;
 
 function broadcast(type, data) {
+  if (!wss || !wss.clients) return;
   const payload = JSON.stringify({ type, data, timestamp: new Date().toISOString() });
   for (const client of wss.clients) {
     if (client.readyState === WebSocket.OPEN) {
@@ -1441,6 +1419,80 @@ app.get('/api/check-update', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
+// Feature #7: Plugin Architecture Loader
+// ════════════════════════════════════════════════════════════════════════════
+
+const loadedPlugins = [];
+const PLUGINS_DIR = path.join(__dirname, 'plugins');
+const USER_PLUGINS_DIR = path.join(DATA_DIR, 'plugins');
+
+async function loadPlugins() {
+  const dirsToScan = [PLUGINS_DIR];
+  if (USER_PLUGINS_DIR !== PLUGINS_DIR) {
+    dirsToScan.push(USER_PLUGINS_DIR);
+  }
+
+  for (const dir of dirsToScan) {
+    if (!fs.existsSync(dir)) {
+      try { fs.mkdirSync(dir, { recursive: true }); } catch { /* ignore */ }
+      continue;
+    }
+
+    let files = [];
+    try {
+      files = fs.readdirSync(dir).filter(f => f.endsWith('.js'));
+    } catch (err) {
+      console.warn(`[plugins] Failed to read directory ${dir}:`, err.message);
+      continue;
+    }
+
+    for (const file of files) {
+      const fullPath = path.join(dir, file);
+      try {
+        const fileUrl = pathToFileURL(fullPath).href;
+        const imported = await import(fileUrl);
+        const plugin = imported.default || imported;
+
+        if (!plugin || typeof plugin !== 'object') {
+          console.warn(`[plugins] Skipping invalid plugin in ${file}: does not export an object.`);
+          continue;
+        }
+
+        const name = plugin.name || path.basename(file, '.js');
+        if (loadedPlugins.some(p => p.id === name || p.name === name)) {
+          continue;
+        }
+
+        if (typeof plugin.registerRoutes === 'function') {
+          plugin.registerRoutes(app, {
+            db, sqlite, bills, clients, products, purchases, expenses, receipts, profiles,
+          });
+          console.log(`  [Plugin Loaded] ${plugin.displayName || name} (v${plugin.version || '1.0.0'}) from ${file}`);
+        } else {
+          console.warn(`[plugins] Plugin "${name}" has no registerRoutes method.`);
+        }
+
+        loadedPlugins.push({
+          id: name,
+          name: plugin.displayName || plugin.name || name,
+          description: plugin.description || 'Custom extension plugin.',
+          version: plugin.version || '1.0.0',
+          author: plugin.author || 'Custom',
+          endpoints: plugin.endpoints || [],
+          ui: plugin.ui || null,
+        });
+      } catch (pluginErr) {
+        console.error(`[plugins] Failed to load plugin "${file}":`, pluginErr);
+      }
+    }
+  }
+}
+
+app.get('/api/plugins', (req, res) => {
+  res.json({ plugins: loadedPlugins });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
 // Serve production build
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -1779,6 +1831,9 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// Load plugins before the SPA catch-all so plugin routes are registered first
+await loadPlugins();
+
 // ════════════════════════════════════════════════════════════════════════════
 // SPA catch-all
 // ════════════════════════════════════════════════════════════════════════════
@@ -2053,15 +2108,33 @@ async function processDueRecurring() {
 // Start server
 // ════════════════════════════════════════════════════════════════════════════
 
-let activeServer = null;
 function startServer(port) {
-  const server = httpServer.listen(port, '127.0.0.1', () => {
-    activeServer = server;
-    try { fs.writeFileSync(PORT_FILE, String(port), 'utf-8'); } catch { /* ignore */ }
-    console.log(`\n  ArthSutra running at http://localhost:${port}`);
-    console.log(`  Data stored in: ${DB_PATH}\n`);
+  const server = http.createServer(app);
+  const socketServer = new WebSocketServer({ server });
+
+  socketServer.on('connection', (ws, req) => {
+    try {
+      const url = new URL(req.url, 'http://127.0.0.1');
+      const token = url.searchParams.get('token');
+      if (!token) {
+        ws.close(4001, 'Unauthorized: Missing token');
+        return;
+      }
+      const decoded = verifyToken(token);
+      ws.user = decoded;
+      ws.send(JSON.stringify({
+        type: 'CONNECTED',
+        user: decoded.username,
+        role: decoded.role,
+        timestamp: new Date().toISOString(),
+      }));
+    } catch (err) {
+      ws.close(4001, 'Unauthorized: Invalid token');
+    }
   });
+
   server.on('error', (err) => {
+    try { socketServer.close(); } catch { /* ignore */ }
     if (err.code === 'EADDRINUSE' && port < STARTING_PORT + MAX_PORT_SCAN) {
       console.log(`  Port ${port} is busy, trying ${port + 1}...`);
       startServer(port + 1);
@@ -2074,11 +2147,20 @@ function startServer(port) {
       process.exit(1);
     }
   });
+
+  server.listen(port, '127.0.0.1', () => {
+    activeServer = server;
+    wss = socketServer;
+    const actualPort = server.address()?.port || port;
+    try { fs.writeFileSync(PORT_FILE, String(actualPort), 'utf-8'); } catch { /* ignore */ }
+    console.log(`\n  ArthSutra running at http://localhost:${actualPort}`);
+    console.log(`  Data stored in: ${DB_PATH}\n`);
+  });
 }
 
 function gracefulShutdown(signal) {
   console.log(`\n  Received ${signal}, closing connections...`);
-  try { wss.close(); } catch { /* ignore */ }
+  if (wss) try { wss.close(); } catch { /* ignore */ }
   // Close SQLite cleanly
   try { sqlite.close(); } catch { /* ignore */ }
   if (!activeServer) { process.exit(0); return; }
@@ -2099,3 +2181,5 @@ process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 startServer(STARTING_PORT);
 setTimeout(() => { processDueRecurring().catch(err => logFatal(err, 'recurring')); }, 3000);
 setInterval(() => { processDueRecurring().catch(err => logFatal(err, 'recurring')); }, 24 * 60 * 60 * 1000);
+
+export { startServer, loadPlugins, activeServer as httpServer, app };

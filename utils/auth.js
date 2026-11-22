@@ -1,10 +1,10 @@
 // utils/auth.js
 // ─────────────────────────────────────────────────────────────────────────────
-// Authentication & RBAC Utility (bcrypt + jsonwebtoken)
+// Authentication & RBAC Utility (bcryptjs + jsonwebtoken)
 // Roles: ADMIN, ACCOUNTANT, CLERK
 // ─────────────────────────────────────────────────────────────────────────────
 
-import bcrypt from 'bcrypt';
+import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 

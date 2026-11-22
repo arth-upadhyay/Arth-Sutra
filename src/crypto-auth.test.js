@@ -62,7 +62,7 @@ describe('Feature #6: Cryptographic Utilities (AES-256-GCM)', () => {
 });
 
 describe('Feature #6: Authentication & RBAC Utilities', () => {
-  it('hashes passwords and verifies them using bcrypt', async () => {
+  it('hashes passwords and verifies them using bcryptjs', async () => {
     const password = 'mySecretPassword99';
     const hash = await hashPassword(password);
     expect(hash).not.toBe(password);

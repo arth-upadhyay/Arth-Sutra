@@ -11,12 +11,46 @@ import * as schema from './schema.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
-const DATA_DIR = path.join(PROJECT_ROOT, 'data');
+
+let DATA_DIR = path.join(PROJECT_ROOT, 'data');
+
+// Electron path detection: route SQLite database to app.getPath('userData')
+if (process.versions && process.versions.electron) {
+  let userDataDir = process.env.ELECTRON_USER_DATA;
+  if (!userDataDir) {
+    try {
+      const electron = await import('electron');
+      const app = electron.app || electron.default?.app;
+      if (app && typeof app.getPath === 'function') {
+        userDataDir = app.getPath('userData');
+      }
+    } catch {
+      // Fallback if electron module isn't directly importable
+    }
+  }
+  if (userDataDir) {
+    DATA_DIR = userDataDir;
+  }
+}
 
 // Ensure data directory exists
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const DB_PATH = path.join(DATA_DIR, 'arth-sutra.sqlite');
+
+// First-boot migration: if running in Electron and destination DB doesn't exist yet,
+// but a local ./data/arth-sutra.sqlite exists (e.g. from development), copy it over!
+if (process.versions?.electron && !fs.existsSync(DB_PATH)) {
+  const localDevDb = path.join(PROJECT_ROOT, 'data', 'arth-sutra.sqlite');
+  if (fs.existsSync(localDevDb)) {
+    try {
+      fs.copyFileSync(localDevDb, DB_PATH);
+      console.log(`[db] Migrated existing development database from ${localDevDb} to ${DB_PATH}`);
+    } catch (err) {
+      console.warn('[db] Failed to copy dev database to userData:', err.message);
+    }
+  }
+}
 
 // ── Create the SQLite connection ───────────────────────────────────────────
 const sqlite = new Database(DB_PATH);

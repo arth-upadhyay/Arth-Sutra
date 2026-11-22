@@ -1,6 +1,6 @@
 import LockScreen from './components/LockScreen';
 import { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react';
-import { Home, FileText, Settings, Plus, Users, Package, BarChart3, Wallet, RefreshCw, Receipt, BookOpen, Download, X, ShoppingCart, ChevronDown, Building2, Pencil, HelpCircle, Search, Command, Bell, Calculator, GitCompare, LogOut, Shield } from 'lucide-react';
+import { Home, FileText, Settings, Plus, Users, Package, BarChart3, Wallet, RefreshCw, Receipt, BookOpen, Download, X, ShoppingCart, ChevronDown, Building2, Pencil, HelpCircle, Search, Command, Bell, Calculator, GitCompare, LogOut, Shield, Blocks } from 'lucide-react';
 import { getAllProfiles, saveProfile, getEnabledModules, getAllBills, getAllProducts, getStockAlertSettings, getAllClients } from './store';
 import { isModuleEnabled, getUpcomingFilings } from './utils';
 import Dashboard from './components/Dashboard';
@@ -22,6 +22,7 @@ const GSTReturns = lazy(() => import('./components/GSTReturns'));
 const IncomeTax = lazy(() => import('./components/IncomeTax'));
 const PurchaseBills = lazy(() => import('./components/PurchaseBills'));
 const ReconView = lazy(() => import('./components/ReconView'));
+const ExtensionsView = lazy(() => import('./components/ExtensionsView'));
 const UserGuideView = lazy(() => import('./components/UserGuideView'));
 
 function ViewLoading() {
@@ -262,6 +263,7 @@ function App() {
     { id: 'reports', icon: BarChart3, label: 'Reports', module: 'reports' },
     { id: 'filing', icon: BookOpen, label: 'GST Returns', module: 'gstReturns' },
     { id: 'incometax', icon: Calculator, label: 'Income Tax', module: 'incomeTax' },
+    { id: 'extensions', icon: Blocks, label: 'Extensions', module: 'dashboard' },
     { id: 'guide', icon: HelpCircle, label: 'User Guide', module: 'dashboard' },
   ].filter(item => showIfModule(item.module) && (!item.minRole || item.minRole.includes(user?.role))), [showIfModule, handleNewInvoice, user?.role]);
 
@@ -844,6 +846,7 @@ function App() {
           {currentView === 'reports' && <ReportsView />}
           {currentView === 'filing' && <GSTReturns />}
           {currentView === 'incometax' && <IncomeTax />}
+          {currentView === 'extensions' && <ExtensionsView />}
           {currentView === 'guide' && <UserGuideView />}
           {currentView === 'settings' && <SettingsView onSaved={(p) => setProfile(p)} />}
         </Suspense>
