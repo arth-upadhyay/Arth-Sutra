@@ -145,13 +145,13 @@
     },
     "files": [
       "dist/**/*",
+      "electron/**/*",
       "server.js",
       "db/**/*",
       "utils/**/*",
       "plugins/**/*",
       "src/utils.js",
       "package.json",
-      "electron/main.js",
       "!data/**/*",
       "!.env*"
     ],
