@@ -14,11 +14,11 @@
 export const GUIDE_CONTENT = [
   { type: 'h1', text: 'ArthSutra — User Guide' },
   { type: 'p', text: 'A plain-language guide for everyone who uses this app — no coding background needed. Use Ctrl+F (or your PDF reader\'s search) to find anything fast.' },
-  { type: 'note', text: 'TL;DR  —  Double-click "Install FreeGSTBill.bat" once. A desktop icon appears. Open it whenever you need the app. Your data lives in the data/ folder next to the app — back that folder up and you\'ve backed up everything.' },
+  { type: 'note', text: 'TL;DR  —  Double-click "Install ArthSutra.bat" once. A desktop icon appears. Open it whenever you need the app. Your data lives in the data/ folder next to the app — back that folder up and you\'ve backed up everything.' },
   { type: 'spacer' },
 
   { type: 'h2', text: '1. What is this?' },
-  { type: 'p', text: 'A free billing & invoicing app you run on your own computer. It works without internet, your data stays on your machine, and there is no monthly fee — ever.' },
+  { type: 'p', text: 'A billing & invoicing app you run on your own computer. It works without internet, your data stays on your machine, and there is no monthly fee — ever.' },
   { type: 'h3', text: 'It can do' },
   { type: 'ul', items: [
     'Tax invoices, quotations / proforma invoices, credit notes, bills of supply, delivery challans.',
@@ -41,8 +41,8 @@ export const GUIDE_CONTENT = [
   { type: 'h2', text: '2. Quick Start (Windows)' },
   { type: 'p', text: 'You do not need any programming knowledge.' },
   { type: 'ol', items: [
-    'Download the project as a ZIP from github.com/IamRamgarhia/Free-GST-Billing-Software (green Code button → Download ZIP) and unzip it somewhere you will remember (e.g. Documents\\FreeGSTBill).',
-    'Double-click "Install FreeGSTBill.bat". The installer takes 1-2 minutes the first time and asks no questions.',
+    'Download the project as a ZIP from github.com/arthupadhyay/Arth-Sutra (green Code button → Download ZIP) and unzip it somewhere you will remember (e.g. Documents\\ArthSutra).',
+    'Double-click "Install ArthSutra.bat". The installer takes 1-2 minutes the first time and asks no questions.',
     'A "ArthSutra" icon appears on your Desktop and in the Start Menu. Use it any time.',
     'The app opens in your browser at http://localhost:47371. Click "Install App" in the address bar to make it look like a normal Windows program.',
   ]},
@@ -190,7 +190,7 @@ export const GUIDE_CONTENT = [
   { type: 'h3', text: 'Option A — One-file export / import' },
   { type: 'ol', items: [
     'On the OLD computer: Settings → Export Backup → Download.',
-    'On the NEW computer: install the app fresh (run Install FreeGSTBill.bat).',
+    'On the NEW computer: install the app fresh (run Install ArthSutra.bat).',
     'On the NEW computer: Settings → Import Backup, pick the file. Done.',
   ]},
   { type: 'p', text: 'Note: this does not move the PDF files in Saved Invoices/. Most users do not need those — the app can regenerate any PDF from the saved invoice data. If you do need them, copy that folder manually.' },
@@ -202,7 +202,7 @@ export const GUIDE_CONTENT = [
     'Restart the app.',
   ]},
   { type: 'h3', text: 'Option C — Sync via OneDrive / Google Drive Desktop / Dropbox' },
-  { type: 'p', text: 'Put the entire Free-GST-Billing-Software folder inside a synced folder. Both machines now see the same data/ files. Do NOT run the app on both machines at the same time — that can corrupt files.' },
+  { type: 'p', text: 'Put the entire Arth-Sutra folder inside a synced folder. Both machines now see the same data/ files. Do NOT run the app on both machines at the same time — that can corrupt files.' },
   { type: 'spacer' },
 
   { type: 'h2', text: '15. Common questions (FAQ)' },
@@ -214,16 +214,16 @@ export const GUIDE_CONTENT = [
     ['Can I use my own units (e.g. Carat for jewellery)?', 'Yes. On any line item, click the Unit dropdown → "+ Add custom..." and type your unit. Saved on this device, available everywhere.'],
     ['I made a mistake on an invoice. Can I edit it?', 'Yes. Open it from the Bills list and edit. Or, if you\'ve already sent the PDF, create a Credit Note against the original invoice number — the proper GST way.'],
     ['Why does it open in my browser instead of being a real app?', 'It is a Progressive Web App. Click Install App in the address bar and Windows treats it like any other desktop app — appears in Start Menu, has its own window, no browser chrome.'],
-    ['How do I update to a new version?', 'Run Update FreeGSTBill.bat. It pulls the latest from GitHub without touching your data/ folder.'],
-    ['I want a feature that\'s missing.', 'Open an issue at github.com/IamRamgarhia/Free-GST-Billing-Software/issues — many features in this app started as community requests.'],
+    ['How do I update to a new version?', 'Run Update ArthSutra.bat. It pulls the latest from GitHub without touching your data/ folder.'],
+    ['I want a feature that\'s missing.', 'Open an issue at github.com/arthupadhyay/Arth-Sutra/issues — many features in this app started as community requests.'],
   ]},
   { type: 'spacer' },
 
   { type: 'h2', text: '16. Troubleshooting' },
   { type: 'kv', rows: [
-    ['"Cannot connect to server" / blank page', 'The local server is not running. Run "Start FreeGSTBill.bat" again, or reboot (it auto-starts on login).'],
+    ['"Cannot connect to server" / blank page', 'The local server is not running. Run "Start ArthSutra.bat" again, or reboot (it auto-starts on login).'],
     ['Windows shows "Windows protected your PC" or my antivirus blocked the installer', 'Click "More info" → "Run anyway". Or right-click the .bat → Properties → Unblock. The full source is on GitHub if you want to inspect it.'],
-    ['Installer says Node.js install failed', 'Install Node.js manually from nodejs.org (pick LTS), then run Install FreeGSTBill.bat again.'],
+    ['Installer says Node.js install failed', 'Install Node.js manually from nodejs.org (pick LTS), then run Install ArthSutra.bat again.'],
     ['Foreign client invoice shows wrong tax split (CGST + SGST)', 'Make sure the client\'s country is set correctly in the client form. The app uses the seller\'s country for tax labels and the client\'s country for place-of-supply detection.'],
     ['I see "GST" labels but I\'m in the UAE / UK / US', 'Switch in Settings → Region Preference to International or Both.'],
   ]},

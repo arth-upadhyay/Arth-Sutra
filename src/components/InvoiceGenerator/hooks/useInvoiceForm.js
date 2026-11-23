@@ -4,7 +4,7 @@ import { getPrintSettings } from '../../../utils/printSettings';
 import { getNextInvoiceNumber, getTermsTemplates, getInvoiceDisplayOptions, saveInvoiceDisplayOptions } from '../../../store';
 
 export const DRAFT_KEY = 'gst_invoiceDraft';
-export const OPTIONS_STORAGE_KEY = 'freegstbill_invoiceOptions';
+export const OPTIONS_STORAGE_KEY = 'arthsutra_invoiceOptions';
 
 export const DEFAULT_OPTIONS = {
   showGST: true,

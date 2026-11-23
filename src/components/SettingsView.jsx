@@ -2,12 +2,13 @@ import { useState, useEffect, useRef } from 'react';
 import { getProfile, saveProfile, exportAllData, importData, inspectBackup, getTermsTemplates, saveTermsTemplate, deleteTermsTemplate, getAllProfiles, saveBusinessProfile, deleteBusinessProfile, getInvoiceNumberSettings, saveInvoiceNumberSettings, getEnabledModules, setEnabledModules, getStockAlertSettings, saveStockAlertSettings, getInvoiceDisplayOptions, saveInvoiceDisplayOptions } from '../store';
 import { ensureToken, findOrCreateFolder, uploadJSON } from '../services/googleDrive';
 import { getCountryConfig, getStatesForCountry, validateTaxId, detectCountryFromBrowser, getCountriesForRegion, FEATURE_GROUPS, isModuleEnabled, getPaymentAccounts, createEmptyAccount, maskAccountNumber, reorderAccounts, setDefaultAccount, isValidUpiId } from '../utils';
-import { Save, Upload, Download, Plus, Trash2, Edit3, Image as ImageIcon, PenTool, Cloud, CloudOff, Building2, Hash } from 'lucide-react';
+import { Save, Upload, Download, Plus, Trash2, Edit3, Image as ImageIcon, PenTool, Cloud, CloudOff, Building2, Hash, Shield, Key, Lock } from 'lucide-react';
 import { initGoogleDrive, isConnected, disconnect } from '../services/googleDrive';
 import { toast } from './Toast';
 import { confirmAction } from './ConfirmModal';
 import PrintSettings from './PrintSettings';
 import HelpButton from './HelpButton';
+import { useAuth } from '../context/AuthContext';
 import { getBackupsList, restoreBackup, triggerBackup, deleteBackup, getTrashedBills, restoreTrashedBill, purgeTrashedBill } from '../store';
 
 const JUMP_NAV_SECTIONS = [
@@ -20,12 +21,13 @@ const JUMP_NAV_SECTIONS = [
   ['section-backups',  'Backups'],
   ['section-cloud',    'Google Drive'],
   ['section-data',     'Import/Export'],
+  ['section-security', 'Account Security'],
 ];
 
 const EMPTY_PROFILE = {
   businessName: '', address: '', city: '', state: '', pin: '', country: '',
   gstin: '', pan: '', email: '', phone: '', bankName: '', accountNumber: '', ifsc: '', swift: '',
-  logo: '', logoHeight: 48, signature: '', upiId: '', googleClientId: '', googleDriveFolder: 'GST Billing Invoices',
+  logo: '', logoHeight: 48, signature: '', upiId: '', googleClientId: '', googleDriveFolder: 'Arth Sutra Invoices',
   paymentAccounts: []
 };
 
@@ -75,6 +77,65 @@ export default function SettingsView({ onSaved }) {
     setEnabledModulesState({});
     setEnabledModules({});
     toast('Reset to default — all features visible', 'success');
+  };
+
+  // Account Security state
+  const { user, token, updateUser } = useAuth();
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newUsername, setNewUsername] = useState(user?.username || '');
+  const [newPassword, setNewPassword] = useState('');
+  const [updatingSecurity, setUpdatingSecurity] = useState(false);
+
+  useEffect(() => {
+    if (user?.username) {
+      setNewUsername(user.username);
+    }
+  }, [user?.username]);
+
+  const handleUpdateCredentials = async (e) => {
+    e.preventDefault();
+    if (!currentPassword) {
+      toast('Current password is required', 'error');
+      return;
+    }
+
+    setUpdatingSecurity(true);
+    try {
+      const activeToken = token || localStorage.getItem('arthsutra_token');
+      const res = await fetch('/api/auth/profile', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${activeToken}`,
+        },
+        body: JSON.stringify({
+          currentPassword,
+          newUsername: newUsername.trim() || undefined,
+          newPassword: newPassword.trim() || undefined,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to update credentials');
+      }
+
+      if (data.token) {
+        localStorage.setItem('arthsutra_token', data.token);
+        localStorage.setItem('arthsutra_user', JSON.stringify(data.user));
+        if (updateUser) {
+          updateUser(data.token, data.user);
+        }
+      }
+
+      setCurrentPassword('');
+      setNewPassword('');
+      toast('Profile updated successfully', 'success');
+    } catch (err) {
+      toast(err.message || 'Failed to update credentials', 'error');
+    } finally {
+      setUpdatingSecurity(false);
+    }
   };
   const fileInputRef = useRef(null);
   const logoInputRef = useRef(null);
@@ -280,7 +341,7 @@ export default function SettingsView({ onSaved }) {
 
       if (profile.logo || profile.signature) {
         try {
-          const raw = localStorage.getItem('freegstbill_invoiceOptions');
+          const raw = localStorage.getItem('arthsutra_invoiceOptions');
           const opts = raw ? JSON.parse(raw) : {};
           const serverOpts = await getInvoiceDisplayOptions().catch(() => null);
 
@@ -293,7 +354,7 @@ export default function SettingsView({ onSaved }) {
           }
 
           if (changed) {
-            localStorage.setItem('freegstbill_invoiceOptions', JSON.stringify(opts));
+            localStorage.setItem('arthsutra_invoiceOptions', JSON.stringify(opts));
             const merged = { ...(serverOpts || {}), ...opts };
             saveInvoiceDisplayOptions(merged).catch(() => { /* non-blocking */ });
           }
@@ -397,7 +458,7 @@ export default function SettingsView({ onSaved }) {
           const ok = await ensureToken(profile.googleClientId);
           if (!ok) { toast('Drive auth failed — backup downloaded locally only', 'warning'); }
           else {
-            const folderName = (profile.googleDriveFolder || 'GST Billing Invoices') + ' - Backups';
+            const folderName = (profile.googleDriveFolder || 'Arth Sutra Invoices') + ' - Backups';
             const folderId = await findOrCreateFolder(folderName);
             const result = await uploadJSON(fileName, json, folderId);
             toast(`Saved to Drive — ${result.name}`, 'success');
@@ -1348,7 +1409,7 @@ export default function SettingsView({ onSaved }) {
               <div className="form-group">
                 <label className="form-label">Drive Folder Name</label>
                 <input type="text" name="googleDriveFolder" className="form-input" value={profile.googleDriveFolder} onChange={handleChange}
-                  placeholder="GST Billing Invoices" />
+                  placeholder="Arth Sutra Invoices" />
               </div>
               <div className="form-group">
                 <label className="form-label">Status</label>
@@ -1398,6 +1459,115 @@ export default function SettingsView({ onSaved }) {
         </div>
       </div>
 
+      {/* ---- Account Security ---- */}
+      <div id="section-security" className="glass-panel p-6 mb-6">
+        <h3 className="section-title" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <Shield size={20} color="var(--primary, #4a7a4a)" />
+          Account Security
+        </h3>
+
+        <p className="page-subtitle mb-6" style={{ color: 'var(--text-muted)' }}>
+          Update your login username and password credentials.
+        </p>
+
+        <form onSubmit={handleUpdateCredentials} style={{ maxWidth: '480px' }}>
+          <div className="mb-4" style={{ marginBottom: '1.25rem' }}>
+            <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '0.4rem' }}>
+              Current Password <span style={{ color: '#dc2626' }}>*</span>
+            </label>
+            <input
+              type="password"
+              className="form-input"
+              value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)}
+              placeholder="Enter your current password"
+              required
+              autoComplete="current-password"
+              style={{
+                width: '100%',
+                padding: '0.65rem 0.85rem',
+                borderRadius: '8px',
+                border: '1px solid var(--border-color, #d1c7a7)',
+                background: 'var(--input-bg, #e8dfc5)',
+                color: 'var(--text-primary, #2a2418)',
+                boxSizing: 'border-box'
+              }}
+            />
+            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginTop: '0.25rem' }}>
+              Required to authenticate credential changes.
+            </span>
+          </div>
+
+          <div className="mb-4" style={{ marginBottom: '1.25rem' }}>
+            <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '0.4rem' }}>
+              New Username
+            </label>
+            <input
+              type="text"
+              className="form-input"
+              value={newUsername}
+              onChange={(e) => setNewUsername(e.target.value)}
+              placeholder="Enter new username"
+              autoComplete="username"
+              style={{
+                width: '100%',
+                padding: '0.65rem 0.85rem',
+                borderRadius: '8px',
+                border: '1px solid var(--border-color, #d1c7a7)',
+                background: 'var(--input-bg, #e8dfc5)',
+                color: 'var(--text-primary, #2a2418)',
+                boxSizing: 'border-box'
+              }}
+            />
+            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginTop: '0.25rem' }}>
+              Current active username: <strong>{user?.username || 'admin'}</strong> ({user?.role || 'ADMIN'})
+            </span>
+          </div>
+
+          <div className="mb-6" style={{ marginBottom: '1.5rem' }}>
+            <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '0.4rem' }}>
+              New Password
+            </label>
+            <input
+              type="password"
+              className="form-input"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              placeholder="Leave blank to keep existing password"
+              autoComplete="new-password"
+              style={{
+                width: '100%',
+                padding: '0.65rem 0.85rem',
+                borderRadius: '8px',
+                border: '1px solid var(--border-color, #d1c7a7)',
+                background: 'var(--input-bg, #e8dfc5)',
+                color: 'var(--text-primary, #2a2418)',
+                boxSizing: 'border-box'
+              }}
+            />
+          </div>
+
+          <button
+            type="submit"
+            disabled={updatingSecurity}
+            className="btn btn-primary"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '0.5rem',
+              padding: '0.65rem 1.25rem',
+              borderRadius: '8px',
+              fontSize: '0.9rem',
+              fontWeight: 600,
+              cursor: updatingSecurity ? 'not-allowed' : 'pointer'
+            }}
+          >
+            <Key size={16} />
+            {updatingSecurity ? 'Updating Credentials…' : 'Update Credentials'}
+          </button>
+        </form>
+      </div>
+
       </div>
 
       {showExportModal && (
@@ -1428,7 +1598,7 @@ export default function SettingsView({ onSaved }) {
               <span>
                 <span className="cbx-label">Also save a copy to my Google Drive</span>
                 <span className="cbx-hint">
-                  Uploads to <em>{(profile.googleDriveFolder || 'GST Billing Invoices')} - Backups</em> in your Drive.
+                  Uploads to <em>{(profile.googleDriveFolder || 'Arth Sutra Invoices')} - Backups</em> in your Drive.
                 </span>
               </span>
             </label>

@@ -567,7 +567,7 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
   const uploadToGoogleDrive = async (pdfBlob, fileName) => {
     try {
       const clientId = profile?.googleClientId;
-      const folderName = profile?.googleDriveFolder || 'GST Billing Invoices';
+      const folderName = profile?.googleDriveFolder || 'Arth Sutra Invoices';
       if (!clientId) return;
       const hasToken = await ensureToken(clientId);
       if (!hasToken) { toast('Google Drive: Please reconnect in Settings', 'warning'); return; }

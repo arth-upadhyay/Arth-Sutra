@@ -1,4 +1,5 @@
 import LockScreen from './components/LockScreen';
+import SetupScreen from './components/SetupScreen';
 import { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react';
 import { Home, FileText, Settings, Plus, Users, Package, BarChart3, Wallet, RefreshCw, Receipt, BookOpen, Download, X, ShoppingCart, ChevronDown, Building2, Pencil, HelpCircle, Search, Command, Bell, Calculator, GitCompare, LogOut, Shield, Blocks } from 'lucide-react';
 import { getAllProfiles, saveProfile, getEnabledModules, getAllBills, getAllProducts, getStockAlertSettings, getAllClients } from './store';
@@ -9,7 +10,6 @@ import ToastContainer, { toast } from './components/Toast';
 import ConfirmModalContainer from './components/ConfirmModal';
 import { useSocket } from './hooks/useSocket';
 import { useAuth } from './context/AuthContext';
-import LoginScreen from './components/LoginScreen';
 import { replaySyncQueue } from './utils/offlineSync';
 const SettingsView = lazy(() => import('./components/SettingsView'));
 const ClientsView = lazy(() => import('./components/ClientsView'));
@@ -41,11 +41,18 @@ function ViewLoading() {
 }
 
 function App() {
-  const { user, isAuthenticated, loading: authLoading, logout, isAdmin } = useAuth();
+  const { user, isAuthenticated, loading: authLoading, logout, isAdmin, isSetupComplete } = useAuth();
 
   const [isUnlocked, setIsUnlocked] = useState(() => {
     return sessionStorage.getItem('fgsb_unlocked') === 'true';
   });
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      setIsUnlocked(true);
+      sessionStorage.setItem('fgsb_unlocked', 'true');
+    }
+  }, [isAuthenticated]);
 
   // Background Sync (Phase 2): replay offline IndexedDB mutations upon reconnecting
   useEffect(() => {
@@ -220,12 +227,12 @@ function App() {
 
   const dismissInstallBanner = useCallback(() => {
     setShowInstallBanner(false);
-    localStorage.setItem('freegstbill_pwa_dismissed_at', String(Date.now()));
+    localStorage.setItem('arthsutra_pwa_dismissed_at', String(Date.now()));
   }, []);
 
   const dismissUpdate = useCallback(() => {
     if (updateInfo?.latest) {
-      localStorage.setItem('freegstbill_dismissedUpdate', updateInfo.latest);
+      localStorage.setItem('arthsutra_dismissedUpdate', updateInfo.latest);
     }
     setShowUpdateModal(false);
   }, [updateInfo]);
@@ -238,7 +245,7 @@ function App() {
   const updateBannerVisible = useMemo(() => {
     if (!updateInfo?.updateAvailable) return false;
     try {
-      return localStorage.getItem('freegstbill_dismissedUpdate') !== updateInfo.latest;
+      return localStorage.getItem('arthsutra_dismissedUpdate') !== updateInfo.latest;
     } catch { return true; }
   }, [updateInfo]);
 
@@ -436,7 +443,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const dismissedAt = localStorage.getItem('freegstbill_pwa_dismissed_at');
+    const dismissedAt = localStorage.getItem('arthsutra_pwa_dismissed_at');
     const isStandalone = window.matchMedia('(display-mode: standalone)').matches
       || window.navigator.standalone === true;
     if (isStandalone) return;
@@ -602,10 +609,9 @@ function App() {
   }
 
   if (!isAuthenticated) {
-    return <LoginScreen />;
-  }
-
-  if (!isUnlocked) {
+    if (isSetupComplete === false) {
+      return <SetupScreen onComplete={handleUnlock} />;
+    }
     return <LockScreen onUnlock={handleUnlock} />;
   }
 
@@ -619,14 +625,14 @@ function App() {
             Your data is <strong>100% safe</strong> on your computer — nothing is lost.
             The app just needs to be started once.
           </p>
-          <a href="freegstbill://start" className="server-start-btn">
-            Open GST Billing
+          <a href="arthsutra://start" className="server-start-btn">
+            Open Arth Sutra
           </a>
           <div className="server-down-steps">
             <p className="server-down-hint">Or start manually:</p>
             <ol>
               <li>Double-click <strong>ArthSutra</strong> on your Desktop</li>
-              <li>Or search <strong>"Free GST Billing"</strong> in Start Menu</li>
+              <li>Or search <strong>"Arth Sutra"</strong> in Start Menu</li>
             </ol>
           </div>
           <p className="server-down-safe">All your invoices, clients, and data are safely stored on your computer. They are never deleted or shared.</p>
@@ -1019,7 +1025,7 @@ function App() {
               {updateInfo.releaseNotes || (
                 <span style={{ color: 'var(--text-muted)' }}>
                   No release notes available — see the full changelog at{' '}
-                  <a href={updateInfo.releaseUrl || 'https://github.com/IamRamgarhia/Free-GST-Billing-Software/releases'} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary)' }}>GitHub Releases</a>.
+                  <a href={updateInfo.releaseUrl || 'https://github.com/arthupadhyay/Arth-Sutra/releases'} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary)' }}>GitHub Releases</a>.
                 </span>
               )}
             </div>
@@ -1043,12 +1049,12 @@ function App() {
                   View on GitHub
                 </a>
               )}
-              <a href="freegstbill-update://run" className="btn btn-primary" style={{ textDecoration: 'none' }}>
+              <a href="arthsutra-update://run" className="btn btn-primary" style={{ textDecoration: 'none' }}>
                 <Download size={16} /> Update Now
               </a>
             </div>
             <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.6rem', marginBottom: 0 }}>
-              <em>Update Now</em> launches <code>Update FreeGSTBill.bat</code> in a window. Wait for it to finish (~30 seconds), then refresh this page.
+              <em>Update Now</em> launches <code>Update ArthSutra.bat</code> in a window. Wait for it to finish (~30 seconds), then refresh this page.
             </p>
           </div>
         </div>

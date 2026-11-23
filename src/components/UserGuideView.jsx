@@ -171,7 +171,7 @@ export default function UserGuideView() {
       pdf.setFontSize(8); pdf.setTextColor(150);
       pdf.text(`Page ${pageNum} — ArthSutra User Guide`, pageWidth / 2, pageHeight - 8, { align: 'center' });
 
-      pdf.save('Free-GST-Billing-User-Guide.pdf');
+      pdf.save('Arth-Sutra-User-Guide.pdf');
       toast('User Guide PDF downloaded', 'success');
     } catch (err) {
       console.error(err);

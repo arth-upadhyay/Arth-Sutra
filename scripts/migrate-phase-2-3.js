@@ -39,9 +39,9 @@ try {
   `);
   console.log('✓ Tables request_logs and users confirmed.');
 
-  // 1. Seed Default Admin
-  const existingAdmin = sqlite.prepare("SELECT * FROM users WHERE username = 'admin'").get();
-  if (!existingAdmin) {
+  // 1. Seed Default Admin only if users table is empty
+  const userCount = sqlite.prepare('SELECT COUNT(*) as count FROM users').get();
+  if (userCount && Number(userCount.count) === 0) {
     const hash = hashPasswordSync('admin123');
     sqlite.prepare(`
       INSERT INTO users (username, password_hash, role, created_at)
@@ -49,7 +49,7 @@ try {
     `).run('admin', hash, 'ADMIN', new Date().toISOString());
     console.log('✓ Seeded default Admin user (admin / admin123).');
   } else {
-    console.log('• Admin user already exists.');
+    console.log('• Users table already populated, skipping admin seed.');
   }
 
   // 2. Encrypt existing profiles bank credentials

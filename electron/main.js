@@ -69,7 +69,7 @@ async function createWindow(targetUrl) {
     minWidth: 1024,
     minHeight: 700,
     show: false,
-    title: 'ArthSutra — Free GST Billing & Invoicing',
+    title: 'Arth Sutra',
     backgroundColor: '#0f172a',
     webPreferences: {
       nodeIntegration: false,

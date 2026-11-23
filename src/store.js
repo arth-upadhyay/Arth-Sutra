@@ -6,7 +6,7 @@ import { offlineFetch } from './utils/offlineSync.js';
 const API = '/api';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// v1.11.0 — Rebrand migration: Free GST Billing → ArthSutra
+// v1.11.0 — Rebrand migration to Arth Sutra
 //
 // Every legacy `freegstbill_*` localStorage key is copied once to its new
 // `arthsutra_*` equivalent. Old keys are left in place (they're inert and

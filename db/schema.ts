@@ -143,7 +143,7 @@ export const profiles = sqliteTable('profiles', {
   signature:         text('signature').notNull().default(''),
   upiId:             text('upi_id').notNull().default(''),
   googleClientId:    text('google_client_id').notNull().default(''),
-  googleDriveFolder: text('google_drive_folder').notNull().default('GST Billing Invoices'),
+  googleDriveFolder: text('google_drive_folder').notNull().default('Arth Sutra Invoices'),
   // Nested bank accounts — JSON array
   paymentAccounts:   text('payment_accounts').notNull().default('[]'),
 });

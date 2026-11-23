@@ -127,7 +127,7 @@ export function generateTallyXml(bill) {
             <BASICBUYERNAME>${partyName}</BASICBUYERNAME>
             <PLACEOFSUPPLY>${placeOfSupply}</PLACEOFSUPPLY>
             <PARTYGSTIN>${gstin}</PARTYGSTIN>
-            <NARRATION>Generated via Arth-Sutra GST Billing - Bill #${invoiceNo}</NARRATION>
+            <NARRATION>Generated via Arth Sutra - Bill #${invoiceNo}</NARRATION>
             
             <!-- Party Ledger Entry (Debit) -->
             <ALLLEDGERENTRIES.LIST>

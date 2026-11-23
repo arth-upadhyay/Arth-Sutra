@@ -1,6 +1,6 @@
 # Arth-Sutra (अर्थ-सूत्र)
 
-**ARTH's SYSTEM** — A modern, free, open-source, offline-first GST billing, inventory management, tax compliance, and accounting application designed specifically for Indian MSMEs, wholesalers, retailers, distributors, manufacturers, and freelancers.
+**Arth-Sutra** — A modern, free, open-source, offline-first GST billing, inventory management, tax compliance, and accounting application designed specifically for Indian MSMEs, wholesalers, retailers, distributors, manufacturers, and freelancers.
 
 Runs 100% locally on your own machine. Zero monthly subscriptions. Zero cloud lock-in. No telemetry.
 
@@ -16,7 +16,7 @@ Runs 100% locally on your own machine. Zero monthly subscriptions. Zero cloud lo
 | **Backend Stack** | Express 5 · Node.js 18+ · WebSockets (`ws`) |
 | **Database** | SQLite (`better-sqlite3`) via Drizzle ORM (ACID Compliant) |
 | **Desktop App** | Electron 45 · NSIS Desktop Installer |
-| **Security** | AES-256-GCM Encryption · JWT Authentication · Role-Based Access Control (RBAC) · SHA-256 Audit Trail |
+| **Security** | AES-256-GCM Encryption · Pure JS `bcryptjs` Hashing · JWT Authentication · Role-Based Access Control (RBAC) · SHA-256 Audit Trail |
 | **Offline Capabilities** | PWA (Service Workers) · IndexedDB Queue · Offline-to-Online Idempotent Sync |
 | **License** | Apache 2.0 |
 
@@ -34,7 +34,9 @@ Most Indian small businesses are forced into paying ₹15,000 to ₹35,000 every
 
 - 🗄️ **SQLite + Drizzle ORM Engine:** Migrated from legacy flat JSON files to a high-concurrency, ACID-compliant SQLite database (`data/arth-sutra.sqlite`) with schema safety and automated JSON-to-SQLite migration.
 - 🔗 **Cryptographic Tamper-Evident Audit Trail:** Every business transaction is cryptographically signed using SHA-256 hash chaining (Merkle-style). Real-time verification detects any manual row edits or database tampering.
-- 🛡️ **Role-Based Access Control (RBAC) & JWT Authentication:** Multi-user security with `ADMIN`, `ACCOUNTANT`, and `CLERK` permission tiers, bcrypt password hashing, and signed 24h JWT sessions.
+- 🛡️ **Role-Based Access Control (RBAC) & JWT Authentication:** Multi-user security with `ADMIN`, `ACCOUNTANT`, and `CLERK` permission tiers, pure JavaScript `bcryptjs` password hashing (zero native compilation toolchains), and signed 24h JWT sessions.
+- 🔒 **Unified Sepia Lock Screen & In-App Security Settings:** Integrated authentication flow styled in the signature sepia parchment palette, paired with a dedicated **Account Security** settings panel to update username and password credentials on the fly.
+- 🌱 **Non-Destructive Database Seeding:** The server boots with smart seeding logic that inspects `SELECT COUNT(*) FROM users` — only provisioning default credentials on an empty database, so customized or renamed administrator credentials are never overwritten on server restart.
 - 🔐 **AES-256-GCM Financial Encryption at Rest:** NIST SP 800-38D compliant encryption with 12-byte IV and 16-byte authentication tags protecting bank details, IFSC, and financial credentials.
 - 🔄 **Real-Time WebSocket Sync:** Live multi-terminal synchronization across local network (LAN) clients with JWT-authenticated WebSocket streams.
 - 📴 **Offline PWA & Write-Behind Sync:** Complete offline functionality with service workers, local IndexedDB queuing, and an HTTP `X-Idempotency-Key` backend to prevent duplicate bills on reconnect.
@@ -149,10 +151,21 @@ Most Indian small businesses are forced into paying ₹15,000 to ₹35,000 every
   - Client turnover ranking.
 
 ### 9. Security, RBAC & Cryptographic Integrity
-* **Role-Based Access Control (RBAC):**
+* **Role-Based Access Control (RBAC) & Authentication:**
   - **`ADMIN`:** Unrestricted access — user management, profile configuration, database backups, audit trail verification, settings.
   - **`ACCOUNTANT`:** Invoicing, purchases, reconciliation, expenses, tax returns, and financial reports.
   - **`CLERK`:** Front-desk billing, invoice creation, and customer directory.
+  - **Pure JS `bcryptjs` Hashing:** Passwords hashed with high-entropy salt rounds in pure JavaScript, removing native build toolchains (`node-gyp` / MSVC).
+  - **Unified Sepia Lock Screen:** Seamless aesthetic continuity styled with the warm parchment, dark slate, and green badge palette. Handles credential validation, offline session restoration, and 24h JWT token issuance.
+* **Account Security & In-App Credential Management:**
+  - Update login credentials directly under **Settings → Account Security** (`PUT /api/auth/profile`).
+  - Requires verifying current password before accepting changes to username or password.
+  - Automatically re-issues a fresh signed JWT upon modification so sessions remain active without disruptive logouts.
+  - Prevents username collisions and enforces unique accounts across the system.
+* **Non-Destructive Database Seeding:**
+  - Server startup verification uses `SELECT COUNT(*) FROM users` rather than checking specific usernames.
+  - Seeds the default `admin` / `admin123` account only if the database is 100% empty on initial install.
+  - Any customized, renamed, or deleted admin credentials will never be overwritten or recreated on server restarts.
 * **Cryptographic Event Log (SHA-256 Hash Chain):**
   - Immutable audit trail linking each state change to the previous block hash:
     $$\text{currentHash} = \text{SHA256}(\text{previousHash} + \text{timestamp} + \text{action} + \text{payload} + \text{entity})$$
@@ -223,7 +236,8 @@ Arth-Sutra/
 │   │   ├── InvoicePreview.jsx   A4 printable template engine
 │   │   ├── ReconView.jsx        GSTR-2B automated reconciliation interface
 │   │   ├── ExtensionsView.jsx   Plugins dashboard & Tally XML export UI
-│   │   ├── LoginScreen.jsx      Authentication login screen
+│   │   ├── SetupScreen.jsx      First-time administrator setup wizard
+│   │   ├── LockScreen.jsx       Sepia-themed authentication & lock screen
 │   │   ├── GSTReturns/          GSTR-1, GSTR-3B & e-Way Bill export hub
 │   │   ├── InventoryView.jsx    Products, batches, and stock management
 │   │   ├── PurchaseBills.jsx    Purchases & OCR bill scanning
@@ -307,17 +321,17 @@ npm run dev
 
 ---
 
-## Default Credentials & Initial Sign-In
+## First-Time Setup Wizard & Authentication
 
-Arth-Sutra is pre-seeded with a master administrator account:
+When Arth-Sutra is launched for the first time with an empty database:
 
-| Credential | Default Value |
-|---|---|
-| **Username** | `admin` |
-| **Password** | `admin123` |
-| **Role** | `ADMIN` |
+1. **Automatic Detection:** The frontend polls `GET /api/auth/status` on load. If no user accounts exist (`isSetupComplete: false`), the application seamlessly displays the **First-Time Setup Wizard** (`SetupScreen`).
+2. **Master Administrator Setup:** You are prompted to define your custom **Admin Username** and **Password** (with confirmation).
+3. **Instant Auto-Login:** Upon submitting, `POST /api/auth/setup` validates the empty database condition, securely hashes your password with `bcryptjs`, assigns the `ADMIN` role, and returns a signed 24h JWT token. You are instantly routed into the Dashboard.
+4. **Permanent Security:** The `POST /api/auth/setup` endpoint automatically locks down after the initial setup. Any subsequent calls to `/api/auth/setup` return HTTP `403 Forbidden`, preventing rogue account creation.
+5. **Subsequent Launches:** On all subsequent runs, the app loads the standard sepia **Lock Screen** (`LockScreen.jsx`) to authenticate returning users.
 
-> **Security Recommendation:** Upon logging in, go to **Settings → User Management** to create your own personalized administrative user and change or remove the default credentials.
+> **Credential Updates:** At any time, you can navigate to **Settings → Account Security** to change your username or password by verifying your current password. All credential changes persist safely in the local SQLite database.
 
 ---
 
@@ -398,9 +412,10 @@ Arth-Sutra includes comprehensive unit and integration tests powered by Vitest:
 npm test
 ```
 
-Test coverage includes:
+Test coverage includes (32/32 tests passing across 6 test suites):
+- **`auth-profile.test.js`:** Database empty-table seeding lifecycle, password verification, profile updates, duplicate username rejection, and JWT regeneration.
+- **`crypto-auth.test.js`:** AES-256-GCM encryption/decryption, pure JS bcryptjs password hashing, JWT issuance, and RBAC authorization.
 - **`recon.test.js`:** Fuzzy matching, Levenshtein distance calculations, and tolerance evaluations.
-- **`crypto-auth.test.js`:** AES-256-GCM encryption/decryption, bcrypt hashing, JWT issuance, and RBAC authorization.
 - **`audit.test.js`:** SHA-256 hash chaining and tamper-detection verification.
 - **`db.test.js`:** SQLite schema validation, foreign keys, and Drizzle queries.
 - **`utils.test.jsx`:** GST math, currency formatting, and discount calculations.

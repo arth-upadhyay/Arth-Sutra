@@ -22,7 +22,9 @@ import {
 } from './db/index.js';
 import { logEvent, verifyAuditChain } from './db/auditEngine.js';
 import { encryptProfileBankDetails, decryptProfileBankDetails } from './utils/crypto.js';
-import { hashPassword, comparePassword, generateToken, verifyToken, ROLES } from './utils/auth.js';
+import { hashPassword, hashPasswordSync, comparePassword, generateToken, verifyToken, ROLES } from './utils/auth.js';
+
+// Note: Automatic admin seeding on startup is disabled in favor of the First-Time Setup Wizard (/api/auth/setup)
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -182,6 +184,60 @@ app.use((req, res, next) => {
 // Authentication Endpoints
 // ════════════════════════════════════════════════════════════════════════════
 
+// Public check for first-time setup wizard
+app.get('/api/auth/status', (req, res) => {
+  try {
+    const row = sqlite.prepare('SELECT COUNT(*) as count FROM users').get();
+    const isSetupComplete = Boolean(row && Number(row.count) > 0);
+    res.json({ isSetupComplete });
+  } catch (err) {
+    errRes(res, 500, 'server-error', err);
+  }
+});
+
+// Public first-time setup wizard: create master administrator account
+app.post('/api/auth/setup', async (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || typeof username !== 'string' || !username.trim()) {
+    return res.status(400).json({ error: 'Username is required' });
+  }
+  if (!password || typeof password !== 'string' || password.length < 4) {
+    return res.status(400).json({ error: 'Password must be at least 4 characters long' });
+  }
+
+  try {
+    // Security check: Only allow setup if users table is currently empty
+    const countRow = sqlite.prepare('SELECT COUNT(*) as count FROM users').get();
+    if (countRow && Number(countRow.count) > 0) {
+      return res.status(403).json({ error: 'Setup has already been completed' });
+    }
+
+    const passwordHash = await hashPassword(password.trim());
+    const result = db.insert(users).values({
+      username: username.trim(),
+      passwordHash,
+      role: 'ADMIN',
+      createdAt: new Date().toISOString(),
+    }).run();
+
+    const newUser = db.select().from(users).where(eq(users.id, Number(result.lastInsertRowid))).get();
+    const token = generateToken(newUser);
+
+    res.status(201).json({
+      success: true,
+      message: 'Admin account created successfully',
+      token,
+      user: {
+        id: newUser.id,
+        username: newUser.username,
+        role: newUser.role,
+      },
+    });
+  } catch (err) {
+    errRes(res, 500, 'server-error', err);
+  }
+});
+
 app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) {
@@ -264,6 +320,60 @@ app.delete('/api/auth/users/:id', requireAuth, requireRole(['ADMIN']), (req, res
     }
     db.delete(users).where(eq(users.id, targetId)).run();
     res.json({ success: true });
+  } catch (err) {
+    errRes(res, 500, 'server-error', err);
+  }
+});
+
+app.put('/api/auth/profile', requireAuth, async (req, res) => {
+  const { currentPassword, newUsername, newPassword } = req.body || {};
+  if (!currentPassword) {
+    return res.status(400).json({ error: 'Current password is required' });
+  }
+
+  try {
+    const user = db.select().from(users).where(eq(users.id, req.user.id)).get();
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const matches = await comparePassword(currentPassword, user.passwordHash);
+    if (!matches) {
+      return res.status(401).json({ error: 'Incorrect current password' });
+    }
+
+    const updates = {};
+
+    if (newUsername && newUsername.trim() && newUsername.trim() !== user.username) {
+      const trimmed = newUsername.trim();
+      const existing = db.select().from(users).where(eq(users.username, trimmed)).get();
+      if (existing && existing.id !== user.id) {
+        return res.status(409).json({ error: 'Username already taken' });
+      }
+      updates.username = trimmed;
+    }
+
+    if (newPassword && newPassword.trim()) {
+      updates.passwordHash = await hashPassword(newPassword.trim());
+    }
+
+    if (Object.keys(updates).length > 0) {
+      db.update(users).set(updates).where(eq(users.id, user.id)).run();
+    }
+
+    const updatedUser = db.select().from(users).where(eq(users.id, user.id)).get();
+    const token = generateToken(updatedUser);
+
+    res.json({
+      success: true,
+      message: 'Profile updated successfully',
+      token,
+      user: {
+        id: updatedUser.id,
+        username: updatedUser.username,
+        role: updatedUser.role,
+      },
+    });
   } catch (err) {
     errRes(res, 500, 'server-error', err);
   }
@@ -590,7 +700,7 @@ app.delete('/api/bills/:id', (req, res) => {
 const DEFAULT_PROFILE = {
   businessName: '', address: '', state: '', gstin: '', pan: '',
   email: '', phone: '', bankName: '', accountNumber: '', ifsc: '',
-  logo: '', signature: '', upiId: '', googleClientId: '', googleDriveFolder: 'GST Billing Invoices',
+  logo: '', signature: '', upiId: '', googleClientId: '', googleDriveFolder: 'Arth Sutra Invoices',
 };
 
 app.get('/api/profile', (req, res) => {
@@ -1034,7 +1144,7 @@ app.post('/api/profiles', requireAuth, requireRole(['ADMIN', 'ACCOUNTANT']), (re
     signature: encrypted.signature || '',
     upiId: encrypted.upiId || '',
     googleClientId: encrypted.googleClientId || '',
-    googleDriveFolder: encrypted.googleDriveFolder || 'GST Billing Invoices',
+    googleDriveFolder: encrypted.googleDriveFolder || 'Arth Sutra Invoices',
     paymentAccounts: typeof encrypted.paymentAccounts === 'string' ? encrypted.paymentAccounts : JSON.stringify(encrypted.paymentAccounts || []),
   }).onConflictDoUpdate({
     target: profiles.id,
@@ -1057,7 +1167,7 @@ app.post('/api/profiles', requireAuth, requireRole(['ADMIN', 'ACCOUNTANT']), (re
       signature: encrypted.signature || '',
       upiId: encrypted.upiId || '',
       googleClientId: encrypted.googleClientId || '',
-      googleDriveFolder: encrypted.googleDriveFolder || 'GST Billing Invoices',
+      googleDriveFolder: encrypted.googleDriveFolder || 'Arth Sutra Invoices',
       paymentAccounts: typeof encrypted.paymentAccounts === 'string' ? encrypted.paymentAccounts : JSON.stringify(encrypted.paymentAccounts || []),
     },
   }).run();
@@ -1264,7 +1374,7 @@ app.post('/api/import', (req, res) => {
         accountNumber: e.accountNumber || '', ifsc: e.ifsc || '', swift: e.swift || '',
         logo: e.logo || '', signature: e.signature || '', upiId: e.upiId || '',
         googleClientId: e.googleClientId || '',
-        googleDriveFolder: e.googleDriveFolder || 'GST Billing Invoices',
+        googleDriveFolder: e.googleDriveFolder || 'Arth Sutra Invoices',
         paymentAccounts: JSON.stringify(e.paymentAccounts || []),
       }), 'profileCount', 'profileSkipped');
     }

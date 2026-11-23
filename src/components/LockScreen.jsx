@@ -1,61 +1,36 @@
-import { useState, useEffect } from 'react';
-import { Lock, ArrowRight, ShieldCheck } from 'lucide-react';
-import { getProfile } from '../store';
-import { toast } from './Toast';
+import { useState } from 'react';
+import { Lock, ArrowRight } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 
 export default function LockScreen({ onUnlock }) {
+  const { login } = useAuth();
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [savedHash, setSavedHash] = useState(null);
-  const [loading, setLoading] = useState(true);
-
-  // Fetch the user's profile on boot to check if they have a modern secure PIN set
-  useEffect(() => {
-    getProfile()
-      .then(profile => {
-        if (profile && profile.appPasswordHash) {
-          setSavedHash(profile.appPasswordHash);
-        }
-        setLoading(false);
-      })
-      .catch(() => {
-        setLoading(false);
-      });
-  }, []);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
 
   const handleUnlock = async (e) => {
     e.preventDefault();
-    if (!password) return;
-
-    // LEGACY FALLBACK: If no hash is found in the profile, fall back to the old hardcoded password
-    if (!savedHash) {
-      if (password === 'ARTH') {
-        onUnlock();
-      } else {
-        toast('Incorrect password', 'error');
-      }
+    if (!username.trim() || !password) {
+      setError('Please enter both username and password');
       return;
     }
 
-    // MODERN SECURE CHECK: Hash the user input and compare it to the stored hash
-    try {
-      const msgBuffer = new TextEncoder().encode(password);
-      const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
-      const hashArray = Array.from(new Uint8Array(hashBuffer));
-      const hashedInput = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    setLoading(true);
+    setError('');
 
-      if (hashedInput === savedHash) {
+    try {
+      await login(username.trim(), password);
+      if (onUnlock) {
         onUnlock();
-      } else {
-        toast('Incorrect PIN / Password', 'error');
-        setPassword('');
       }
     } catch (err) {
-      console.error("Hashing failed", err);
-      toast('Security check failed', 'error');
+      console.warn('Unlock error:', err);
+      setError('Invalid username or password');
+    } finally {
+      setLoading(false);
     }
   };
-
-  if (loading) return null; // Avoid flashing the login screen while checking DB
 
   return (
     <div style={{ 
@@ -78,50 +53,93 @@ export default function LockScreen({ onUnlock }) {
           width: '72px', 
           height: '72px', 
           borderRadius: '20px', 
-          background: 'linear-gradient(135deg, var(--primary), var(--primary-darker, #1e3a8a))', 
+          background: 'linear-gradient(135deg, var(--primary, #4a7a4a), var(--primary-darker, #2a5a2a))', 
           display: 'flex', 
           alignItems: 'center', 
           justifyContent: 'center', 
           margin: '0 auto 1.5rem',
-          boxShadow: '0 8px 16px rgba(30, 64, 175, 0.2)'
+          boxShadow: '0 8px 16px rgba(74, 122, 74, 0.25)'
         }}>
-          {savedHash ? <ShieldCheck size={36} color="white" /> : <Lock size={36} color="white" />}
+          <Lock size={36} color="white" />
         </div>
         
         <h1 style={{ fontSize: '1.75rem', fontWeight: 800, color: 'var(--text-primary)', marginBottom: '0.5rem' }}>
           ArthSutra
         </h1>
-        <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '2.5rem' }}>
-          {savedHash ? 'Enter your secure PIN to access your data' : 'Enter the default password to continue'}
+        <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '1.75rem' }}>
+          Enter your credentials to continue
         </p>
 
+        {error && (
+          <div style={{ 
+            color: '#dc2626', 
+            fontSize: '0.875rem', 
+            marginBottom: '1.25rem', 
+            fontWeight: 500,
+            background: 'rgba(220, 38, 38, 0.08)',
+            padding: '0.5rem 0.75rem',
+            borderRadius: '8px',
+            border: '1px solid rgba(220, 38, 38, 0.2)'
+          }}>
+            {error}
+          </div>
+        )}
+
         <form onSubmit={handleUnlock} style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+          <div style={{ position: 'relative' }}>
+            <input 
+              type="text" 
+              className="form-input" 
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder="Username"
+              autoFocus
+              autoComplete="username"
+              style={{ 
+                padding: '0.85rem 1rem', 
+                fontSize: '1rem', 
+                borderRadius: '12px',
+                textAlign: 'center',
+                width: '100%',
+                boxSizing: 'border-box'
+              }} 
+            />
+          </div>
+
           <div style={{ position: 'relative' }}>
             <input 
               type="password" 
               className="form-input" 
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder={savedHash ? 'Enter PIN...' : 'Password'}
-              autoFocus
+              placeholder="Password"
+              autoComplete="current-password"
               style={{ 
                 padding: '0.85rem 1rem', 
                 fontSize: '1rem', 
                 borderRadius: '12px',
                 textAlign: 'center',
-                letterSpacing: savedHash ? '0.2em' : 'normal'
+                width: '100%',
+                boxSizing: 'border-box'
               }} 
             />
           </div>
           
-          <button type="submit" className="btn btn-primary" style={{ 
-            width: '100%', 
-            padding: '0.85rem', 
-            justifyContent: 'center', 
-            fontSize: '1rem', 
-            borderRadius: '12px' 
-          }}>
-            Unlock <ArrowRight size={18} />
+          <button 
+            type="submit" 
+            disabled={loading}
+            className="btn btn-primary" 
+            style={{ 
+              width: '100%', 
+              padding: '0.85rem', 
+              justifyContent: 'center', 
+              fontSize: '1rem', 
+              borderRadius: '12px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.5rem'
+            }}>
+            {loading ? 'Unlocking…' : <>Unlock <ArrowRight size={18} /></>}
           </button>
         </form>
 

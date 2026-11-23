@@ -26,6 +26,23 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [token, setToken] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [isSetupComplete, setIsSetupComplete] = useState(true);
+
+  const checkSetupStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/auth/status');
+      if (res.ok) {
+        const data = await res.json();
+        if (typeof data.isSetupComplete === 'boolean') {
+          setIsSetupComplete(data.isSetupComplete);
+          return data.isSetupComplete;
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to check setup status:', err);
+    }
+    return true;
+  }, []);
 
   // Initialize session on mount
   useEffect(() => {
@@ -56,13 +73,16 @@ export function AuthProvider({ children }) {
       setLoading(false);
     }
 
+    // Check whether the first-time setup has been completed
+    checkSetupStatus();
+
     // Listen for WebSocket 4001 rejection or expired token events
     const handleAuthExpired = () => {
       logout();
     };
     window.addEventListener('fgsb-auth-expired', handleAuthExpired);
     return () => window.removeEventListener('fgsb-auth-expired', handleAuthExpired);
-  }, []);
+  }, [checkSetupStatus]);
 
   const login = useCallback(async (username, password) => {
     const res = await fetch('/api/auth/login', {
@@ -90,6 +110,37 @@ export function AuthProvider({ children }) {
     setUser(null);
   }, []);
 
+  const updateUser = useCallback((newToken, newUser) => {
+    if (newToken) {
+      localStorage.setItem('arthsutra_token', newToken);
+      setToken(newToken);
+    }
+    if (newUser) {
+      localStorage.setItem('arthsutra_user', JSON.stringify(newUser));
+      setUser(newUser);
+    }
+  }, []);
+
+  const setupAdmin = useCallback(async (username, password) => {
+    const res = await fetch('/api/auth/setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+
+    const data = await res.json();
+    if (!res.ok || !data.token) {
+      throw new Error(data.error || 'Setup failed');
+    }
+
+    localStorage.setItem('arthsutra_token', data.token);
+    localStorage.setItem('arthsutra_user', JSON.stringify(data.user));
+    setToken(data.token);
+    setUser(data.user);
+    setIsSetupComplete(true);
+    return data.user;
+  }, []);
+
   return (
     <AuthContext.Provider
       value={{
@@ -99,6 +150,11 @@ export function AuthProvider({ children }) {
         loading,
         login,
         logout,
+        updateUser,
+        isSetupComplete,
+        setIsSetupComplete,
+        checkSetupStatus,
+        setupAdmin,
         isAdmin: user?.role === 'ADMIN',
         isAccountant: user?.role === 'ACCOUNTANT' || user?.role === 'ADMIN',
         isClerk: user?.role === 'CLERK',

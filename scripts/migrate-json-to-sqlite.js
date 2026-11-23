@@ -149,7 +149,7 @@ CREATE TABLE IF NOT EXISTS profiles (
   ifsc TEXT NOT NULL DEFAULT '', swift TEXT NOT NULL DEFAULT '',
   logo TEXT NOT NULL DEFAULT '', signature TEXT NOT NULL DEFAULT '',
   upi_id TEXT NOT NULL DEFAULT '', google_client_id TEXT NOT NULL DEFAULT '',
-  google_drive_folder TEXT NOT NULL DEFAULT 'GST Billing Invoices',
+  google_drive_folder TEXT NOT NULL DEFAULT 'Arth Sutra Invoices',
   payment_accounts TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS templates (
@@ -389,7 +389,7 @@ const migrateAll = sqlite.transaction(() => {
       p.pan || '', p.email || '', p.phone || '', p.bankName || '',
       p.accountNumber || '', p.ifsc || '', p.swift || '', p.logo || '',
       p.signature || '', p.upiId || '', p.googleClientId || '',
-      p.googleDriveFolder || 'GST Billing Invoices',
+      p.googleDriveFolder || 'Arth Sutra Invoices',
       JSON.stringify(p.paymentAccounts || []),
     );
     counts.profiles++;

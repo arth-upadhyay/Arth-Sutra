@@ -192,7 +192,7 @@ CREATE TABLE IF NOT EXISTS profiles (
   signature           TEXT NOT NULL DEFAULT '',
   upi_id              TEXT NOT NULL DEFAULT '',
   google_client_id    TEXT NOT NULL DEFAULT '',
-  google_drive_folder TEXT NOT NULL DEFAULT 'GST Billing Invoices',
+  google_drive_folder TEXT NOT NULL DEFAULT 'Arth Sutra Invoices',
   payment_accounts    TEXT NOT NULL DEFAULT '[]'
 );
 
