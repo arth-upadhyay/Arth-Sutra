@@ -14,8 +14,12 @@ const PROJECT_ROOT = path.resolve(__dirname, '..');
 
 let DATA_DIR = path.join(PROJECT_ROOT, 'data');
 
-// Electron path detection: route SQLite database to app.getPath('userData')
-if (process.versions && process.versions.electron) {
+// Desktop app path detection: route SQLite database to userData directory
+if (process.env.ARTH_USER_DATA) {
+  DATA_DIR = process.env.ARTH_USER_DATA;
+} else if (process.env.ELECTRON_USER_DATA) {
+  DATA_DIR = process.env.ELECTRON_USER_DATA;
+} else if (process.versions && process.versions.electron) {
   let userDataDir = process.env.ELECTRON_USER_DATA;
   if (!userDataDir) {
     try {

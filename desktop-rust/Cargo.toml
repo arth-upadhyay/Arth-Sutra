@@ -1,0 +1,18 @@
+[package]
+name = "arth-sutra-app"
+version = "1.2.0"
+edition = "2021"
+
+[dependencies]
+wry = "0.47"
+tao = "0.30"
+
+[build-dependencies]
+winres = "0.1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

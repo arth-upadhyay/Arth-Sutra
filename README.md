@@ -24,7 +24,8 @@ Runs 100% locally on your own machine. Zero monthly subscriptions. Zero cloud lo
 
 ## Why Arth-Sutra?
 
-Most Indian small businesses are forced into paying ₹15,000 to ₹35,000 every single year for commercial billing software like Marg ERP, Tally, Vyapar, Zoho Books, or myBillBook. These proprietary platforms lock your financial data behind recurring subscriptions, cloud silos, and vendor paywalls.
+Most Indian small businesses are forced into paying ₹15,000 to ₹35,000 every single year for commercial billing software like Marg ERP, Tally, Vyapar, Zoho Books, or myBillBook. These proprietary platforms lock your financial data behind recurring subscriptions, cloud silos, and vendor paywalls. 
+same for my father the marg erp was too bloated for him
 
 **Arth-Sutra was built to break that cycle.** Originally created for a family retail business, it is an open-source, locally hosted accounting engine that ensures you maintain 100% ownership and privacy of your financial records.
 

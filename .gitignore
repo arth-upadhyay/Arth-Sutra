@@ -36,4 +36,6 @@ Thumbs.db
 # Build output
 dist/
 release/
+release-native/
 dist_electron/
+desktop-rust/target/
