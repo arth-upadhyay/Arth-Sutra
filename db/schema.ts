@@ -41,7 +41,7 @@ export const clients = sqliteTable('clients', {
   pin:       text('pin').notNull().default(''),
   state:     text('state').notNull().default(''),
   gstin:     text('gstin').notNull().default(''),
-  country:   text('country').notNull().default(''),
+  country:   text('country').notNull().default('India'),
   email:     text('email').notNull().default(''),
   phone:     text('phone').notNull().default(''),
   isSEZ:     integer('is_sez', { mode: 'boolean' }).notNull().default(false),
@@ -126,13 +126,15 @@ export const receipts = sqliteTable('receipts', {
 export const profiles = sqliteTable('profiles', {
   id:                text('id').primaryKey(),
   businessName:      text('business_name').notNull().default(''),
+  tagline:           text('tagline').notNull().default(''),
   address:           text('address').notNull().default(''),
   city:              text('city').notNull().default(''),
   pin:               text('pin').notNull().default(''),
   state:             text('state').notNull().default(''),
-  country:           text('country').notNull().default(''),
+  country:           text('country').notNull().default('India'),
   gstin:             text('gstin').notNull().default(''),
   pan:               text('pan').notNull().default(''),
+  licence:           text('licence').notNull().default(''),
   email:             text('email').notNull().default(''),
   phone:             text('phone').notNull().default(''),
   bankName:          text('bank_name').notNull().default(''),
@@ -140,12 +142,16 @@ export const profiles = sqliteTable('profiles', {
   ifsc:              text('ifsc').notNull().default(''),
   swift:             text('swift').notNull().default(''),
   logo:              text('logo').notNull().default(''),
+  logoHeight:        integer('logo_height').notNull().default(48),
   signature:         text('signature').notNull().default(''),
   upiId:             text('upi_id').notNull().default(''),
   googleClientId:    text('google_client_id').notNull().default(''),
   googleDriveFolder: text('google_drive_folder').notNull().default('Arth Sutra Invoices'),
   // Nested bank accounts — JSON array
   paymentAccounts:   text('payment_accounts').notNull().default('[]'),
+  aatoAbove5Cr:      integer('aato_above_5cr', { mode: 'boolean' }).notNull().default(false),
+  prevFYTurnover:    text('prev_fy_turnover').notNull().default(''),
+  currentFYTurnover: text('current_fy_turnover').notNull().default(''),
 });
 
 // ─── Terms Templates ────────────────────────────────────────────────────────

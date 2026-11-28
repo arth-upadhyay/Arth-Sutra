@@ -1,7 +1,54 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
-  <rect width="64" height="64" rx="14" fill="#1e40af"/>
-  <rect x="4" y="4" width="56" height="56" rx="10" fill="#2563eb"/>
-  <path d="M18 16h28a2 2 0 012 2v28a2 2 0 01-2 2H18a2 2 0 01-2-2V18a2 2 0 012-2z" fill="#fff" opacity="0.15"/>
-  <text x="32" y="44" text-anchor="middle" font-family="Arial,sans-serif" font-weight="bold" font-size="26" fill="#fff">B</text>
-  <rect x="14" y="50" width="36" height="3" rx="1.5" fill="#60a5fa"/>
+  <defs>
+    <linearGradient id="starGrad" x1="18" y1="12" x2="54" y2="54" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#3bc9ff"/>
+      <stop offset="55%" stop-color="#14a8ff"/>
+      <stop offset="100%" stop-color="#0284e8"/>
+    </linearGradient>
+    <linearGradient id="trailGrad" x1="4" y1="0" x2="40" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0284e8" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#0284e8" stop-opacity="0.85"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Speed motion trails (matching Windows star icon) -->
+  <g stroke="url(#trailGrad)" stroke-width="1.25" stroke-linecap="round">
+    <line x1="12" y1="16" x2="39.5" y2="16"/>
+    <line x1="9"  y1="19.5" x2="37" y2="19.5"/>
+    <line x1="6"  y1="23" x2="34.5" y2="23"/>
+    <line x1="4"  y1="26.5" x2="32" y2="26.5"/>
+    <line x1="6"  y1="37" x2="23" y2="37"/>
+    <line x1="5"  y1="40.5" x2="21.5" y2="40.5"/>
+    <line x1="4"  y1="44" x2="19.5" y2="44"/>
+    <line x1="3"  y1="47.5" x2="17.5" y2="47.5"/>
+  </g>
+
+  <!-- Tilted rounded 5-point shooting star -->
+  <path
+    d="M42.8 11.2
+       C43.5 9.8 45.2 10.1 45.2 11.7
+       L45.3 25.0
+       Q45.3 26.6 46.9 26.6
+       L59.4 26.6
+       C61.2 26.6 61.9 28.9 60.4 29.9
+       L46.4 37.8
+       Q45.0 38.6 45.0 40.2
+       L44.9 53.0
+       C44.9 54.9 42.6 55.7 41.3 54.2
+       L33.5 46.1
+       Q32.3 44.9 30.8 45.8
+       L17.0 54.4
+       C15.4 55.4 13.7 53.7 14.8 52.1
+       L23.2 39.2
+       Q24.1 37.8 22.9 36.6
+       L15.1 29.0
+       C13.7 27.7 14.6 25.5 16.5 25.5
+       L30.8 25.5
+       Q32.4 25.5 33.2 24.1
+       Z"
+    fill="url(#starGrad)"
+    stroke="#0272cc"
+    stroke-width="1.05"
+    stroke-linejoin="round"
+  />
 </svg>

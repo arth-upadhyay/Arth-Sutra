@@ -110,23 +110,24 @@ export const saveInvoiceDisplayOptions = async (options) => {
   });
 };
 
-// ---- Region preference: 'india' | 'international' | 'both' (default 'both') ----
-// Drives which countries appear in pickers and whether GST-only flows show up in the UI.
-// Stored in localStorage for instant boot — server copy is async-best-effort.
+// ---- Region preference: locked to 'india' for Indian MSME compliance ----
 const REGION_KEY = 'gst_regionMode';
-export const getRegionMode = () => {
-  try { return localStorage.getItem(REGION_KEY) || 'both'; } catch { return 'both'; }
-};
-export const setRegionMode = (mode) => {
-  if (!['india', 'international', 'both'].includes(mode)) return;
-  try { localStorage.setItem(REGION_KEY, mode); } catch { /* ignore */ }
-  apiFetch(`${API}/meta/regionMode`, { method: 'POST', body: JSON.stringify({ value: mode }) }).catch(() => {});
+export const getRegionMode = () => 'india';
+export const setRegionMode = () => {
+  try { localStorage.setItem(REGION_KEY, 'india'); } catch { /* ignore */ }
+  apiFetch(`${API}/meta/regionMode`, { method: 'POST', body: JSON.stringify({ value: 'india' }) }).catch(() => {});
 };
 
 // ---- Enabled feature modules ----
 // Map of moduleId → bool. Missing keys fall back to the module's default.
 // Stored locally for instant boot; mirrored to server for backup/import.
 const MODULES_KEY = 'gst_enabledModules';
+const emitModulesChanged = (map) => {
+  if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+    window.dispatchEvent(new CustomEvent('fgsb-modules-changed', { detail: map || {} }));
+  }
+};
+
 export const getEnabledModules = () => {
   try {
     const raw = localStorage.getItem(MODULES_KEY);
@@ -134,8 +135,24 @@ export const getEnabledModules = () => {
   } catch { return {}; }
 };
 export const setEnabledModules = (map) => {
-  try { localStorage.setItem(MODULES_KEY, JSON.stringify(map || {})); } catch { /* ignore */ }
-  apiFetch(`${API}/meta/enabledModules`, { method: 'POST', body: JSON.stringify({ value: map || {} }) }).catch(() => {});
+  const normalized = map && typeof map === 'object' ? map : {};
+  try { localStorage.setItem(MODULES_KEY, JSON.stringify(normalized)); } catch { /* ignore */ }
+  emitModulesChanged(normalized);
+  apiFetch(`${API}/meta/enabledModules`, { method: 'POST', body: JSON.stringify({ value: normalized }) }).catch(() => {});
+};
+export const hydrateEnabledModules = async ({ force = false } = {}) => {
+  try {
+    const { value } = await apiFetch(`${API}/meta/enabledModules`);
+    if (value && typeof value === 'object') {
+      const hasLocal = !!localStorage.getItem(MODULES_KEY);
+      if (force || !hasLocal) {
+        localStorage.setItem(MODULES_KEY, JSON.stringify(value));
+        emitModulesChanged(value);
+        return value;
+      }
+    }
+  } catch { /* offline / server unreachable */ }
+  return getEnabledModules();
 };
 
 // ---- Invoice counter ----
@@ -152,7 +169,9 @@ export const getNextInvoiceNumber = async (prefix = 'INV', { peek = false, expli
   let next;
   if (peek) {
     const { value: current } = await apiFetch(`${API}/meta/${key}`);
-    const currentNum = Number(current) || (settings.startNumber || 1) - 1;
+    const startNum = parseInt(settings.startNumber, 10);
+    const startBase = Number.isFinite(startNum) && startNum > 1 ? startNum - 1 : 0;
+    const currentNum = Math.max(Number(current) || 0, startBase);
     next = currentNum + 1;
   } else {
     const inc = await apiFetch(`${API}/meta/${key}/increment`, { method: 'POST', body: JSON.stringify({}) });
@@ -175,9 +194,10 @@ export const getNextInvoiceNumber = async (prefix = 'INV', { peek = false, expli
   const padded = String(next).padStart(settings.padDigits || 4, '0');
 
   if (settings.showFinYear) {
-    const currentYear = new Date().getFullYear();
-    const nextYear = (currentYear + 1).toString().slice(-2);
-    return `${pfx}${sep}${currentYear}-${nextYear}${sep}${padded}`;
+    const now = new Date();
+    const fyStart = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+    const nextYear = (fyStart + 1).toString().slice(-2);
+    return `${pfx}${sep}${fyStart}-${nextYear}${sep}${padded}`;
   }
 
   return `${pfx}${sep}${padded}`;
@@ -201,12 +221,73 @@ export const deleteBill = async (id) => {
   return apiFetch(`${API}/bills/${encodeURIComponent(id)}`, { method: 'DELETE' });
 };
 
-// v1.9.5 — Automatic backups + trash bin
+// v1.9.5 — Automatic backups + trash bin + off-PC disaster recovery
 export const getBackupsList = async () => apiFetch(`${API}/backups`);
 export const restoreBackup = async (date) => apiFetch(`${API}/backups/${encodeURIComponent(date)}/restore`, { method: 'POST', body: JSON.stringify({}) });
 export const triggerBackup = async () => apiFetch(`${API}/backups/now`, { method: 'POST', body: JSON.stringify({}) });
 // v1.10.22 — manual delete for a specific backup date.
 export const deleteBackup = async (date) => apiFetch(`${API}/backups/${encodeURIComponent(date)}`, { method: 'DELETE' });
+
+export const getBackupHealth = async () => apiFetch(`${API}/backup/health`);
+export const testMirrorFolder = async (folderPath) => apiFetch(`${API}/backup/test-folder`, { method: 'POST', body: JSON.stringify({ path: folderPath }) });
+export const saveBackupConfig = async (config) => apiFetch(`${API}/backup/config`, { method: 'POST', body: JSON.stringify(config) });
+export const syncMirrorNow = async () => apiFetch(`${API}/backup/sync-mirror`, { method: 'POST', body: JSON.stringify({}) });
+export const markGoogleDriveSync = async () => apiFetch(`${API}/backup/mark-drive-sync`, { method: 'POST', body: JSON.stringify({}) });
+
+async function uploadLocalForm(url, formData) {
+  const token = localStorage.getItem('arthsutra_token');
+  const headers = token ? { Authorization: `Bearer ${token}` } : {};
+  const res = await fetch(url, { method: 'POST', headers, body: formData });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(body?.error || `Upload error: ${res.status}`);
+  }
+  return body;
+}
+
+export const exportEncryptedBackup = async (password, selection) => {
+  return apiFetch(`${API}/backup/export-encrypted`, {
+    method: 'POST',
+    body: JSON.stringify({
+      password,
+      selection,
+      includeRecoveryMeta: true,
+      localStorageData: collectLocalStorage(),
+    }),
+  });
+};
+
+export const inspectUploadedBackup = async ({ file, text, password = '' }) => {
+  if (file) {
+    const fd = new FormData();
+    fd.append('file', file);
+    if (password) fd.append('password', password);
+    return uploadLocalForm(`${API}/backup/inspect-upload`, fd);
+  }
+  return apiFetch(`${API}/backup/inspect-upload`, {
+    method: 'POST',
+    body: JSON.stringify({ text, password }),
+  });
+};
+
+export const restoreUploadedBackup = async ({ file, text, password = '', selection = null, overwrite = true, allowUsers = false }) => {
+  if (file) {
+    const fd = new FormData();
+    fd.append('file', file);
+    if (password) fd.append('password', password);
+    if (selection) fd.append('selection', JSON.stringify(selection));
+    fd.append('overwrite', String(overwrite));
+    fd.append('allowUsers', String(allowUsers));
+    return uploadLocalForm(`${API}/backup/restore-upload`, fd);
+  }
+  const result = await apiFetch(`${API}/backup/restore-upload`, {
+    method: 'POST',
+    body: JSON.stringify({ text, password, selection, overwrite, allowUsers }),
+  });
+  return result;
+};
+
+export const restoreLocalPreferences = (map) => restoreLocalStorage(map);
 
 export const getTrashedBills = async () => apiFetch(`${API}/trash`);
 export const restoreTrashedBill = async (id) => apiFetch(`${API}/trash/${encodeURIComponent(id)}/restore`, { method: 'POST', body: JSON.stringify({}) });
@@ -214,7 +295,10 @@ export const purgeTrashedBill = async (id) => apiFetch(`${API}/trash/${encodeURI
 
 // ---- Profile ----
 export const saveProfile = async (profile) => {
-  return apiFetch(`${API}/profile`, { method: 'POST', body: JSON.stringify(profile) });
+  return apiFetch(`${API}/profile`, {
+    method: 'POST',
+    body: JSON.stringify({ ...(profile || {}), country: 'India' }),
+  });
 };
 
 export const getProfile = async () => {
@@ -332,13 +416,41 @@ export const getAllProfiles = async () => {
 };
 
 export const saveBusinessProfile = async (profile) => {
-  const res = await apiFetch(`${API}/profiles`, { method: 'POST', body: JSON.stringify(profile) });
+  const payload = { ...(profile || {}), country: 'India' };
+  const res = await apiFetch(`${API}/profiles`, { method: 'POST', body: JSON.stringify(payload) });
   if (res.id) profile.id = res.id;
   return profile;
 };
 
 export const deleteBusinessProfile = async (id) => {
   return apiFetch(`${API}/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' });
+};
+
+// ---- Cryptographic Audit Verification & RBAC User Management ----
+export const verifyAuditTrail = async () => {
+  return apiFetch(`${API}/audit/verify`);
+};
+
+export const getAuthUsers = async () => {
+  return apiFetch(`${API}/auth/users`);
+};
+
+export const createAuthUser = async ({ username, password, role }) => {
+  return apiFetch(`${API}/auth/users`, {
+    method: 'POST',
+    body: JSON.stringify({ username, password, role }),
+  });
+};
+
+export const deleteAuthUser = async (id) => {
+  return apiFetch(`${API}/auth/users/${encodeURIComponent(id)}`, { method: 'DELETE' });
+};
+
+export const updateAuthProfile = async ({ currentPassword, newUsername, newPassword }) => {
+  return apiFetch(`${API}/auth/profile`, {
+    method: 'PUT',
+    body: JSON.stringify({ currentPassword, newUsername, newPassword }),
+  });
 };
 
 // ---- Export / Import ----
@@ -396,8 +508,12 @@ const restoreLocalStorage = (map) => {
   if (!map || typeof map !== 'object') return;
   Object.entries(map).forEach(([k, v]) => {
     if (!isRestorable(k)) return; // ignore foreign keys — never let a backup smuggle unrelated writes in
-    try { localStorage.setItem(k, v); } catch { /* ignore */ }
+    const val = k === REGION_KEY ? 'india' : v;
+    try { localStorage.setItem(k, val); } catch { /* ignore */ }
   });
+  if (map[MODULES_KEY] !== undefined) {
+    emitModulesChanged(getEnabledModules());
+  }
 };
 
 // Cached app version — pulled from server once per session via /api/version so the
@@ -419,8 +535,9 @@ const getAppVersion = async () => {
 //
 // `selection` shape: { profile, profiles, bills, clients, products, expenses,
 //   purchases, recurring, receipts, termsTemplates, meta, localStorage } — each bool.
-export const exportAllData = async (selection) => {
-  const [all, version] = await Promise.all([apiFetch(`${API}/export`), getAppVersion()]);
+export const exportAllData = async (selection, { includeRecoveryMeta = false } = {}) => {
+  const qs = includeRecoveryMeta ? '?includeRecovery=1' : '';
+  const [all, version] = await Promise.all([apiFetch(`${API}/export${qs}`), getAppVersion()]);
   const sel = selection || { profile: true, profiles: true, bills: true, clients: true, products: true, expenses: true, purchases: true, recurring: true, receipts: true, termsTemplates: true, meta: true, localStorage: true };
 
   const data = { exportedAt: new Date().toISOString(), version, __arthsutra_backup: true };
@@ -436,6 +553,11 @@ export const exportAllData = async (selection) => {
   if (sel.purchases)      data.purchases = all.purchases;
   if (sel.meta)           data.meta = all.meta; // includes regionMode, enabledModules, etc. on server
   if (sel.localStorage)   data.localStorage = collectLocalStorage();
+  if (includeRecoveryMeta) {
+    if (all.trashedBills) data.trashedBills = all.trashedBills;
+    if (all.users)        data.users = all.users;
+    if (all.auditLogs)    data.auditLogs = all.auditLogs;
+  }
 
   return JSON.stringify(data, null, 2);
 };
@@ -458,6 +580,7 @@ export const inspectBackup = (jsonString) => {
       profile: data.profile && Object.keys(data.profile).length > 0 ? 1 : 0,
       profiles: Array.isArray(data.profiles) ? data.profiles.length : 0,
       bills: Array.isArray(data.bills) ? data.bills.length : 0,
+      trashedBills: Array.isArray(data.trashedBills) ? data.trashedBills.length : 0,
       clients: Array.isArray(data.clients) ? data.clients.length : 0,
       termsTemplates: Array.isArray(data.termsTemplates) ? data.termsTemplates.length : 0,
       products: Array.isArray(data.products) ? data.products.length : 0,
@@ -467,13 +590,15 @@ export const inspectBackup = (jsonString) => {
       receipts: Array.isArray(data.receipts) ? data.receipts.length : 0,
       meta: data.meta ? Object.keys(data.meta).length : 0,
       localStorage: data.localStorage ? Object.keys(data.localStorage).length : 0,
+      users: Array.isArray(data.users) ? data.users.length : 0,
+      auditLogs: Array.isArray(data.auditLogs) ? data.auditLogs.length : 0,
     },
     raw: data,
   };
 };
 
 // Selective import. `selection` is the same shape as for exportAllData.
-export const importData = async (jsonString, selection) => {
+export const importData = async (jsonString, selection, { overwrite = true } = {}) => {
   const inspected = typeof jsonString === 'string' ? inspectBackup(jsonString) : { raw: jsonString };
   const data = inspected.raw;
   const sel = selection || { profile: true, profiles: true, bills: true, clients: true, products: true, expenses: true, purchases: true, recurring: true, receipts: true, termsTemplates: true, meta: true, localStorage: true };
@@ -483,6 +608,7 @@ export const importData = async (jsonString, selection) => {
   if (sel.profile && data.profile)               payload.profile = data.profile;
   if (sel.profiles && data.profiles)             payload.profiles = data.profiles;
   if (sel.bills && data.bills)                   payload.bills = data.bills;
+  if ((sel.trashedBills ?? sel.bills) && data.trashedBills) payload.trashedBills = data.trashedBills;
   if (sel.clients && data.clients)               payload.clients = data.clients;
   if (sel.termsTemplates && data.termsTemplates) payload.termsTemplates = data.termsTemplates;
   if (sel.products && data.products)             payload.products = data.products;
@@ -491,10 +617,19 @@ export const importData = async (jsonString, selection) => {
   if (sel.receipts && data.receipts)             payload.receipts = data.receipts;
   if (sel.purchases && data.purchases)           payload.purchases = data.purchases;
   if (sel.meta && data.meta)                     payload.meta = data.meta;
+  if ((sel.auditLogs ?? (sel.bills && sel.products && sel.purchases)) && Array.isArray(data.auditLogs) && data.auditLogs.length > 0) {
+    payload.auditLogs = data.auditLogs;
+  }
 
-  const result = await apiFetch(`${API}/import`, { method: 'POST', body: JSON.stringify(payload) });
+  const qs = overwrite ? '?overwrite=1' : '';
+  const result = await apiFetch(`${API}/import${qs}`, { method: 'POST', body: JSON.stringify(payload) });
 
-  if (sel.localStorage && data.localStorage) restoreLocalStorage(data.localStorage);
+  if (sel.localStorage && data.localStorage) {
+    restoreLocalStorage(data.localStorage);
+  } else if (sel.meta && data.meta?.enabledModules && typeof data.meta.enabledModules === 'object') {
+    try { localStorage.setItem(MODULES_KEY, JSON.stringify(data.meta.enabledModules)); } catch { /* ignore */ }
+    emitModulesChanged(data.meta.enabledModules);
+  }
 
   return result;
 };

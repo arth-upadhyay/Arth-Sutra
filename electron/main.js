@@ -63,6 +63,7 @@ async function getActivePort(timeoutMs = 15000) {
 }
 
 async function createWindow(targetUrl) {
+  const winIconPath = path.join(__dirname, '..', 'dist', 'icons', 'icon.ico');
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 850,
@@ -70,6 +71,7 @@ async function createWindow(targetUrl) {
     minHeight: 700,
     show: false,
     title: 'Arth Sutra',
+    icon: fs.existsSync(winIconPath) ? winIconPath : undefined,
     backgroundColor: '#0f172a',
     webPreferences: {
       nodeIntegration: false,

@@ -2,8 +2,9 @@ import LockScreen from './components/LockScreen';
 import SetupScreen from './components/SetupScreen';
 import { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react';
 import { Home, FileText, Settings, Plus, Users, Package, BarChart3, Wallet, RefreshCw, Receipt, BookOpen, Download, X, ShoppingCart, ChevronDown, Building2, Pencil, HelpCircle, Search, Command, Bell, Calculator, GitCompare, LogOut, Shield, Blocks } from 'lucide-react';
-import { getAllProfiles, saveProfile, getEnabledModules, getAllBills, getAllProducts, getStockAlertSettings, getAllClients } from './store';
+import { getAllProfiles, saveProfile, saveBusinessProfile, getEnabledModules, hydrateEnabledModules, getAllBills, getAllProducts, getStockAlertSettings, getAllClients } from './store';
 import { isModuleEnabled, getUpcomingFilings } from './utils';
+import { computeNearExpiryBatches } from './components/Dashboard/hooks/useDashboardAlerts';
 import Dashboard from './components/Dashboard';
 import InvoiceGenerator from './components/InvoiceGenerator';
 import ToastContainer, { toast } from './components/Toast';
@@ -111,7 +112,7 @@ function App() {
   const [updateInfo, setUpdateInfo] = useState(null);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
 
-  const [notifications, setNotifications] = useState({ overdue: [], dueSoon: [], lowStock: [], filings: [], autoFire: null });
+  const [notifications, setNotifications] = useState({ overdue: [], dueSoon: [], lowStock: [], nearExpiry: [], filings: [], autoFire: null });
   const [showNotifs, setShowNotifs] = useState(false);
 
   const [showPalette, setShowPalette] = useState(false);
@@ -120,6 +121,12 @@ function App() {
   const [searchCorpus, setSearchCorpus] = useState({ bills: [], clients: [], products: [] });
   const [showShortcutsHelp, setShowShortcutsHelp] = useState(false);
   const [dataVersion, setDataVersion] = useState(0);
+  const [settingsSection, setSettingsSection] = useState('');
+
+  const openSettingsSection = useCallback((sectionId = '') => {
+    setSettingsSection(sectionId);
+    setCurrentView('settings');
+  }, []);
 
   // Feature #3: Real-Time Multi-User Sync via WebSockets
   useSocket(useCallback((event) => {
@@ -209,11 +216,20 @@ function App() {
 
   const handleSwitchProfile = useCallback(async (bp) => {
     setShowProfileMenu(false);
+    if (profile?.businessName?.trim()) {
+      const existing = allProfiles.find(
+        p => p.businessName?.trim().toLowerCase() === profile.businessName.trim().toLowerCase()
+      );
+      try {
+        await saveBusinessProfile({ ...profile, id: existing?.id || undefined });
+      } catch { /* best-effort auto-save before switching */ }
+    }
     const loaded = { ...bp };
     delete loaded.id;
     await saveProfile(loaded);
     setProfile(loaded);
-  }, []);
+    getAllProfiles().then(setAllProfiles).catch(() => {});
+  }, [profile, allProfiles]);
 
   const handleInstallPWA = useCallback(async () => {
     if (!deferredPrompt.current) return;
@@ -253,6 +269,7 @@ function App() {
     notifications.overdue.length
     + notifications.dueSoon.length
     + notifications.lowStock.length
+    + (notifications.nearExpiry?.length || 0)
     + notifications.filings.length
     + (notifications.autoFire?.count > 0 ? 1 : 0)
   ), [notifications]);
@@ -264,7 +281,7 @@ function App() {
     { id: 'inventory', icon: Package, label: 'Products', module: 'inventory' },
     { id: 'expenses', icon: Wallet, label: 'Expenses', module: 'expenses' },
     { id: 'purchases', icon: ShoppingCart, label: 'Purchases', module: 'purchases' },
-    { id: 'recon', icon: GitCompare, label: 'Reconciliation', module: 'purchases', minRole: ['ADMIN', 'ACCOUNTANT'] },
+    { id: 'recon', icon: GitCompare, label: 'Reconciliation', modules: ['purchases', 'gstr2b'], minRole: ['ADMIN', 'ACCOUNTANT'] },
     { id: 'recurring', icon: RefreshCw, label: 'Recurring', module: 'recurring' },
     { id: 'receipts', icon: Receipt, label: 'Receipts', module: 'receipts' },
     { id: 'reports', icon: BarChart3, label: 'Reports', module: 'reports' },
@@ -272,7 +289,12 @@ function App() {
     { id: 'incometax', icon: Calculator, label: 'Income Tax', module: 'incomeTax' },
     { id: 'extensions', icon: Blocks, label: 'Extensions', module: 'dashboard' },
     { id: 'guide', icon: HelpCircle, label: 'User Guide', module: 'dashboard' },
-  ].filter(item => showIfModule(item.module) && (!item.minRole || item.minRole.includes(user?.role))), [showIfModule, handleNewInvoice, user?.role]);
+  ].filter(item => {
+    const modOk = Array.isArray(item.modules)
+      ? item.modules.every(m => showIfModule(m))
+      : showIfModule(item.module);
+    return modOk && (!item.minRole || item.minRole.includes(user?.role));
+  }), [showIfModule, handleNewInvoice, user?.role]);
 
   const paletteActions = useMemo(() => {
     const acts = [
@@ -317,10 +339,9 @@ function App() {
       });
     });
     const settingsJumps = [
-      'Company profile', 'Payment accounts', 'Print & PDF Settings', 'PDF Style Editor',
-      'Business type presets', 'Section labels', 'Watermarks', 'Multi-copy print',
-      'Digital signature', 'Company letterhead', 'Modules', 'Region preference',
-      'Google Drive backup', 'App updates',
+      'Company profile', 'Business profiles', 'Payment accounts', 'Terms',
+      'Invoice Layout', 'Features', 'Stock alerts', 'Backups',
+      'Off-PC & Cloud', 'Import / Export', 'Account security', 'App updates',
     ];
     settingsJumps.forEach(s => {
       acts.push({ label: `⚙️ Settings → ${s}`, hint: '', category: 'settings', run: () => setCurrentView('settings') });
@@ -375,6 +396,7 @@ function App() {
         const lowStock = stockAlertCfg?.enabled === false
           ? []
           : products.filter(p => (p.stock ?? 999) <= stockThreshold);
+        const nearExpiry = computeNearExpiryBatches(products);
         const filings = getUpcomingFilings().filter(f => f.daysAway <= 10);
         let autoFire = null;
         try {
@@ -384,7 +406,7 @@ function App() {
             if (j.value && j.value.date === today && j.value.count > 0) autoFire = j.value;
           }
         } catch { /* fine */ }
-        setNotifications({ overdue, dueSoon, lowStock, filings, autoFire });
+        setNotifications({ overdue, dueSoon, lowStock, nearExpiry, filings, autoFire });
       } catch { /* offline / server down */ }
     };
     compute();
@@ -477,6 +499,9 @@ function App() {
     if (!isUnlocked) return;
     if (serverStatus === 'online') {
       getAllProfiles().then(setAllProfiles).catch(() => {});
+      hydrateEnabledModules?.().then((map) => {
+        if (map && typeof map === 'object') setEnabledModulesState(map);
+      }).catch(() => {});
     }
   }, [isUnlocked, serverStatus]);
 
@@ -501,22 +526,25 @@ function App() {
     };
   }, []);
 
-  useEffect(() => {
+  const activeView = useMemo(() => {
     const map = {
       new: 'invoicing',
       clients: 'clients',
       inventory: 'inventory',
       expenses: 'expenses',
       purchases: 'purchases',
+      recon: ['purchases', 'gstr2b'],
       recurring: 'recurring',
       receipts: 'receipts',
       reports: 'reports',
       filing: 'gstReturns',
+      incometax: 'incomeTax',
     };
     const moduleForView = map[currentView];
-    if (moduleForView && !isModuleEnabled(moduleForView, enabledModules)) {
-      setCurrentView('dashboard');
-    }
+    const isBlocked = Array.isArray(moduleForView)
+      ? moduleForView.some(m => !isModuleEnabled(m, enabledModules))
+      : (moduleForView && !isModuleEnabled(moduleForView, enabledModules));
+    return isBlocked ? 'dashboard' : currentView;
   }, [currentView, enabledModules]);
 
   useEffect(() => {
@@ -703,7 +731,7 @@ function App() {
           {navItems.map(item => (
             <button
               key={item.id}
-              className={`nav-btn ${currentView === item.id ? 'nav-btn-active' : ''}`}
+              className={`nav-btn ${activeView === item.id ? 'nav-btn-active' : ''}`}
               onClick={item.onClick || (() => setCurrentView(item.id))}
             >
               <item.icon size={18} /> {item.label}
@@ -753,8 +781,8 @@ function App() {
               )}
             </button>
             <button
-              className={`nav-btn ${currentView === 'settings' ? 'nav-btn-active' : ''}`}
-              onClick={() => setCurrentView('settings')}
+              className={`nav-btn ${activeView === 'settings' ? 'nav-btn-active' : ''}`}
+              onClick={() => openSettingsSection('')}
               style={updateBannerVisible ? { position: 'relative' } : undefined}
             >
               <Settings size={18} /> Settings
@@ -830,31 +858,45 @@ function App() {
       )}
 
       <div className="main-content">
-        {currentView === 'dashboard' && (
-          <Dashboard onNew={handleNewInvoice} onEdit={handleEditInvoice} onDuplicate={handleDuplicateInvoice} onConvert={handleConvertToInvoice} />
+        {activeView === 'dashboard' && (
+          <Dashboard
+            onNew={handleNewInvoice}
+            onEdit={handleEditInvoice}
+            onDuplicate={handleDuplicateInvoice}
+            onConvert={handleConvertToInvoice}
+            onOpenBackupSettings={() => openSettingsSection('section-cloud')}
+          />
         )}
-        {currentView === 'new' && (
+        {activeView === 'new' && (
           <InvoiceGenerator
             onBack={() => { setEditingBill(null); setCurrentView('dashboard'); }}
             profile={profile} editingBill={editingBill}
           />
         )}
         <Suspense fallback={<ViewLoading />}>
-          {currentView === 'clients' && (
+          {activeView === 'clients' && (
             <ClientsView onNew={handleNewInvoice} onEdit={handleEditInvoice} onDuplicate={handleDuplicateInvoice} />
           )}
-          {currentView === 'inventory' && <InventoryView />}
-          {currentView === 'expenses' && <ExpenseTracker />}
-          {currentView === 'purchases' && <PurchaseBills />}
-          {currentView === 'recon' && <ReconView />}
-          {currentView === 'recurring' && <RecurringInvoices onEdit={handleEditInvoice} />}
-          {currentView === 'receipts' && <ReceiptVoucher />}
-          {currentView === 'reports' && <ReportsView />}
-          {currentView === 'filing' && <GSTReturns />}
-          {currentView === 'incometax' && <IncomeTax />}
-          {currentView === 'extensions' && <ExtensionsView />}
-          {currentView === 'guide' && <UserGuideView />}
-          {currentView === 'settings' && <SettingsView onSaved={(p) => setProfile(p)} />}
+          {activeView === 'inventory' && <InventoryView />}
+          {activeView === 'expenses' && <ExpenseTracker />}
+          {activeView === 'purchases' && <PurchaseBills />}
+          {activeView === 'recon' && <ReconView />}
+          {activeView === 'recurring' && <RecurringInvoices onEdit={handleEditInvoice} />}
+          {activeView === 'receipts' && <ReceiptVoucher />}
+          {activeView === 'reports' && <ReportsView />}
+          {activeView === 'filing' && <GSTReturns />}
+          {activeView === 'incometax' && <IncomeTax />}
+          {activeView === 'extensions' && <ExtensionsView />}
+          {activeView === 'guide' && <UserGuideView />}
+          {activeView === 'settings' && (
+            <SettingsView
+              initialSection={settingsSection}
+              onSaved={(p) => {
+                setProfile(p);
+                getAllProfiles().then(setAllProfiles).catch(() => {});
+              }}
+            />
+          )}
         </Suspense>
       </div>
 
@@ -922,6 +964,17 @@ function App() {
                       <strong>{notifications.lowStock.length} product{notifications.lowStock.length !== 1 ? 's' : ''} low on stock</strong>
                       <div style={{ fontSize: '0.72rem', opacity: 0.85, marginTop: '0.2rem' }}>
                         {notifications.lowStock.slice(0, 3).map(p => `${p.name} (${p.stock} left)`).join(' · ')}
+                      </div>
+                    </div>
+                  </button>
+                )}
+                {(notifications.nearExpiry?.length || 0) > 0 && (
+                  <button type="button" className="notice notice-warn" onClick={() => { setShowNotifs(false); setCurrentView('inventory'); }} style={{ cursor: 'pointer', border: 'none', textAlign: 'left' }}>
+                    <span className="notice-icon">⏳</span>
+                    <div style={{ flex: 1 }}>
+                      <strong>{notifications.nearExpiry.length} batch{notifications.nearExpiry.length !== 1 ? 'es' : ''} near expiry / expired</strong>
+                      <div style={{ fontSize: '0.72rem', opacity: 0.85, marginTop: '0.2rem' }}>
+                        {notifications.nearExpiry.slice(0, 3).map(b => `${b.productName} (${b.batchNo} · ${b.expiry})`).join(' · ')}
                       </div>
                     </div>
                   </button>
@@ -1033,7 +1086,7 @@ function App() {
             <div className="notice notice-warn" style={{ marginBottom: '1rem' }}>
               <span className="notice-icon">💡</span>
               <div>
-                <strong>Recommended:</strong> export a backup before updating, just in case. <button type="button" className="btn-link" onClick={() => { setShowUpdateModal(false); setCurrentView('settings'); }} style={{ background: 'none', border: 0, color: 'var(--primary)', textDecoration: 'underline', cursor: 'pointer', font: 'inherit', padding: 0 }}>Open Settings → Data Management</button> and click <em>Export Backup…</em>.
+                <strong>Recommended:</strong> export a backup before updating, just in case. <button type="button" className="btn-link" onClick={() => { setShowUpdateModal(false); openSettingsSection('section-data'); }} style={{ background: 'none', border: 0, color: 'var(--primary)', textDecoration: 'underline', cursor: 'pointer', font: 'inherit', padding: 0 }}>Open Settings → Import / Export</button> and click <em>Export Backup…</em>.
               </div>
             </div>
 

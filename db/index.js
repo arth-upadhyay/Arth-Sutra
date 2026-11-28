@@ -102,7 +102,7 @@ CREATE TABLE IF NOT EXISTS clients (
   pin      TEXT NOT NULL DEFAULT '',
   state    TEXT NOT NULL DEFAULT '',
   gstin    TEXT NOT NULL DEFAULT '',
-  country  TEXT NOT NULL DEFAULT '',
+  country  TEXT NOT NULL DEFAULT 'India',
   email    TEXT NOT NULL DEFAULT '',
   phone    TEXT NOT NULL DEFAULT '',
   is_sez   INTEGER NOT NULL DEFAULT 0,
@@ -179,13 +179,15 @@ CREATE TABLE IF NOT EXISTS receipts (
 CREATE TABLE IF NOT EXISTS profiles (
   id                  TEXT PRIMARY KEY,
   business_name       TEXT NOT NULL DEFAULT '',
+  tagline             TEXT NOT NULL DEFAULT '',
   address             TEXT NOT NULL DEFAULT '',
   city                TEXT NOT NULL DEFAULT '',
   pin                 TEXT NOT NULL DEFAULT '',
   state               TEXT NOT NULL DEFAULT '',
-  country             TEXT NOT NULL DEFAULT '',
+  country             TEXT NOT NULL DEFAULT 'India',
   gstin               TEXT NOT NULL DEFAULT '',
   pan                 TEXT NOT NULL DEFAULT '',
+  licence             TEXT NOT NULL DEFAULT '',
   email               TEXT NOT NULL DEFAULT '',
   phone               TEXT NOT NULL DEFAULT '',
   bank_name           TEXT NOT NULL DEFAULT '',
@@ -193,11 +195,15 @@ CREATE TABLE IF NOT EXISTS profiles (
   ifsc                TEXT NOT NULL DEFAULT '',
   swift               TEXT NOT NULL DEFAULT '',
   logo                TEXT NOT NULL DEFAULT '',
+  logo_height         INTEGER NOT NULL DEFAULT 48,
   signature           TEXT NOT NULL DEFAULT '',
   upi_id              TEXT NOT NULL DEFAULT '',
   google_client_id    TEXT NOT NULL DEFAULT '',
   google_drive_folder TEXT NOT NULL DEFAULT 'Arth Sutra Invoices',
-  payment_accounts    TEXT NOT NULL DEFAULT '[]'
+  payment_accounts    TEXT NOT NULL DEFAULT '[]',
+  aato_above_5cr      INTEGER NOT NULL DEFAULT 0,
+  prev_fy_turnover    TEXT NOT NULL DEFAULT '',
+  current_fy_turnover TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS templates (
@@ -262,6 +268,26 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_entity    ON audit_logs(entity_type, e
 
 // Execute all CREATE TABLE + CREATE INDEX statements
 sqlite.exec(CREATE_TABLES_SQL);
+
+// ── Idempotent schema migrations for existing databases ────────────────────
+function ensureColumn(table, column, definitionSql) {
+  const cols = sqlite.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+  if (!cols.includes(column)) {
+    sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definitionSql}`);
+  }
+}
+
+ensureColumn('profiles', 'licence', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('profiles', 'tagline', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('profiles', 'logo_height', 'INTEGER NOT NULL DEFAULT 48');
+ensureColumn('profiles', 'aato_above_5cr', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('profiles', 'prev_fy_turnover', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('profiles', 'current_fy_turnover', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('clients', 'licence', "TEXT NOT NULL DEFAULT ''");
+
+// Backfill unset countries to India for Indian MSME defaults
+sqlite.exec("UPDATE profiles SET country = 'India' WHERE TRIM(COALESCE(country, '')) = ''");
+sqlite.exec("UPDATE clients SET country = 'India' WHERE TRIM(COALESCE(country, '')) = ''");
 
 // Re-export schema tables for convenient imports
 export {

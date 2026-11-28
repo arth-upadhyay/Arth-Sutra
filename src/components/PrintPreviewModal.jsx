@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { X, Printer, Download, Loader } from 'lucide-react';
 import InvoicePreview from './InvoicePreview';
+import TwoUpSheetPreview from './TwoUpSheetPreview';
 import { getPaperSize } from '../utils';
+import { getPrintSettings } from '../utils/printSettings';
 
 /**
  * Print preview modal.
@@ -16,6 +18,7 @@ export default function PrintPreviewModal({
   isOpen, onClose, onPrint, onDownloadPdf,
   profile, client, details, items, totals, invoiceType,
   customTerms, customNotes, extraSections, invoiceOptions,
+  twoPerPage, onToggleTwoPerPage,
 }) {
   const [printing, setPrinting] = useState(false);
   const modalRef = useRef(null);
@@ -31,8 +34,12 @@ export default function PrintPreviewModal({
 
   if (!isOpen) return null;
 
+  const printSettings = getPrintSettings();
+  const isTwoUp = typeof twoPerPage === 'boolean' ? twoPerPage : Boolean(printSettings.twoPerPageEnabled);
   const paperCfg = getPaperSize(invoiceOptions.paperSize, invoiceOptions);
-  const paperLabel = paperCfg.label || `${paperCfg.widthMm}mm`;
+  const paperLabel = isTwoUp && paperCfg.kind !== 'thermal'
+    ? 'A4 Portrait · 2 Bills on 1 Page (Client Copy + Office Copy)'
+    : (paperCfg.label || `${paperCfg.widthMm}mm`);
 
   const handlePrint = async () => {
     if (printing) return;
@@ -58,7 +65,17 @@ export default function PrintPreviewModal({
     }
   };
 
-  const previewScale = 0.72;
+  const previewScale = isTwoUp && paperCfg.kind !== 'thermal' ? 0.68 : 0.72;
+
+  const renderInvoice = () => (
+    <InvoicePreview
+      previewOnly
+      profile={profile} client={client} details={details}
+      items={items} totals={totals} invoiceType={invoiceType}
+      customTerms={customTerms} customNotes={customNotes}
+      extraSections={extraSections} options={invoiceOptions}
+    />
+  );
 
   return (
     <div className="modal-overlay print-preview-overlay"
@@ -68,7 +85,7 @@ export default function PrintPreviewModal({
       <div ref={modalRef} className="modal-content print-preview-content"
         onClick={(e) => e.stopPropagation()}
         style={{
-          maxWidth: 'min(900px, 96vw)',
+          maxWidth: 'min(960px, 96vw)',
           maxHeight: '92vh',
           padding: 0,
           display: 'flex', flexDirection: 'column',
@@ -90,10 +107,38 @@ export default function PrintPreviewModal({
               {paperLabel} — click Print to send to your printer
             </p>
           </div>
-          <button type="button" className="icon-btn" onClick={onClose} disabled={printing}
-            title="Close (Esc)" aria-label="Close">
-            <X size={18} />
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            {onToggleTwoPerPage && paperCfg.kind !== 'thermal' && (
+              <div style={{ display: 'inline-flex', borderRadius: 8, overflow: 'hidden', border: '1px solid var(--border)' }}>
+                <button
+                  type="button"
+                  onClick={() => !isTwoUp && onToggleTwoPerPage(true)}
+                  style={{
+                    border: 0, cursor: 'pointer', fontSize: '0.74rem', fontWeight: 600, padding: '0.32rem 0.6rem',
+                    background: isTwoUp ? 'var(--primary)' : 'var(--bg-secondary)',
+                    color: isTwoUp ? '#fff' : 'var(--text)',
+                  }}
+                >
+                  2 Bills / Page
+                </button>
+                <button
+                  type="button"
+                  onClick={() => isTwoUp && onToggleTwoPerPage(false)}
+                  style={{
+                    border: 0, cursor: 'pointer', fontSize: '0.74rem', fontWeight: 600, padding: '0.32rem 0.6rem',
+                    background: !isTwoUp ? 'var(--primary)' : 'var(--bg-secondary)',
+                    color: !isTwoUp ? '#fff' : 'var(--text)',
+                  }}
+                >
+                  1 Bill / Page
+                </button>
+              </div>
+            )}
+            <button type="button" className="icon-btn" onClick={onClose} disabled={printing}
+              title="Close (Esc)" aria-label="Close">
+              <X size={18} />
+            </button>
+          </div>
         </div>
 
         <div style={{
@@ -105,19 +150,21 @@ export default function PrintPreviewModal({
         }}>
           <div style={{
             background: '#fff',
-            padding: '0.5rem',
+            padding: '0.35rem',
             boxShadow: '0 8px 30px rgba(0, 0, 0, 0.18)',
             borderRadius: 4,
             transform: `scale(${previewScale})`,
             transformOrigin: 'top center',
             marginBottom: `${Math.round((1 - previewScale) * -400)}px`,
           }}>
-            <InvoicePreview
-              previewOnly
-              profile={profile} client={client} details={details}
-              items={items} totals={totals} invoiceType={invoiceType}
-              customTerms={customTerms} customNotes={customNotes}
-              extraSections={extraSections} options={invoiceOptions}
+            <TwoUpSheetPreview
+              enabled={isTwoUp && paperCfg.kind !== 'thermal'}
+              showLabels={printSettings.twoPerPageShowLabels !== false}
+              showCutLine={printSettings.twoPerPageShowCutLine !== false}
+              leftLabel={printSettings.twoPerPageLeftLabel || 'CLIENT COPY'}
+              rightLabel={printSettings.twoPerPageRightLabel || 'OFFICE / SELF COPY'}
+              renderPrimary={renderInvoice}
+              renderSecondary={renderInvoice}
             />
           </div>
         </div>
@@ -130,7 +177,9 @@ export default function PrintPreviewModal({
           justifyContent: 'flex-end', alignItems: 'center',
         }}>
           <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginRight: 'auto' }}>
-            Preview is scaled — actual print will be full-size on A4
+            {isTwoUp && paperCfg.kind !== 'thermal'
+              ? 'Two shrunk bills stacked top & bottom on A4 Portrait — tear across the middle'
+              : 'Preview is scaled — actual print will be full-size on A4'}
           </span>
           {onDownloadPdf && (
             <button type="button" className="btn btn-secondary"

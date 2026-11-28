@@ -54,10 +54,10 @@ export const DEFAULT_OPTIONS = {
 
 export const EMPTY_CLIENT = {
   name: '', address: '', city: '', pin: '', state: '', gstin: '',
-  country: '', email: '', phone: '', isSEZ: false, licence: '',
+  country: 'India', email: '', phone: '', isSEZ: false, licence: '',
 };
 
-export const createEmptyDetails = () => ({
+export const createEmptyDetails = (profile = null) => ({
   invoiceNumber: '',
   poNumber: '',
   invoiceDate: new Date().toISOString().split('T')[0],
@@ -69,7 +69,7 @@ export const createEmptyDetails = () => ({
   shippingCity: '',
   shippingPin: '',
   shippingState: '',
-  sellerLicence: '',
+  sellerLicence: profile?.licence || profile?.licenceNo || '',
 });
 
 export const createLineItem = (overrides = {}) => ({
@@ -95,7 +95,7 @@ export function useInvoiceForm({ editingBill = null, profile = null } = {}) {
 
   const [invoiceType, setInvoiceType] = useState(draft?.invoiceType || 'tax-invoice');
   const [client, setClient] = useState(draft?.client || { ...EMPTY_CLIENT });
-  const [details, setDetails] = useState(draft?.details || createEmptyDetails());
+  const [details, setDetails] = useState(() => draft?.details || createEmptyDetails(profile));
   const [items, setItems] = useState(draft?.items || [createLineItem()]);
   const [taxInclusive, setTaxInclusive] = useState(draft?.taxInclusive || false);
   const [selectedTermsId, setSelectedTermsId] = useState(draft?.selectedTermsId || '');
@@ -107,21 +107,63 @@ export function useInvoiceForm({ editingBill = null, profile = null } = {}) {
 
   const [invoiceOptions, setInvoiceOptions] = useState(() => {
     try {
+      const ps = getPrintSettings();
+      const printDefaults = {
+        showLogo: ps.showLogo ?? true,
+        showHSN: ps.showHSN ?? true,
+        showAmountWords: ps.showAmountWords ?? true,
+        showBankDetails: ps.showBankDetails ?? true,
+        showUPI: ps.showUPI ?? true,
+        showSignature: ps.signatureShow ?? true,
+      };
       const saved = localStorage.getItem(OPTIONS_STORAGE_KEY);
       const persisted = saved ? JSON.parse(saved) : {};
       delete persisted.paymentAccountSnapshot;
-      return { ...DEFAULT_OPTIONS, ...persisted, ...(draft?.invoiceOptions || {}), paperSize: 'a4' };
-    } catch { return { ...DEFAULT_OPTIONS, paperSize: 'a4' }; }
+      return {
+        ...DEFAULT_OPTIONS,
+        ...printDefaults,
+        ...persisted,
+        ...(draft?.invoiceOptions || {}),
+        paperSize: 'a4',
+        currency: 'INR',
+      };
+    } catch { return { ...DEFAULT_OPTIONS, paperSize: 'a4', currency: 'INR' }; }
   });
 
   const draftInitialized = useRef(!!draft);
   const isDirty = useRef(false);
   const hasInitialized = useRef(false);
   const numberReserved = useRef(!!editingBill);
+  const prevProfileLicenceRef = useRef(profile?.licence || profile?.licenceNo || '');
+  const prevProfileIdentityRef = useRef(profile?.id || profile?.businessName || '');
+
+  useEffect(() => {
+    const nextLic = profile?.licence || profile?.licenceNo || '';
+    const nextId = profile?.id || profile?.businessName || '';
+    const profileChanged = nextId !== prevProfileIdentityRef.current;
+    const licChanged = nextLic !== prevProfileLicenceRef.current;
+    if (!profileChanged && !licChanged) return;
+
+    const wasHydration = !prevProfileIdentityRef.current && !!nextId;
+    const prevLic = prevProfileLicenceRef.current;
+    prevProfileLicenceRef.current = nextLic;
+    prevProfileIdentityRef.current = nextId;
+
+    // On existing saved bills, preserve saved sellerLicence unless user actively switches profile.
+    if (editingBill && !editingBill._isDuplicate && (!profileChanged || wasHydration)) return;
+
+    setDetails(prev => {
+      const current = prev.sellerLicence || '';
+      if ((profileChanged && !wasHydration) || !current || current === prevLic) {
+        return { ...prev, sellerLicence: nextLic };
+      }
+      return prev;
+    });
+  }, [profile?.id, profile?.businessName, profile?.licence, profile?.licenceNo, editingBill]);
 
   const showGST = !(invoiceType === 'bill-of-supply' || invoiceType === 'composition');
 
-  const sellerCountryConfig = getCountryConfig(profile?.country);
+  const sellerCountryConfig = getCountryConfig('India');
   const baseCountryRates = sellerCountryConfig.taxRates?.length
     ? sellerCountryConfig.taxRates
     : [0, 5, 12, 18, 28];
@@ -179,6 +221,7 @@ export function useInvoiceForm({ editingBill = null, profile = null } = {}) {
       if (!serverOpts) return;
       delete serverOpts.paymentAccountSnapshot;
       serverOpts.paperSize = 'a4';
+      serverOpts.currency = 'INR';
       const merged = { ...DEFAULT_OPTIONS, ...serverOpts };
       setInvoiceOptions(prev => {
         const changed = Object.keys(merged).some(k => merged[k] !== prev[k]);
@@ -291,7 +334,7 @@ export function useInvoiceForm({ editingBill = null, profile = null } = {}) {
       errors.push({ field: 'details.invoiceDate', message: 'Invoice date is required' });
     }
 
-    const taxIdCheck = validateTaxId(client?.country || profile?.country, client?.gstin);
+    const taxIdCheck = validateTaxId('India', client?.gstin);
     if (!taxIdCheck.ok) {
       warnings.push({ field: 'client.gstin', message: taxIdCheck.message });
     }
@@ -305,13 +348,13 @@ export function useInvoiceForm({ editingBill = null, profile = null } = {}) {
     (totals?.warnings || []).forEach(w => warnings.push({ field: 'totals', message: w }));
 
     return { valid: errors.length === 0, errors, warnings };
-  }, [client, items, details, profile]);
+  }, [client, items, details]);
 
   const resetForm = useCallback(() => {
     clearDraft();
     setInvoiceType('tax-invoice');
     setClient({ ...EMPTY_CLIENT });
-    setDetails(createEmptyDetails());
+    setDetails(createEmptyDetails(profile));
     setItems([createLineItem()]);
     setTaxInclusive(false);
     setSelectedTermsId('');
@@ -321,7 +364,7 @@ export function useInvoiceForm({ editingBill = null, profile = null } = {}) {
     setExtraSections([]);
     isDirty.current = false;
     numberReserved.current = false;
-  }, []);
+  }, [profile]);
 
   return {
     invoiceType, setInvoiceType,

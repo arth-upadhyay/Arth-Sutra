@@ -62,6 +62,7 @@ export function useProductSearch({
   countryTaxRates = [0, 5, 12, 18, 28],
   editingBill = null,
   lowStockThreshold = 5,
+  lowStockAlertsEnabled = true,
 } = {}) {
   const [products, setProducts] = useState([]);
   const [productSearch, setProductSearch] = useState({ itemId: null, query: '' });
@@ -237,7 +238,7 @@ export function useProductSearch({
         if (it.pkg && String(it.pkg).trim()) wProd.pkg = String(it.pkg).trim();
 
         wProd.stock = (Number(wProd.stock) || 0) - qty;
-        if (wProd.stock <= lowStockThreshold) {
+        if (lowStockAlertsEnabled && wProd.stock <= lowStockThreshold) {
           lowStockWarnings.push(`${wProd.name} total stock is running low!`);
         }
 
@@ -247,7 +248,7 @@ export function useProductSearch({
             b => String(b.batchNo || '').trim().toLowerCase() === targetBatch.toLowerCase());
           if (bIdx >= 0) {
             wProd.batches[bIdx].quantity = (Number(wProd.batches[bIdx].quantity) || 0) - qty;
-            if (wProd.batches[bIdx].quantity <= lowStockThreshold) {
+            if (lowStockAlertsEnabled && wProd.batches[bIdx].quantity <= lowStockThreshold) {
               lowStockWarnings.push(`${wProd.name} (Batch ${targetBatch}) is running low!`);
             }
           } else {
@@ -278,7 +279,7 @@ export function useProductSearch({
       console.warn('Inventory deduction failed:', e);
       return { warnings: [], error: e };
     }
-  }, [lowStockThreshold]);
+  }, [lowStockThreshold, lowStockAlertsEnabled]);
 
   const resetBaseline = useCallback((items) => {
     previouslyDeductedItems.current = JSON.parse(JSON.stringify(items || []));

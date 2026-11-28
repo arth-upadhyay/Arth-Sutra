@@ -37,11 +37,7 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
   const [showForm, setShowForm] = useState(false);
   const [modalClient, setModalClient] = useState(null);
   const [editingClientId, setEditingClientId] = useState(null);
-  const [profileCountry, setProfileCountry] = useState('');
-
-  useEffect(() => {
-    getProfile().then(p => { if (p?.country) setProfileCountry(p.country); }).catch(() => {});
-  }, []);
+  const [profileForStatement, setProfileForStatement] = useState(null);
 
   const loadData = async () => {
     try {
@@ -55,10 +51,6 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
 
   useEffect(() => {
     loadData();
-  }, []);
-
-  const [profileForStatement, setProfileForStatement] = useState(null);
-  useEffect(() => {
     getProfile().then(setProfileForStatement).catch(() => {});
   }, []);
 
@@ -116,6 +108,7 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
         profileForStatement?.address,
         [profileForStatement?.city, profileForStatement?.state, profileForStatement?.pin].filter(Boolean).join(', '),
         profileForStatement?.gstin ? `GSTIN: ${profileForStatement.gstin}` : null,
+        profileForStatement?.licence ? `DL No.: ${profileForStatement.licence}` : null,
         profileForStatement?.email,
         profileForStatement?.phone ? `Ph: ${profileForStatement.phone}` : null,
       ].filter(Boolean);
@@ -123,6 +116,7 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
         savedClient.address,
         [savedClient.city, savedClient.state, savedClient.pin].filter(Boolean).join(', '),
         savedClient.gstin ? `GSTIN: ${savedClient.gstin}` : null,
+        savedClient.licence ? `DL No.: ${savedClient.licence}` : null,
         savedClient.email,
         savedClient.phone ? `Ph: ${savedClient.phone}` : null,
       ].filter(Boolean);
@@ -533,8 +527,12 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
         await saveClient({
           name,
           address: row.address || '',
+          city: row.city || '',
+          pin: row.pin || row.pincode || '',
           state: row.state || '',
+          country: 'India',
           gstin: row.gstin || '',
+          licence: row.licence || row['dl no'] || row['drug licence'] || row['drug licence no'] || '',
           email: row.email || '',
           phone: row.phone || '',
         });
@@ -620,7 +618,7 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
         </div>
       </div>
 
-      <ClientModal show={showForm} onClose={closeForm} onSave={handleModalSave} client={modalClient} isEditing={!!editingClientId} defaultCountry={profileCountry} />
+      <ClientModal show={showForm} onClose={closeForm} onSave={handleModalSave} client={modalClient} isEditing={!!editingClientId} />
 
       <div className="glass-panel p-4 mb-6">
         <div className="search-box" style={{ maxWidth: '400px' }}>
@@ -662,6 +660,7 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
                         {stats.count} invoice{stats.count !== 1 ? 's' : ''}
                         {savedClient?.state ? ` | ${savedClient.state}` : ''}
                         {savedClient?.gstin ? ` | ${savedClient.gstin}` : ''}
+                        {savedClient?.licence ? ` | DL: ${savedClient.licence}` : ''}
                       </p>
                     </div>
                   </div>
@@ -726,11 +725,12 @@ export default function ClientsView({ onEdit, onDuplicate, onNew }) {
                       );
                     })()}
 
-                    {savedClient && (savedClient.address || savedClient.city || savedClient.email || savedClient.phone) && (
+                    {savedClient && (savedClient.address || savedClient.city || savedClient.licence || savedClient.email || savedClient.phone) && (
                       <div style={{ padding: '0.75rem 1.5rem', borderBottom: '1px solid var(--border)', display: 'flex', gap: '1.5rem', flexWrap: 'wrap', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
                         {(savedClient.address || savedClient.city || savedClient.pin) && (
                           <span>{[savedClient.address, savedClient.city, savedClient.pin].filter(Boolean).join(', ')}</span>
                         )}
+                        {savedClient.licence && <span>DL No.: {savedClient.licence}</span>}
                         {savedClient.email && <span>{savedClient.email}</span>}
                         {savedClient.phone && <span>{savedClient.phone}</span>}
                       </div>

@@ -130,11 +130,19 @@ export function useInvoicePersistence({
         }
         const { prefix, explicitPrefix } = resolvePrefix(type);
         getNextInvoiceNumber(prefix, { peek: true, explicitPrefix }).then(num => {
-          form.setDetails({ ...d.details, invoiceNumber: num, invoiceDate: new Date().toISOString().split('T')[0] });
+          form.setDetails({
+            ...d.details,
+            invoiceNumber: num,
+            invoiceDate: new Date().toISOString().split('T')[0],
+            sellerLicence: d.details?.sellerLicence || profile?.licence || profile?.licenceNo || '',
+          });
           form.numberReserved.current = false;
         });
       } else {
-        form.setDetails(d.details);
+        form.setDetails({
+          ...d.details,
+          sellerLicence: d.details?.sellerLicence || profile?.licence || profile?.licenceNo || '',
+        });
       }
     } else if (!form.details.invoiceNumber) {
       const { prefix, explicitPrefix } = resolvePrefix(form.invoiceType);
@@ -254,7 +262,16 @@ export function useInvoicePersistence({
         }
       }
 
-      if (clientSearch?.selectedClientId) {
+      if (!skipStockDeduction && clientSearch?.upsertClientFromForm) {
+        try {
+          await clientSearch.upsertClientFromForm(client, {
+            preferredPaperSize: invoiceOptions.paperSize || 'a4',
+            preferredCurrency: invoiceOptions.currency || 'INR',
+          });
+        } catch (cliErr) {
+          console.warn('Client auto-save skipped:', cliErr);
+        }
+      } else if (clientSearch?.selectedClientId) {
         const cli = clientSearch.savedClients.find(c => c.id === clientSearch.selectedClientId);
         if (cli) {
           const nextPaperSize = invoiceOptions.paperSize || 'a4';
@@ -325,7 +342,7 @@ export function useInvoicePersistence({
           clientState: client.state,
           clientGstin: client.gstin,
           clientAddress: client.address,
-          clientCountry: client.country,
+          clientCountry: client.country || 'India',
           clientCity: client.city,
           clientPin: client.pin,
           clientEmail: client.email,

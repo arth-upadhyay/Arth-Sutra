@@ -1,11 +1,11 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { FileText, Trash2, Plus, IndianRupee, Receipt, Edit3, Search, Copy, X, CheckCircle, Clock, AlertTriangle, MessageCircle, Mail, Send, Package, Download, ChevronRight, Users, TrendingUp } from 'lucide-react';
+import { FileText, Trash2, Plus, IndianRupee, Receipt, Edit3, Search, Copy, X, CheckCircle, Clock, AlertTriangle, MessageCircle, Mail, Send, Package, Download, ChevronRight, Users, TrendingUp, ShieldCheck, ShieldAlert } from 'lucide-react';
 
 // Shared global components & utilities
 import HelpButton from '../HelpButton';
 import { formatCurrency, INVOICE_TYPES, getFYOptions } from '../../utils';
 import { toast } from '../Toast';
-import { getAllProducts } from '../../store';
+import { getAllProducts, getBackupHealth } from '../../store';
 import { useAuth } from '../../context/AuthContext';
 
 // Local Dashboard components & constants
@@ -329,7 +329,7 @@ function FinancialHealthChart({ months }) {
 // ---------------------------------------------------------------------------
 // Main Dashboard Component
 // ---------------------------------------------------------------------------
-export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
+export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert, onOpenBackupSettings }) {
   const { isAdmin } = useAuth();
   const metrics = useDashboardMetrics() || {};
   const bills = metrics.bills || [];
@@ -338,6 +338,15 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
   const monthlySeries = metrics.monthlySeries || [];
   const gstCompliance = metrics.gstCompliance || 0;
   const loadBills = metrics.loadBills || (() => {});
+
+  const [backupHealth, setBackupHealth] = useState(null);
+  const [backupWarnDismissed, setBackupWarnDismissed] = useState(() => {
+    try { return sessionStorage.getItem('arthsutra_dismiss_backup_warn') === '1'; } catch { return false; }
+  });
+
+  useEffect(() => {
+    getBackupHealth().then(setBackupHealth).catch(() => {});
+  }, [bills.length]);
 
   const filters = useInvoiceFilters(bills) || {};
   const filtered = filters.filtered || bills;
@@ -454,9 +463,22 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
       <div className="erp-header">
         <div>
           <h2 className="erp-title">Dashboard <span className="hi">(डैशबोर्ड)</span></h2>
-          <div className="erp-subtitle">
-            {bills.length} invoice{bills.length === 1 ? '' : 's'} ({bills.length} इनवॉइस)
-            {profile?.businessName ? ` · ${profile.businessName}` : ''}
+          <div className="erp-subtitle" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+            <span>
+              {bills.length} invoice{bills.length === 1 ? '' : 's'} ({bills.length} इनवॉइस)
+              {profile?.businessName ? ` · ${profile.businessName}` : ''}
+            </span>
+            {backupHealth?.isOffPcProtected && (
+              <button
+                type="button"
+                className="erp-badge"
+                onClick={() => onOpenBackupSettings && onOpenBackupSettings()}
+                title="Off-PC crash protection is active — click to view backup settings"
+                style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '0.25rem', color: '#2a5a2a', borderColor: 'var(--sepia-sage-dark)', background: 'rgba(168, 197, 138, 0.35)' }}
+              >
+                <ShieldCheck size={12} /> Off-PC Protected
+              </button>
+            )}
           </div>
         </div>
         <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
@@ -486,6 +508,48 @@ export default function Dashboard({ onNew, onEdit, onDuplicate, onConvert }) {
           <button className="btn btn-primary" onClick={onNew}><Plus size={16} /> New Invoice (नया इनवॉइस)</button>
         </div>
       </div>
+
+      {isAdmin && backupHealth && !backupHealth.isOffPcProtected && !backupWarnDismissed && (
+        <div
+          className="erp-alert warn"
+          onClick={() => onOpenBackupSettings && onOpenBackupSettings()}
+          style={{ cursor: 'pointer' }}
+        >
+          <ShieldAlert size={18} style={{ color: '#8a6020', flexShrink: 0 }} />
+          <div style={{ flex: 1, minWidth: 220 }}>
+            <span style={{ fontWeight: 700, color: '#6b4910' }}>
+              {backupHealth.protectionLevel === 'warning'
+                ? 'Off-PC backup sync needs attention (ऑफ़-पीसी बैकअप जांचें)'
+                : 'Off-PC backup not configured (डेटा केवल इस कंप्यूटर पर है)'}
+            </span>
+            <span style={{ color: 'var(--sepia-muted)', marginLeft: 8, fontSize: '0.8rem' }}>
+              {backupHealth.config?.lastMirrorError
+                ? `— ${backupHealth.config.lastMirrorError}`
+                : '— Connect Google Drive for Desktop, OneDrive, or USB so a PC crash never loses your data.'}
+            </span>
+          </div>
+          <button
+            type="button"
+            className="erp-mini-btn"
+            onClick={(e) => { e.stopPropagation(); onOpenBackupSettings && onOpenBackupSettings(); }}
+          >
+            Protect Data <ChevronRight size={12} style={{ verticalAlign: '-2px' }} />
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            title="Dismiss for this session"
+            onClick={(e) => {
+              e.stopPropagation();
+              setBackupWarnDismissed(true);
+              try { sessionStorage.setItem('arthsutra_dismiss_backup_warn', '1'); } catch { /* ignore */ }
+            }}
+            style={{ width: 24, height: 24 }}
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
 
       {overdueBills.length > 0 && (
         <div className="erp-alert danger" onClick={() => { filters.setStatusFilter('overdue'); }}

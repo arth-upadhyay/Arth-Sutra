@@ -1,22 +1,15 @@
-
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { getAllClients, saveClient } from '../../../store';
-import { toast } from '../components/../../Toast';
+import { getAllClients, getAllBills, saveClient } from '../../../store';
+import {
+  normalizeClientKey,
+  toClientFormShape,
+  mergeSavedAndBillClients,
+  filterClientSuggestions,
+  buildClientUpsertPayload,
+} from '../../../utils/clientDirectory';
+import { toast } from '../../Toast';
 
-// The exact client shape the invoice form (and saved bill `data.client`) uses.
-export const toClientShape = (c = {}) => ({
-  name: c.name || '',
-  address: c.address || '',
-  city: c.city || '',
-  pin: c.pin || '',
-  state: c.state || '',
-  gstin: c.gstin || '',
-  country: c.country || '',
-  email: c.email || '',
-  phone: c.phone || '',
-  isSEZ: !!c.isSEZ,
-  licence: c.licence || '',
-});
+export const toClientShape = toClientFormShape;
 
 export function useClientSearch({
   clientName = '',
@@ -26,7 +19,6 @@ export function useClientSearch({
 } = {}) {
   const [savedClients, setSavedClients] = useState([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
-  const [pickerIdx, setPickerIdx] = useState(-1);
   const [selectedClientId, setSelectedClientId] = useState(null);
 
   // Create/edit modal state (render ClientModal with these props)
@@ -34,115 +26,83 @@ export function useClientSearch({
   const [modalClient, setModalClient] = useState(null);
   const [isEditingClient, setIsEditingClient] = useState(false);
 
-  // Attach to the name <input> and the suggestions dropdown for click-outside.
-  const nameInputRef = useRef(null);
-  const suggestionsRef = useRef(null);
+  const dbClientsRef = useRef([]);
+  const billsRef = useRef([]);
+  const initialMatchedRef = useRef(false);
 
-  // ---- Load directory + match an existing typed name to a saved client --------
+  const refreshClients = useCallback(async () => {
+    const [clientsRes, billsRes] = await Promise.allSettled([getAllClients(), getAllBills()]);
+    const dbClients = clientsRes.status === 'fulfilled' && Array.isArray(clientsRes.value)
+      ? clientsRes.value
+      : dbClientsRef.current;
+    const bills = billsRes.status === 'fulfilled' && Array.isArray(billsRes.value)
+      ? billsRes.value
+      : billsRef.current;
+
+    dbClientsRef.current = dbClients;
+    billsRef.current = bills;
+    const merged = mergeSavedAndBillClients(dbClients, bills);
+    setSavedClients(merged);
+    return merged;
+  }, []);
+
+  // Load directory + historical bill clients on mount
   useEffect(() => {
-    getAllClients().then(clients => {
-      setSavedClients(clients);
-      if (clientName.trim()) {
-        const match = clients.find(c => c.name.toLowerCase() === clientName.trim().toLowerCase());
-        if (match) setSelectedClientId(match.id);
+    let active = true;
+    refreshClients().then((merged) => {
+      if (!active || initialMatchedRef.current) return;
+      initialMatchedRef.current = true;
+      const key = normalizeClientKey(clientName);
+      if (key) {
+        const match = merged.find(c => !c._fromHistory && normalizeClientKey(c.name) === key);
+        if (match?.id) setSelectedClientId(match.id);
       }
     }).catch(() => {});
+    return () => { active = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const refreshClients = useCallback(() => {
-    return getAllClients().then(setSavedClients).catch(() => {});
-  }, []);
+  const filteredClients = useMemo(
+    () => filterClientSuggestions(savedClients, clientName, 8),
+    [savedClients, clientName],
+  );
 
-  // ---- Autocomplete filtering (monolith behaviour: empty query ⇒ show all) -----
-  const filteredClients = useMemo(() => {
-    const q = clientName.trim().toLowerCase();
-    if (!q) return savedClients;
-    return savedClients.filter(cli => cli.name.toLowerCase().includes(q));
-  }, [clientName, savedClients]);
-
-  // Reset the keyboard cursor whenever the query changes.
-  useEffect(() => { setPickerIdx(-1); }, [clientName]);
-
-  // ---- Click-outside dismiss -----------------------------------------------------
-  useEffect(() => {
-    const handleClickOutside = (e) => {
-      if (suggestionsRef.current && !suggestionsRef.current.contains(e.target) &&
-          nameInputRef.current && !nameInputRef.current.contains(e.target)) {
-        setShowSuggestions(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
-
-  // ---- Selection -------------------------------------------------------------------
+  // ---- Selection (fires immediately when user picks from popup) ----
   const selectClient = useCallback((cli) => {
     if (!cli) return;
     onSelect?.(toClientShape(cli), cli);
-    setSelectedClientId(cli.id);
+    setSelectedClientId(cli._fromHistory ? null : (cli.id || null));
     setShowSuggestions(false);
-    setPickerIdx(-1);
-    // Client preferences only seed NEW bills — an edit must keep its own options.
+    // Client preferences only seed NEW bills — an edit keeps its own options.
     if (!editingBill) onApplyPreferences?.(cli);
     toast(`Loaded client: ${cli.name}`, 'info');
   }, [onSelect, onApplyPreferences, editingBill]);
 
-  const handleNameKeyDown = useCallback((e) => {
-    if (e.key === 'Escape') {
-      setShowSuggestions(false);
-      setPickerIdx(-1);
-      return;
-    }
-    if (!showSuggestions || filteredClients.length === 0) return;
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      setPickerIdx(i => (i + 1) % filteredClients.length);
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      setPickerIdx(i => (i <= 0 ? filteredClients.length - 1 : i - 1));
-    } else if (e.key === 'Enter' && pickerIdx >= 0) {
-      e.preventDefault();
-      selectClient(filteredClients[pickerIdx]);
-    }
-  }, [showSuggestions, filteredClients, pickerIdx, selectClient]);
-
-  // ---- Create-on-the-fly / edit modal -----------------------------------------------
-  // Prefills the modal with whatever the user already typed into the form.
+  // ---- Create-on-the-fly / edit modal ----
   const openAddClientModal = useCallback((currentFormClient = {}) => {
-    setModalClient({
-      name: currentFormClient.name || '',
-      address: currentFormClient.address || '',
-      city: currentFormClient.city || '',
-      pin: currentFormClient.pin || '',
-      state: currentFormClient.state || '',
-      gstin: currentFormClient.gstin || '',
-      licence: currentFormClient.licence || '',
-    });
+    setModalClient({ ...toClientShape(currentFormClient) });
     setIsEditingClient(false);
     setModalOpen(true);
     setShowSuggestions(false);
   }, []);
 
   const openEditClientModal = useCallback((cli) => {
+    const isReal = !!(cli && cli.id && !cli._fromHistory && !String(cli.id).startsWith('hist_'));
     setModalClient(cli);
-    setIsEditingClient(true);
+    setIsEditingClient(isReal);
     setModalOpen(true);
+    setShowSuggestions(false);
   }, []);
 
   const closeClientModal = useCallback(() => setModalOpen(false), []);
 
-  /**
-   * Persist the modal's form data (create or update), refresh the directory,
-   * push the result into the invoice form, and return the saved record.
-   */
   const saveClientFromModal = useCallback(async (formData) => {
     const data = { ...formData };
     if (isEditingClient && modalClient?.id) data.id = modalClient.id;
 
+    const prevIds = new Set(dbClientsRef.current.map(c => c.id));
     await saveClient(data);
-    const updated = await getAllClients();
-    setSavedClients(updated);
+    const merged = await refreshClients();
 
     onSelect?.(toClientShape(data), data);
 
@@ -150,44 +110,60 @@ export function useClientSearch({
       setSelectedClientId(modalClient.id);
       toast(`Client "${data.name}" updated!`, 'success');
     } else {
-      // The newly created record is the one whose name matches and whose id
-      // wasn't in the directory before this save.
-      const found = updated.find(c => c.name === data.name.trim() && !savedClients.some(old => old.id === c.id));
-      if (found) setSelectedClientId(found.id);
+      const found = dbClientsRef.current.find(
+        c => normalizeClientKey(c.name) === normalizeClientKey(data.name) && !prevIds.has(c.id),
+      ) || merged.find(c => !c._fromHistory && normalizeClientKey(c.name) === normalizeClientKey(data.name));
+      if (found?.id) setSelectedClientId(found.id);
       toast(`Client "${data.name}" saved!`, 'success');
     }
     setModalOpen(false);
     return data;
-  }, [isEditingClient, modalClient, savedClients, onSelect]);
+  }, [isEditingClient, modalClient, refreshClients, onSelect]);
 
-  // ---- Preference write-back (used by useInvoicePersistence after save) -------------
+  // ---- Automatic save/update from invoice form on Save / Download PDF / Print ----
+  const upsertClientFromForm = useCallback(async (formClient, preferencePatch = {}) => {
+    const payload = buildClientUpsertPayload(formClient, {
+      savedClients: dbClientsRef.current,
+      selectedClientId,
+      preferencePatch,
+    });
+    if (!payload || !payload.changed) {
+      if (payload?.record?.id && !selectedClientId) {
+        setSelectedClientId(payload.record.id);
+      }
+      return payload?.record || null;
+    }
+
+    const saved = await saveClient(payload.record);
+    await refreshClients();
+    if (saved?.id) setSelectedClientId(saved.id);
+    return saved;
+  }, [selectedClientId, refreshClients]);
+
+  // ---- Preference write-back compatibility helper ----
   const patchClient = useCallback((clientRecord, patch) => {
     const updatedClient = { ...clientRecord, ...patch };
     saveClient(updatedClient).then(() => {
-      setSavedClients(prev => prev.map(c => (c.id === updatedClient.id ? updatedClient : c)));
+      dbClientsRef.current = dbClientsRef.current.map(c => (c.id === updatedClient.id ? updatedClient : c));
+      setSavedClients(mergeSavedAndBillClients(dbClientsRef.current, billsRef.current));
     }).catch(() => {});
     return updatedClient;
   }, []);
 
   return {
-    // data
     savedClients,
     filteredClients,
-    selectedClientId, setSelectedClientId,
-    // autocomplete UI state
-    showSuggestions, setShowSuggestions,
-    pickerIdx, setPickerIdx,
-    nameInputRef,
-    suggestionsRef,
+    selectedClientId,
+    setSelectedClientId,
+    showSuggestions,
+    setShowSuggestions,
     selectClient,
-    handleNameKeyDown,
-    // create-on-the-fly modal
     clientModal: { open: modalOpen, client: modalClient, isEditing: isEditingClient },
     openAddClientModal,
     openEditClientModal,
     closeClientModal,
     saveClientFromModal,
-    // misc
+    upsertClientFromForm,
     patchClient,
     refreshClients,
   };

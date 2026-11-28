@@ -5,22 +5,56 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+let cachedFileKey = null;
+
+function resolveDataDir() {
+  return (
+    process.env.ARTH_USER_DATA ||
+    process.env.ELECTRON_USER_DATA ||
+    path.resolve(__dirname, '..', 'data')
+  );
+}
+
 function getEncryptionKey() {
   const keyHex = process.env.ENCRYPTION_KEY;
-  if (!keyHex || typeof keyHex !== 'string') {
-    throw new Error('FATAL: ENCRYPTION_KEY environment variable is missing.');
+  if (keyHex && typeof keyHex === 'string') {
+    const trimmed = keyHex.trim();
+    if (trimmed.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(trimmed)) {
+      throw new Error(
+        `FATAL: ENCRYPTION_KEY must be exactly 64 hexadecimal characters (32 bytes). Received length: ${trimmed.length}`
+      );
+    }
+    return Buffer.from(trimmed, 'hex');
   }
-  const trimmed = keyHex.trim();
-  if (trimmed.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(trimmed)) {
-    throw new Error(
-      `FATAL: ENCRYPTION_KEY must be exactly 64 hexadecimal characters (32 bytes). Received length: ${trimmed.length}`
-    );
+
+  // Packaged desktop builds omit .env; persist a machine-local key in DATA_DIR
+  if (cachedFileKey) return cachedFileKey;
+  const dataDir = resolveDataDir();
+  const keyFile = path.join(dataDir, '.encryption-key');
+  try {
+    if (fs.existsSync(keyFile)) {
+      const existing = fs.readFileSync(keyFile, 'utf-8').trim();
+      if (/^[0-9a-fA-F]{64}$/.test(existing)) {
+        cachedFileKey = Buffer.from(existing, 'hex');
+        return cachedFileKey;
+      }
+    }
+    fs.mkdirSync(dataDir, { recursive: true });
+    const generated = crypto.randomBytes(32).toString('hex');
+    fs.writeFileSync(keyFile, generated + '\n', { encoding: 'utf-8', mode: 0o600 });
+    cachedFileKey = Buffer.from(generated, 'hex');
+    return cachedFileKey;
+  } catch (err) {
+    throw new Error(`FATAL: Unable to load or generate ENCRYPTION_KEY: ${err.message}`);
   }
-  return Buffer.from(trimmed, 'hex');
 }
 
 /**
@@ -70,6 +104,18 @@ export function decrypt(encryptedStr) {
   let decrypted = decipher.update(cipherHex, 'hex', 'utf8');
   decrypted += decipher.final('utf8');
   return decrypted;
+}
+
+/**
+ * Safely decrypts an AES-256-GCM string; returns `fallback` if the ciphertext
+ * belongs to a different machine key or fails GCM authentication.
+ */
+export function safeDecrypt(encryptedStr, fallback = '') {
+  try {
+    return decrypt(encryptedStr);
+  } catch {
+    return fallback;
+  }
 }
 
 /**
@@ -136,10 +182,10 @@ export function decryptProfileBankDetails(profile) {
   if (!profile || typeof profile !== 'object') return profile;
   const cloned = { ...profile };
 
-  if (cloned.accountNumber) cloned.accountNumber = decrypt(cloned.accountNumber);
-  if (cloned.ifsc) cloned.ifsc = decrypt(cloned.ifsc);
-  if (cloned.swift) cloned.swift = decrypt(cloned.swift);
-  if (cloned.upiId) cloned.upiId = decrypt(cloned.upiId);
+  if (cloned.accountNumber) cloned.accountNumber = safeDecrypt(cloned.accountNumber);
+  if (cloned.ifsc) cloned.ifsc = safeDecrypt(cloned.ifsc);
+  if (cloned.swift) cloned.swift = safeDecrypt(cloned.swift);
+  if (cloned.upiId) cloned.upiId = safeDecrypt(cloned.upiId);
 
   let accounts = cloned.paymentAccounts;
   const wasString = typeof accounts === 'string';
@@ -149,10 +195,10 @@ export function decryptProfileBankDetails(profile) {
   if (Array.isArray(accounts)) {
     const decryptedAccounts = accounts.map((acc) => ({
       ...acc,
-      accountNumber: acc.accountNumber ? decrypt(acc.accountNumber) : '',
-      ifsc: acc.ifsc ? decrypt(acc.ifsc) : '',
-      swift: acc.swift ? decrypt(acc.swift) : '',
-      upiId: acc.upiId ? decrypt(acc.upiId) : '',
+      accountNumber: acc.accountNumber ? safeDecrypt(acc.accountNumber) : '',
+      ifsc: acc.ifsc ? safeDecrypt(acc.ifsc) : '',
+      swift: acc.swift ? safeDecrypt(acc.swift) : '',
+      upiId: acc.upiId ? safeDecrypt(acc.upiId) : '',
     }));
     cloned.paymentAccounts = wasString ? JSON.stringify(decryptedAccounts) : decryptedAccounts;
   }

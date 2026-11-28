@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, memo } from 'react';
-import { ArrowLeft, Plus, Trash2, Download, UserPlus, Pencil, Settings, ChevronUp, ChevronDown, MessageCircle, Check, Loader, Truck, Printer } from 'lucide-react';
+import { ArrowLeft, Plus, Trash2, Download, UserPlus, Pencil, Settings, MessageCircle, Check, Loader, Truck, Printer } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
 
@@ -11,9 +11,10 @@ import useClientSearch from './hooks/useClientSearch';
 import useProductSearch from './hooks/useProductSearch';
 
 // --- Utils & Store (Up 2 levels: ../../) ---
-import { getAllProfiles } from '../../store';
-import { INVOICE_TYPES, generateEWayBillJSON, formatCurrency, getCountryConfig, getStatesForCountry, getAllUnits, addCustomUnit, removeCustomUnit, getCountriesForRegion, TDS_SECTIONS, TCS_SECTIONS, TERMS_PRESETS, getActiveAccounts, getAccountById, filterUnitsByMode, PAPER_SIZES, getPaperSize } from '../../utils';
+import { getAllProfiles, getStockAlertSettings, getEnabledModules } from '../../store';
+import { INVOICE_TYPES, generateEWayBillJSON, formatCurrency, getStatesForCountry, getAllUnits, addCustomUnit, removeCustomUnit, TERMS_PRESETS, getActiveAccounts, filterUnitsByMode, getPaperSize, isModuleEnabled } from '../../utils';
 import { getPrintSettings, savePrintSettings } from '../../utils/printSettings';
+import { composeInvoicePdfFromCanvas } from '../../utils/invoicePdfBuilder';
 import { openWhatsAppShare } from '../../utils/share';
 import { suggestGstRate } from '../../utils/hsnRates';
 import { ensureToken, findOrCreateFolder, uploadPDF } from '../../services/googleDrive';
@@ -23,6 +24,7 @@ import { confirmAction, promptAction } from '../ConfirmModal';
 import PrintPreviewModal from '../PrintPreviewModal';
 import DOMPurify from 'dompurify';
 import InvoicePreview from '../InvoicePreview';
+import TwoUpSheetPreview from '../TwoUpSheetPreview';
 import HelpButton from '../HelpButton';
 import ClientModal from '../ClientModal';
 import { toast } from '../Toast';
@@ -145,6 +147,165 @@ function SuggestingInput({ item, suggestions, onFieldChange, onSelectProduct, on
               </span>
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ClientSuggestingInput — modeled after SuggestingInput (product search UX)
+// ---------------------------------------------------------------------------
+function ClientSuggestingInput({
+  value,
+  suggestions,
+  showSuggestions,
+  onSetShowSuggestions,
+  onChangeName,
+  onSelectClient,
+  onOpenAddModal,
+  onOpenEditModal,
+  selectedClientId,
+  onEditSelected,
+}) {
+  const [rawIdx, setRawIdx] = useState(-1);
+  const activeIdx = rawIdx >= 0 && rawIdx < suggestions.length ? rawIdx : -1;
+  const trimmed = String(value || '').trim();
+
+  const handleKey = (e) => {
+    if (e.key === 'Escape') {
+      onSetShowSuggestions(false);
+      setRawIdx(-1);
+      return;
+    }
+    if (!showSuggestions || !suggestions.length) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setRawIdx(i => (i + 1) % suggestions.length);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setRawIdx(i => (i <= 0 ? suggestions.length - 1 : i - 1));
+    } else if (e.key === 'Enter' && activeIdx >= 0) {
+      e.preventDefault();
+      e.stopPropagation();
+      const pick = suggestions[activeIdx] ?? suggestions[0];
+      if (pick) {
+        onSelectClient(pick);
+        setRawIdx(-1);
+      }
+    }
+  };
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <div style={{ display: 'flex', gap: '0.4rem' }}>
+        <input
+          type="text"
+          className="form-input"
+          style={{ flex: 1 }}
+          value={value}
+          onChange={(e) => {
+            onChangeName(e.target.value);
+            onSetShowSuggestions(true);
+            setRawIdx(-1);
+          }}
+          onFocus={() => onSetShowSuggestions(true)}
+          onBlur={() => setTimeout(() => onSetShowSuggestions(false), 180)}
+          onKeyDown={handleKey}
+          placeholder="Type client name, GSTIN, or DL No. (e.g. Citi Path)..."
+          autoComplete="off"
+        />
+        <button
+          type="button"
+          className="btn btn-secondary"
+          title="Add new client"
+          onClick={onOpenAddModal}
+          style={{ padding: '0.65rem 0.85rem' }}
+        >
+          <UserPlus size={16} />
+        </button>
+        {selectedClientId && (
+          <button
+            type="button"
+            className="btn btn-secondary"
+            title="Edit saved client"
+            onClick={onEditSelected}
+            style={{ padding: '0.65rem 0.85rem' }}
+          >
+            <Pencil size={16} />
+          </button>
+        )}
+      </div>
+
+      {showSuggestions && (suggestions.length > 0 || trimmed.length >= 2) && (
+        <div className="li-suggestions client-search-popup" role="listbox">
+          {suggestions.map((cli, i) => {
+            const loc = [cli.city, cli.state].filter(Boolean).join(', ');
+            const metaParts = [
+              cli.gstin && `GSTIN: ${cli.gstin}`,
+              cli.licence && `DL: ${cli.licence}`,
+              cli.phone && `Ph: ${cli.phone}`,
+            ].filter(Boolean);
+
+            return (
+              <div
+                key={cli.id || cli.name}
+                role="option"
+                aria-selected={i === activeIdx}
+                className={`client-popup-row${i === activeIdx ? ' active' : ''}`}
+                onMouseEnter={() => setRawIdx(i)}
+              >
+                <button
+                  type="button"
+                  className="client-popup-select"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    onSelectClient(cli);
+                    setRawIdx(-1);
+                  }}
+                >
+                  <div className="client-popup-main">
+                    <strong>{cli.name}</strong>
+                    {(cli.address || loc) && (
+                      <span className="client-popup-addr">
+                        {[cli.address, loc, cli.pin].filter(Boolean).join(' · ')}
+                      </span>
+                    )}
+                  </div>
+                  {metaParts.length > 0 && (
+                    <span className="meta client-popup-meta">{metaParts.join(' · ')}</span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  className="client-popup-edit"
+                  title="Edit client details"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onOpenEditModal(cli);
+                  }}
+                >
+                  <Pencil size={13} />
+                </button>
+              </div>
+            );
+          })}
+
+          {suggestions.length === 0 && trimmed.length >= 2 && (
+            <button
+              type="button"
+              className="client-suggestion-save"
+              style={{ margin: '0.25rem', width: 'calc(100% - 0.5rem)' }}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                onOpenAddModal();
+              }}
+            >
+              <UserPlus size={14} />
+              <span>Save &ldquo;{trimmed}&rdquo; now (or it will auto-save on Save / Print)</span>
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -373,8 +534,22 @@ const LineItem = memo(function LineItem({
 
 export default function InvoiceGenerator({ onBack, profile: profileProp, editingBill }) {
   const [allProfiles, setAllProfiles] = useState([]);
-  const [activeProfile, setActiveProfile] = useState(profileProp);
+  const [selectedProfileInfo, setSelectedProfileInfo] = useState(null);
+  const [stockAlertSettings, setStockAlertSettings] = useState({ enabled: true, threshold: 5 });
+  const [enabledModules, setEnabledModulesState] = useState(() => getEnabledModules());
+  const activeProfile = selectedProfileInfo?.forProp === profileProp ? selectedProfileInfo.profile : profileProp;
   const profile = activeProfile || profileProp;
+
+  useEffect(() => {
+    getStockAlertSettings().then(setStockAlertSettings).catch(() => {});
+    const onModulesChanged = () => setEnabledModulesState(getEnabledModules());
+    window.addEventListener('fgsb-modules-changed', onModulesChanged);
+    window.addEventListener('storage', onModulesChanged);
+    return () => {
+      window.removeEventListener('fgsb-modules-changed', onModulesChanged);
+      window.removeEventListener('storage', onModulesChanged);
+    };
+  }, []);
 
   // --- HOOK INTEGRATION ---
   const form = useInvoiceForm({ editingBill, profile });
@@ -396,16 +571,18 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
     items: form.items,
     countryTaxRates: form.countryTaxRates,
     editingBill,
+    lowStockThreshold: Number(stockAlertSettings?.threshold ?? 5),
+    lowStockAlertsEnabled: stockAlertSettings?.enabled !== false,
   });
 
   const clients = useClientSearch({
     clientName: form.client.name,
     editingBill,
-    onSelect: (shape) => form.setClient(shape),
+    onSelect: (shape) => form.setClient({ ...shape, country: 'India' }),
     onApplyPreferences: (cli) => form.setInvoiceOptions(prev => ({
       ...prev,
       paperSize: cli.preferredPaperSize || prev.paperSize || 'a4',
-      currency: cli.preferredCurrency || prev.currency || 'INR',
+      currency: 'INR',
       layoutFormat: cli.preferredLayoutFormat || prev.layoutFormat || 'pharma',
       clientAutoPrint: !!cli.autoPrint,
     })),
@@ -426,6 +603,17 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
   const [previewZoom, setPreviewZoom] = useState(() => {
     try { return Number(getPrintSettings().previewZoom) || 100; } catch { return 100; }
   });
+  const [twoPerPage, setTwoPerPage] = useState(() => {
+    try { return getPrintSettings().twoPerPageEnabled !== false; } catch { return true; }
+  });
+  const toggleTwoPerPage = useCallback((val) => {
+    const next = Boolean(val);
+    setTwoPerPage(next);
+    try {
+      const s = getPrintSettings();
+      savePrintSettings({ ...s, twoPerPageEnabled: next });
+    } catch { /* ignore */ }
+  }, []);
   const [previewCollapsed, setPreviewCollapsed] = useState(() => {
     try { return localStorage.getItem('fgsb_previewCollapsed') === '1'; } catch { return false; }
   });
@@ -434,18 +622,21 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
   const [leaveModal, setLeaveModal] = useState(false);
   const [units, setUnits] = useState(getAllUnits());
 
-  const clientCountry = form.client.country || profile?.country || 'India';
-  const clientCountryConfig = getCountryConfig(clientCountry);
-  const stateOptions = (typeof getStatesForCountry === 'function')
-    ? (getStatesForCountry(clientCountry) || [])
-    : (clientCountryConfig.states || []);
-
-  const allCountries = (typeof getCountriesForRegion === 'function')
-    ? getCountriesForRegion()
-    : [];
+  const stateOptions = getStatesForCountry('India') || [];
 
   useEffect(() => {
-    const refetchProfiles = () => getAllProfiles().then(setAllProfiles).catch(() => {});
+    const refetchProfiles = () => getAllProfiles().then(list => {
+      setAllProfiles(list);
+      setSelectedProfileInfo(curr => {
+        const target = curr?.forProp === profileProp ? curr.profile : profileProp;
+        if (!target || !Array.isArray(list)) return curr;
+        const match = list.find(bp =>
+          (target.id && bp.id === target.id)
+          || (target.businessName && bp.businessName?.trim().toLowerCase() === target.businessName.trim().toLowerCase())
+        );
+        return match ? { forProp: profileProp, profile: match } : curr;
+      });
+    }).catch(() => {});
     const onVisible = () => { if (document.visibilityState === 'visible') refetchProfiles(); };
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('focus', refetchProfiles);
@@ -454,7 +645,15 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('focus', refetchProfiles);
     };
-  }, []);
+  }, [profileProp]);
+
+  const handleSelectBillingProfile = useCallback((bp) => {
+    setSelectedProfileInfo({ forProp: profileProp, profile: bp });
+    form.setDetails(prev => ({
+      ...prev,
+      sellerLicence: bp?.licence || bp?.licenceNo || '',
+    }));
+  }, [form, profileProp]);
 
   useEffect(() => {
     try {
@@ -471,14 +670,14 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
     if (!previewPaneRef.current) { setPreviewZoom(100); return; }
     const pane = previewPaneRef.current;
     const scaler = pane.querySelector('.preview-scaler');
-    const preview = scaler?.querySelector('.invoice-preview-container');
+    const preview = scaler?.querySelector('.two-up-sheet-frame') || scaler?.querySelector('.invoice-preview-container');
     const paneWidth = pane.clientWidth - 16;
     const naturalWidth = preview?.offsetWidth || 794;
     if (!(paneWidth > 0 && naturalWidth > 0)) { setPreviewZoom(100); return; }
     const ratio = paneWidth / naturalWidth;
-    const nextZoom = Math.max(50, Math.min(200, Math.round(ratio * 100)));
+    const nextZoom = Math.max(40, Math.min(200, Math.round(ratio * 100)));
     setPreviewZoom(nextZoom);
-  }, []);
+  }, [twoPerPage]);
 
   const handleItemChange = useCallback((id, field, value) => {
     form.updateItem(id, field, value);
@@ -578,21 +777,27 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
   };
 
   const buildPDF = async () => {
-    const printSettings = getPrintSettings();
+    const printSettings = { ...getPrintSettings(), twoPerPageEnabled: twoPerPage, businessName: profile?.businessName || '' };
     const scalerEl = printRef.current.closest('.preview-scaler');
-    if (scalerEl) scalerEl.style.transform = 'none';
+    if (scalerEl) {
+      scalerEl.style.transform = 'none';
+      scalerEl.classList.add('pdf-capturing-raw');
+    }
     try { return await __buildPDFInner(printSettings); }
-    finally { if (scalerEl) scalerEl.style.transform = ''; }
+    finally {
+      if (scalerEl) {
+        scalerEl.classList.remove('pdf-capturing-raw');
+        scalerEl.style.transform = '';
+      }
+    }
   };
 
   const __buildPDFInner = async (printSettings) => {
     const paperCfg = getPaperSize(form.invoiceOptions.paperSize, form.invoiceOptions);
-    let pdf = new jsPDF({ orientation: paperCfg.jsPdfOrientation || 'portrait', unit: 'mm', format: paperCfg.jsPdfFormat, compress: true });
-    const pdfWidth = pdf.internal.pageSize.getWidth();
-    const pdfPageHeight = pdf.internal.pageSize.getHeight();
     const extraPages = printRef.current.querySelectorAll('[data-pdf-page]');
     const q = { scale: 3, imgFormat: 'JPEG', quality: 0.95 };
     if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch {} }
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
 
     const captureOptions = (el) => ({
       scale: q.scale, useCORS: false, logging: false, letterRendering: true, backgroundColor: '#ffffff', imageTimeout: 15_000, width: el.scrollWidth, height: el.scrollHeight,
@@ -613,36 +818,14 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
     });
     extraPages.forEach(el => el.style.display = '');
 
-    const mTop = Math.max(0, Number(printSettings.marginTop) || 0);
-    const mBottom = Math.max(0, Number(printSettings.marginBottom) || 0);
-    const mLeft = Math.max(0, Number(printSettings.marginLeft) || 0);
-    const mRight = Math.max(0, Number(printSettings.marginRight) || 0);
-    const pdfScale = 1.0;
-    const availWidth = Math.max(20, pdfWidth - mLeft - mRight);
-    const availHeight = Math.max(20, pdfPageHeight - mTop - mBottom);
-    const contentWidth = availWidth * pdfScale;
-    const contentHeight = availHeight * pdfScale;
-    const contentXOffset = mLeft + (availWidth - contentWidth) / 2;
-    const contentYOffset = mTop;
-    const scaledImgHeight = (mainCanvas.height * contentWidth) / mainCanvas.width;
-
-    if (scaledImgHeight <= contentHeight + 2) {
-      const mainImg = mainCanvas.toDataURL(q.imgFormat === 'PNG' ? 'image/png' : 'image/jpeg', q.quality);
-      const finalH = Math.min(scaledImgHeight, contentHeight);
-      if (paperCfg.kind === 'thermal') {
-        const thermalHeightMm = Math.max(30, Math.ceil(finalH + mTop + mBottom + 2));
-        pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: [paperCfg.widthMm, thermalHeightMm], compress: true });
-      }
-      pdf.addImage(mainImg, q.imgFormat, contentXOffset, contentYOffset, contentWidth, finalH, undefined, 'MEDIUM');
-    } else {
-       const tmp = document.createElement('canvas');
-       tmp.width = mainCanvas.width; tmp.height = mainCanvas.height;
-       const ctx = tmp.getContext('2d'); ctx.drawImage(mainCanvas, 0, 0);
-       const mainImg = tmp.toDataURL(q.imgFormat === 'PNG' ? 'image/png' : 'image/jpeg', q.quality);
-       pdf.addImage(mainImg, q.imgFormat, contentXOffset, contentYOffset, contentWidth, scaledImgHeight, undefined, 'MEDIUM');
-    }
-
-    return pdf;
+    return composeInvoicePdfFromCanvas({
+      jsPDF,
+      canvas: mainCanvas,
+      paperCfg,
+      printSettings,
+      imgFormat: q.imgFormat,
+      quality: q.quality,
+    });
   };
 
   const printViaIframe = (blob) => {
@@ -693,6 +876,12 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
     if (!printRef.current) return;
     persistence.setSaving(true);
     try {
+      if (form.client?.name?.trim()) {
+        clients.upsertClientFromForm(form.client, {
+          preferredPaperSize: form.invoiceOptions.paperSize || 'a4',
+          preferredCurrency: form.invoiceOptions.currency || 'INR',
+        }).catch(() => {});
+      }
       await withPreviewOnScreen(async () => {
         if (isThermalPaper() && (getPrintSettings().thermalPrintMode || 'direct') === 'direct') {
           const ok = await printThermalViaHtml(); if (ok) return;
@@ -722,7 +911,9 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
       form.clearDraft();
 
       const pdfBlob = pdf.output('blob');
-      uploadToGoogleDrive(pdfBlob, fileName);
+      if (isModuleEnabled('googleDrive', enabledModules)) {
+        uploadToGoogleDrive(pdfBlob, fileName);
+      }
       if (getPrintSettings().autoPrintOnSave || form.invoiceOptions.clientAutoPrint) try { printViaIframe(pdfBlob); } catch {}
     } catch { toast('Failed to generate PDF.', 'error'); }
     finally { persistence.setSaving(false); }
@@ -760,12 +951,13 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
 
   // --- TERMS PRESET HANDLERS ---
   const handleLoadBusinessPreset = useCallback((presetKey) => {
-    if (!presetKey || presetKey === '') return;
-    const preset = TERMS_PRESETS?.[presetKey];
+    if (!presetKey) return;
+    const list = Array.isArray(TERMS_PRESETS) ? TERMS_PRESETS : Object.values(TERMS_PRESETS || {});
+    const preset = list.find(p => p.id === presetKey) || TERMS_PRESETS?.[presetKey];
     if (!preset) return;
     const html = Array.isArray(preset)
-      ? `<ol>${preset.map(line => `<li>\${line}</li>`).join('')}</ol>`
-      : (typeof preset === 'string' ? preset : (preset.content || ''));
+      ? `<ol>${preset.map(line => `<li>${line}</li>`).join('')}</ol>`
+      : (typeof preset === 'string' ? preset : (preset.body ?? preset.content ?? ''));
     form.setCustomTerms(html);
     form.setSelectedTermsId('');
   }, [form]);
@@ -813,7 +1005,7 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
           <button className="btn btn-secondary" onClick={generatePDF} disabled={persistence.saving}><Download size={18} /> Save & Download</button>
           <button className="btn btn-secondary" onClick={directPrint} disabled={persistence.saving}><Printer size={18} /> Print</button>
           <button className="btn btn-secondary" onClick={shareWhatsApp} disabled={persistence.saving} style={{ background: '#25d366', color: '#fff', borderColor: '#25d366' }}><MessageCircle size={18} /> WhatsApp</button>
-          {(form.invoiceType === 'tax-invoice' || form.invoiceType === 'delivery-challan') && (
+          {isModuleEnabled('ewayBill', enabledModules) && (form.invoiceType === 'tax-invoice' || form.invoiceType === 'delivery-challan') && (
             <button className="btn btn-secondary" onClick={exportEWayBill}><Truck size={18} /> E-Way Bill</button>
           )}
         </div>
@@ -832,9 +1024,15 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
               <h3 className="section-title" style={{ marginBottom: '0.75rem' }}>Billing From</h3>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.6rem' }}>
                 {allProfiles.map(bp => {
-                  const isSelected = (activeProfile?.businessName || profileProp?.businessName) === bp.businessName;
+                  const curProfile = activeProfile || profileProp;
+                  const isSelected = (curProfile?.id && bp.id === curProfile.id)
+                    || (bp.businessName?.trim().toLowerCase() === curProfile?.businessName?.trim().toLowerCase());
+                  const tip = [
+                    bp.gstin && `GSTIN: ${bp.gstin}`,
+                    (bp.licence || bp.licenceNo) && `DL: ${bp.licence || bp.licenceNo}`,
+                  ].filter(Boolean).join(' · ');
                   return (
-                    <button key={bp.id} type="button" onClick={() => setActiveProfile(bp)}
+                    <button key={bp.id || bp.businessName} type="button" onClick={() => handleSelectBillingProfile(bp)} title={tip || undefined}
                       style={{ padding: '0.5rem 1rem', borderRadius: 8, fontSize: '0.85rem', border: isSelected ? '2px solid var(--primary)' : '1px solid var(--border)', background: isSelected ? 'rgba(59,130,246,0.08)' : 'var(--surface)', color: isSelected ? 'var(--primary)' : 'var(--text)', fontWeight: isSelected ? 700 : 400 }}>
                       {bp.businessName}
                     </button>
@@ -893,17 +1091,28 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
                   <label className="form-label">Invoice Title</label>
                   <input type="text" className="form-input" value={form.invoiceOptions.customTitle} onChange={(e) => form.setInvoiceOptions(prev => ({ ...prev, customTitle: e.target.value }))} placeholder={form.typeConfig?.title} />
                 </div>
-                <div className="form-group" style={{ marginBottom: '0.75rem' }}>
-                  <label className="form-label">Currency</label>
-                  <select className="form-input" value={form.invoiceOptions.currency} onChange={(e) => form.setInvoiceOptions(prev => ({ ...prev, currency: e.target.value }))}>
-                    {Array.from(new Map(getCountriesForRegion().map(c => [c.currency, c])).values()).map(c => <option key={c.currency} value={c.currency}>{c.currency}</option>)}
-                  </select>
-                </div>
+                {(() => {
+                  const activeAccounts = getActiveAccounts(profile);
+                  if (activeAccounts.length <= 1) return null;
+                  return (
+                    <div className="form-group" style={{ marginBottom: '0.75rem' }}>
+                      <label className="form-label">Payment Account</label>
+                      <select className="form-input" value={form.invoiceOptions.selectedAccountId || ''} onChange={(e) => form.setInvoiceOptions(prev => ({ ...prev, selectedAccountId: e.target.value || null }))}>
+                        <option value="">Default account</option>
+                        {activeAccounts.map(acc => (
+                          <option key={acc.id} value={acc.id}>
+                            {acc.label || acc.bankName || 'Account'}{acc.isDefault ? ' (Default)' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  );
+                })()}
               </div>
             )}
           </div>
 
-          <ClientModal show={clients.clientModal.open} onClose={clients.closeClientModal} onSave={clients.saveClientFromModal} client={clients.clientModal.client} isEditing={clients.clientModal.isEditing} defaultCountry={profile?.country} />
+          <ClientModal show={clients.clientModal.open} onClose={clients.closeClientModal} onSave={clients.saveClientFromModal} client={clients.clientModal.client} isEditing={clients.clientModal.isEditing} />
 
           <div className="glass-panel p-6 mb-6">
             <h3 className="section-title" style={{ margin: 0 }}>Billed To</h3>
@@ -921,38 +1130,54 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
             <div className="grid grid-cols-2 gap-4 mt-4">
               <div className="form-group full-width" style={{ position: 'relative' }}>
                 <label className="form-label">Client Name</label>
-                <div style={{ display: 'flex', gap: '0.4rem' }}>
-                  <input type="text" className="form-input" style={{ flex: 1 }} value={form.client.name} ref={clients.nameInputRef}
-                    onChange={(e) => { form.setClient({ ...form.client, name: e.target.value }); clients.setShowSuggestions(true); }}
-                    onFocus={() => { if (clients.savedClients.length > 0) clients.setShowSuggestions(true); }}
-                    onKeyDown={clients.handleNameKeyDown} placeholder="Type client name to search or add new" autoComplete="off" />
-                  <button type="button" className="btn btn-secondary" title="Add new client" onClick={() => clients.openAddClientModal(form.client)} style={{ padding: '0.65rem 0.85rem' }}>
-                    <UserPlus size={16} />
-                  </button>
-                  {clients.selectedClientId && (
-                    <button type="button" className="btn btn-secondary" title="Edit saved client" onClick={() => {
-                      const found = clients.savedClients.find(c => c.id === clients.selectedClientId);
-                      if (found) clients.openEditClientModal(found);
-                    }} style={{ padding: '0.65rem 0.85rem' }}>
-                      <Pencil size={16} />
-                    </button>
+                <ClientSuggestingInput
+                  value={form.client.name}
+                  suggestions={clients.filteredClients}
+                  showSuggestions={clients.showSuggestions}
+                  onSetShowSuggestions={clients.setShowSuggestions}
+                  onChangeName={(val) => form.setClient({ ...form.client, name: val, country: 'India' })}
+                  onSelectClient={clients.selectClient}
+                  onOpenAddModal={() => clients.openAddClientModal(form.client)}
+                  onOpenEditModal={clients.openEditClientModal}
+                  selectedClientId={clients.selectedClientId}
+                  onEditSelected={() => {
+                    const found = clients.savedClients.find(c => c.id === clients.selectedClientId);
+                    if (found) clients.openEditClientModal(found);
+                  }}
+                />
+              </div>
+
+              <div className="form-group full-width">
+                <label className="form-label">Billing Address</label>
+                <input type="text" className="form-input" value={form.client.address} onChange={(e) => form.setClient({ ...form.client, address: e.target.value })} placeholder="Street address, locality" />
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">City</label>
+                <input type="text" className="form-input" value={form.client.city || ''} onChange={(e) => form.setClient({ ...form.client, city: e.target.value })} placeholder="e.g. Bhopal" />
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">PIN Code</label>
+                <input type="text" className="form-input" value={form.client.pin || ''} onChange={(e) => form.setClient({ ...form.client, pin: e.target.value })} placeholder="e.g. 462001" />
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">State</label>
+                <select className="form-input" value={form.client.state || ''} onChange={(e) => form.setClient({ ...form.client, state: e.target.value })}>
+                  <option value="">— Select —</option>
+                  {form.client.state && !stateOptions.includes(form.client.state) && (
+                    <option value={form.client.state}>{form.client.state}</option>
                   )}
-                </div>
-                {clients.showSuggestions && clients.savedClients.length > 0 && (
-                  <div className="client-suggestions" ref={clients.suggestionsRef}>
-                    {clients.filteredClients.map((cli, i) => (
-                      <div key={cli.id} className="client-suggestion-row" style={i === clients.pickerIdx ? { background: 'rgba(30,64,175,0.12)' } : undefined}>
-                        <button type="button" className="client-suggestion-item" onMouseEnter={() => clients.setPickerIdx(i)} onClick={() => clients.selectClient(cli)}>
-                          <strong>{cli.name}</strong>
-                          {cli.gstin && <span>GSTIN: {cli.gstin}</span>}
-                        </button>
-                        <button type="button" className="client-suggestion-edit" title="Edit this client" onClick={(e) => { e.stopPropagation(); clients.openEditClientModal(cli); }}>
-                          <Pencil size={13} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                  {stateOptions.map(s => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">GSTIN</label>
+                <input type="text" className="form-input" value={form.client.gstin} onChange={(e) => form.setClient({ ...form.client, gstin: e.target.value.toUpperCase() })} placeholder="Optional" />
               </div>
 
               <div className="form-group">
@@ -961,46 +1186,8 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
               </div>
 
               <div className="form-group">
-                <label className="form-label">Billing Address</label>
-                <input type="text" className="form-input" value={form.client.address} onChange={(e) => form.setClient({ ...form.client, address: e.target.value })} placeholder="Street address, locality" />
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">Country</label>
-                <select className="form-input" value={clientCountry} onChange={(e) => form.setClient({ ...form.client, country: e.target.value, state: '' })}>
-                  <option value="">— Select —</option>
-                  {allCountries.map(c => <option key={c.name || c.code} value={c.name}>{c.name}</option>)}
-                </select>
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">City</label>
-                <input type="text" className="form-input" value={form.client.city || ''} onChange={(e) => form.setClient({ ...form.client, city: e.target.value })} placeholder="e.g. Mumbai" />
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">PIN Code</label>
-                <input type="text" className="form-input" value={form.client.pin || ''} onChange={(e) => form.setClient({ ...form.client, pin: e.target.value })} placeholder="Postal / PIN code" />
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">State</label>
-                {stateOptions && stateOptions.length > 0 ? (
-                  <select className="form-input" value={form.client.state || ''} onChange={(e) => form.setClient({ ...form.client, state: e.target.value })}>
-                    <option value="">— Select —</option>
-                    {stateOptions.map(s => {
-                      const val = typeof s === 'string' ? s : (s.name || s.code);
-                      return <option key={val} value={val}>{val}</option>;
-                    })}
-                  </select>
-                ) : (
-                  <input type="text" className="form-input" value={form.client.state || ''} onChange={(e) => form.setClient({ ...form.client, state: e.target.value })} placeholder="State" />
-                )}
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">GSTIN</label>
-                <input type="text" className="form-input" value={form.client.gstin} onChange={(e) => form.setClient({ ...form.client, gstin: e.target.value.toUpperCase() })} placeholder="Optional" />
+                <label className="form-label">Phone No.</label>
+                <input type="tel" className="form-input" value={form.client.phone || ''} onChange={(e) => form.setClient({ ...form.client, phone: e.target.value })} placeholder="Optional" />
               </div>
             </div>
 
@@ -1028,7 +1215,15 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
                 </div>
                 <div className="form-group">
                   <label className="form-label">Shipping State</label>
-                  <input type="text" className="form-input" value={form.details.shippingState || ''} onChange={(e) => form.setDetails({ ...form.details, shippingState: e.target.value })} />
+                  <select className="form-input" value={form.details.shippingState || ''} onChange={(e) => form.setDetails({ ...form.details, shippingState: e.target.value })}>
+                    <option value="">— Select —</option>
+                    {form.details.shippingState && !stateOptions.includes(form.details.shippingState) && (
+                      <option value={form.details.shippingState}>{form.details.shippingState}</option>
+                    )}
+                    {stateOptions.map(s => (
+                      <option key={s} value={s}>{s}</option>
+                    ))}
+                  </select>
                 </div>
               </div>
             )}
@@ -1077,7 +1272,7 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
               </label>
             </div>
             {form.items.map((item, idx) => (
-              <LineItem key={item.id} item={item} invoiceOptions={form.invoiceOptions} taxInclusive={form.taxInclusive} showGST={form.showGST} taxLabel={form.taxLabel} units={units} countryTaxRates={form.countryTaxRates} filterUnitsByMode={filterUnitsByMode} invoiceMode={form.invoiceOptions.invoiceMode} currency={form.invoiceOptions.currency} profileCountry={profile?.country} suggestions={products.getSuggestions(item.id)} onFieldChange={handleItemChange} onSelectProduct={products.selectProduct} onSetProductSearch={products.setProductSearch} onRebalanceBatch={products.rebalanceBatches} showPkgField={(form.invoiceOptions.layoutFormat || 'pharma') !== 'pharma'} onAddCustomUnit={handleAddCustomUnit} onRemoveCustomUnit={handleRemoveCustomUnit} onRemove={form.removeItem} clampNonNeg={form.clampNonNeg} isLastRow={idx === form.items.length - 1} onAddRow={form.addItem} />
+              <LineItem key={item.id} item={item} invoiceOptions={form.invoiceOptions} taxInclusive={form.taxInclusive} showGST={form.showGST} taxLabel={form.taxLabel} units={units} countryTaxRates={form.countryTaxRates} filterUnitsByMode={filterUnitsByMode} invoiceMode={form.invoiceOptions.invoiceMode} currency={form.invoiceOptions.currency} profileCountry="India" suggestions={products.getSuggestions(item.id)} onFieldChange={handleItemChange} onSelectProduct={products.selectProduct} onSetProductSearch={products.setProductSearch} onRebalanceBatch={products.rebalanceBatches} showPkgField={(form.invoiceOptions.layoutFormat || 'pharma') !== 'pharma'} onAddCustomUnit={handleAddCustomUnit} onRemoveCustomUnit={handleRemoveCustomUnit} onRemove={form.removeItem} clampNonNeg={form.clampNonNeg} isLastRow={idx === form.items.length - 1} onAddRow={form.addItem} />
             ))}
             <button className="btn btn-secondary mt-2" onClick={form.addItem}><Plus size={18} /> Add Item</button>
 
@@ -1118,8 +1313,8 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
                 <label className="form-label">Insert preset (by business type)</label>
                 <select className="form-input" value="" onChange={(e) => { handleLoadBusinessPreset(e.target.value); e.target.value = ''; }}>
                   <option value="">— Pick a business type —</option>
-                  {Object.entries(TERMS_PRESETS || {}).map(([key, val]) => (
-                    <option key={key} value={key}>{val.label || key}</option>
+                  {(Array.isArray(TERMS_PRESETS) ? TERMS_PRESETS : Object.entries(TERMS_PRESETS || {}).map(([id, val]) => ({ id, ...val }))).map((preset) => (
+                    <option key={preset.id} value={preset.id}>{preset.label || preset.id}</option>
                   ))}
                 </select>
                 <span className="field-hint">Industry-specific default wording. Edit freely.</span>
@@ -1158,15 +1353,45 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
         </div>
 
         {/* Live Preview */}
-        <div ref={previewPaneRef} className="preview-pane" style={previewCollapsed ? { position: 'absolute', left: '-99999px', pointerEvents: 'none', opacity: 0 } : undefined}>
+        <div ref={previewPaneRef} className="preview-pane" style={previewCollapsed ? { position: 'absolute', left: '-99999px', pointerEvents: 'none', opacity: 0 } : { alignItems: 'stretch' }}>
           <div className="preview-pane-label preview-toolbar">
-            <span className="preview-toolbar-title">Live preview</span>
+            <span className="preview-toolbar-title">
+              Live preview {twoPerPage && !isThermalPaper() ? '· 2/Page Tear Sheet' : ''}
+            </span>
             <div className="preview-toolbar-controls">
+              {!isThermalPaper() && (
+                <div style={{ display: 'inline-flex', borderRadius: 6, overflow: 'hidden', border: '1px solid var(--border)' }} title="Switch between 2 bills per page (tear sheet) and 1 full-page bill">
+                  <button
+                    type="button"
+                    onClick={() => toggleTwoPerPage(true)}
+                    style={{
+                      border: 0, cursor: 'pointer', fontSize: '0.68rem', fontWeight: 700, padding: '0.24rem 0.48rem',
+                      background: twoPerPage ? 'var(--primary)' : 'var(--bg-secondary)',
+                      color: twoPerPage ? '#fff' : 'var(--text)',
+                    }}
+                  >2/Page</button>
+                  <button
+                    type="button"
+                    onClick={() => toggleTwoPerPage(false)}
+                    style={{
+                      border: 0, cursor: 'pointer', fontSize: '0.68rem', fontWeight: 700, padding: '0.24rem 0.48rem',
+                      background: !twoPerPage ? 'var(--primary)' : 'var(--bg-secondary)',
+                      color: !twoPerPage ? '#fff' : 'var(--text)',
+                    }}
+                  >1/Page</button>
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowPrintPreview(true)}
+                className="zoom-fit-btn"
+                title="Open full Print Preview"
+              >Preview</button>
               <div className="zoom-pill" role="group" aria-label="Preview zoom">
                 <button
                   type="button"
                   className="zoom-btn"
-                  onClick={() => setPreviewZoom(z => Math.max(50, z - 10))}
+                  onClick={() => setPreviewZoom(z => Math.max(40, z - 10))}
                   title="Zoom out (छोटा करें)"
                   aria-label="Zoom out"
                 >−</button>
@@ -1192,13 +1417,74 @@ export default function InvoiceGenerator({ onBack, profile: profileProp, editing
               >Fit</button>
             </div>
           </div>
-          <div className="preview-scaler" style={{ transform: `scale(${previewZoom / 100})`, transformOrigin: 'top left' }}>
-            <InvoicePreview ref={printRef} profile={profile} client={form.client} details={form.details} items={form.items} totals={totalsCalc.totals} invoiceType={form.invoiceType} customTerms={form.customTerms} customNotes={form.customNotes} extraSections={form.extraSections} options={form.invoiceOptions} />
+          <div style={{ flex: 1, minHeight: 0, overflow: 'auto', width: '100%' }}>
+            <div className="preview-scaler" style={{ transform: `scale(${previewZoom / 100})`, transformOrigin: 'top left', display: 'inline-block' }}>
+              {(() => {
+                const ps = getPrintSettings();
+                const useTwoUp = twoPerPage && !isThermalPaper();
+                return (
+                  <TwoUpSheetPreview
+                    enabled={useTwoUp}
+                    showLabels={ps.twoPerPageShowLabels !== false}
+                    showCutLine={ps.twoPerPageShowCutLine !== false}
+                    leftLabel={ps.twoPerPageLeftLabel || 'CLIENT COPY'}
+                    rightLabel={ps.twoPerPageRightLabel || 'OFFICE / SELF COPY'}
+                    renderPrimary={() => (
+                      <InvoicePreview
+                        ref={printRef}
+                        profile={profile}
+                        client={form.client}
+                        details={form.details}
+                        items={form.items}
+                        totals={totalsCalc.totals}
+                        invoiceType={form.invoiceType}
+                        customTerms={form.customTerms}
+                        customNotes={form.customNotes}
+                        extraSections={form.extraSections}
+                        options={form.invoiceOptions}
+                      />
+                    )}
+                    renderSecondary={() => (
+                      <InvoicePreview
+                        previewOnly
+                        profile={profile}
+                        client={form.client}
+                        details={form.details}
+                        items={form.items}
+                        totals={totalsCalc.totals}
+                        invoiceType={form.invoiceType}
+                        customTerms={form.customTerms}
+                        customNotes={form.customNotes}
+                        extraSections={form.extraSections}
+                        options={form.invoiceOptions}
+                      />
+                    )}
+                  />
+                );
+              })()}
+            </div>
           </div>
         </div>
       </div>
 
-      <PrintPreviewModal isOpen={showPrintPreview} onClose={() => setShowPrintPreview(false)} onPrint={executePrint} onDownloadPdf={generatePDF} profile={profile} client={form.client} details={form.details} items={form.items} totals={totalsCalc.totals} invoiceType={form.invoiceType} customTerms={form.customTerms} customNotes={form.customNotes} extraSections={form.extraSections} invoiceOptions={form.invoiceOptions} />
+      <PrintPreviewModal
+        isOpen={showPrintPreview}
+        onClose={() => setShowPrintPreview(false)}
+        onPrint={executePrint}
+        onDownloadPdf={generatePDF}
+        profile={profile}
+        client={form.client}
+        details={form.details}
+        items={form.items}
+        totals={totalsCalc.totals}
+        invoiceType={form.invoiceType}
+        customTerms={form.customTerms}
+        customNotes={form.customNotes}
+        extraSections={form.extraSections}
+        invoiceOptions={form.invoiceOptions}
+        twoPerPage={twoPerPage}
+        onToggleTwoPerPage={toggleTwoPerPage}
+      />
 
       {leaveModal && (
         <div className="modal-overlay" onClick={leaveActions.cancel}>

@@ -1,5 +1,6 @@
 fn main() {
     if std::env::var("TARGET").unwrap_or_default().contains("windows") {
+        println!("cargo:rerun-if-changed=../public/icons/icon.ico");
         let mut res = winres::WindowsResource::new();
         res.set_icon("../public/icons/icon.ico");
         res.set("ProductName", "ArthSutra");

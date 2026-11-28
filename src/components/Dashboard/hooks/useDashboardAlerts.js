@@ -54,11 +54,69 @@ export function computeRecurringDue(bills = [], now = new Date(), windowDays = 7
   });
 }
 
+function parseBatchExpiryEndDate(exp) {
+  if (!exp) return null;
+  const s = String(exp).trim();
+  const mmyy = s.match(/^(\d{1,2})[/-](\d{2,4})$/);
+  if (mmyy) {
+    const month = parseInt(mmyy[1], 10);
+    let year = parseInt(mmyy[2], 10);
+    if (year < 100) year += 2000;
+    if (month < 1 || month > 12) return null;
+    return new Date(year, month, 0, 23, 59, 59, 999);
+  }
+  const yyyymm = s.match(/^(\d{4})[/-](\d{1,2})$/);
+  if (yyyymm) {
+    const year = parseInt(yyyymm[1], 10);
+    const month = parseInt(yyyymm[2], 10);
+    if (month < 1 || month > 12) return null;
+    return new Date(year, month, 0, 23, 59, 59, 999);
+  }
+  const yyyymmdd = s.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/);
+  if (yyyymmdd) {
+    const year = parseInt(yyyymmdd[1], 10);
+    const month = parseInt(yyyymmdd[2], 10);
+    const day = parseInt(yyyymmdd[3], 10);
+    return new Date(year, month - 1, day, 23, 59, 59, 999);
+  }
+  return null;
+}
+
+/**
+ * Returns batches with positive stock that are expired or expiring within
+ * `windowDays` days (default 60 days), sorted soonest first.
+ */
+export function computeNearExpiryBatches(products = [], now = new Date(), windowDays = 60) {
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const out = [];
+  for (const p of Array.isArray(products) ? products : []) {
+    if (!Array.isArray(p?.batches)) continue;
+    for (const b of p.batches) {
+      if (!b || !b.batchNo || (Number(b.quantity) || 0) <= 0 || !b.expiry) continue;
+      const expDate = parseBatchExpiryEndDate(b.expiry);
+      if (!expDate) continue;
+      const daysLeft = Math.ceil((expDate - todayStart) / 86400000);
+      if (daysLeft <= windowDays) {
+        out.push({
+          productId: p.id,
+          productName: p.name || '',
+          batchNo: b.batchNo,
+          expiry: b.expiry,
+          quantity: Number(b.quantity) || 0,
+          daysLeft,
+          isExpired: daysLeft < 0,
+        });
+      }
+    }
+  }
+  return out.sort((a, b) => a.daysLeft - b.daysLeft);
+}
+
 /**
  * Aggregates every notification the dashboard surfaces into one list:
  *   { id, kind: 'danger'|'warn'|'info', title, detail }
  */
-export function aggregateAlerts({ overdueBills = [], overdueStr = '', lowStockProducts = [], gstDeadlines = null, recurringDue = [] }) {
+export function aggregateAlerts({ overdueBills = [], overdueStr = '', lowStockProducts = [], nearExpiryBatches = [], gstDeadlines = null, recurringDue = [] }) {
   const list = [];
   if (overdueBills.length > 0) {
     list.push({
@@ -72,6 +130,13 @@ export function aggregateAlerts({ overdueBills = [], overdueStr = '', lowStockPr
       id: 'low-stock', kind: 'warn',
       title: `Low stock: ${lowStockProducts.length} item${lowStockProducts.length > 1 ? 's' : ''}`,
       detail: lowStockProducts.map(p => `${p.name} (${p.stock ?? 0})`).join(', '),
+    });
+  }
+  if (nearExpiryBatches.length > 0) {
+    list.push({
+      id: 'near-expiry', kind: 'warn',
+      title: `Near-expiry / expired: ${nearExpiryBatches.length} batch${nearExpiryBatches.length > 1 ? 'es' : ''}`,
+      detail: nearExpiryBatches.slice(0, 4).map(b => `${b.productName} (${b.batchNo} · ${b.expiry})`).join(', '),
     });
   }
   for (const b of recurringDue) {
@@ -99,6 +164,7 @@ export function useDashboardAlerts(bills, { refreshKey = 0 } = {}) {
   const [profile, setProfile] = useState(null);
   const [clients, setClients] = useState([]);
   const [lowStockProducts, setLowStockProducts] = useState([]);
+  const [nearExpiryBatches, setNearExpiryBatches] = useState([]);
   const [showRemindAll, setShowRemindAll] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -109,10 +175,14 @@ export function useDashboardAlerts(bills, { refreshKey = 0 } = {}) {
         getAllProducts().catch(() => []),
         getStockAlertSettings().catch(() => ({ enabled: true, threshold: 5 })),
       ]);
+      setNearExpiryBatches(computeNearExpiryBatches(prods));
       if (cfg?.enabled === false) { setLowStockProducts([]); return; }
       const threshold = Number(cfg?.threshold ?? 5);
       setLowStockProducts(prods.filter(p => (p.stock ?? 0) <= threshold));
-    } catch { setLowStockProducts([]); }
+    } catch {
+      setLowStockProducts([]);
+      setNearExpiryBatches([]);
+    }
   }, []);
 
   useEffect(() => { refresh(); }, [refresh, refreshKey]);
@@ -136,8 +206,8 @@ export function useDashboardAlerts(bills, { refreshKey = 0 } = {}) {
   const recurringDue = useMemo(() => computeRecurringDue(bills), [bills]);
 
   const alerts = useMemo(
-    () => aggregateAlerts({ overdueBills, overdueStr, lowStockProducts, gstDeadlines, recurringDue }),
-    [overdueBills, overdueStr, lowStockProducts, gstDeadlines, recurringDue]);
+    () => aggregateAlerts({ overdueBills, overdueStr, lowStockProducts, nearExpiryBatches, gstDeadlines, recurringDue }),
+    [overdueBills, overdueStr, lowStockProducts, nearExpiryBatches, gstDeadlines, recurringDue]);
 
   const getClientPhone = useCallback(
     (bill) => resolveClientPhone(bill, clients),
@@ -175,7 +245,7 @@ export function useDashboardAlerts(bills, { refreshKey = 0 } = {}) {
 
   return {
     // side data
-    profile, clients, lowStockProducts, refresh,
+    profile, clients, lowStockProducts, nearExpiryBatches, refresh,
     // overdue
     overdueBills, overdueByCurrency, overdueStr,
     showRemindAll, setShowRemindAll,

@@ -1,15 +1,22 @@
 import { useState, useEffect, useRef } from 'react';
-import { getProfile, saveProfile, exportAllData, importData, inspectBackup, getTermsTemplates, saveTermsTemplate, deleteTermsTemplate, getAllProfiles, saveBusinessProfile, deleteBusinessProfile, getInvoiceNumberSettings, saveInvoiceNumberSettings, getEnabledModules, setEnabledModules, getStockAlertSettings, saveStockAlertSettings, getInvoiceDisplayOptions, saveInvoiceDisplayOptions } from '../store';
+import {
+  getProfile, saveProfile, exportAllData, exportEncryptedBackup, importData, inspectBackup,
+  inspectUploadedBackup, restoreUploadedBackup, markGoogleDriveSync,
+  getTermsTemplates, saveTermsTemplate, deleteTermsTemplate, getAllProfiles, saveBusinessProfile,
+  deleteBusinessProfile, getInvoiceNumberSettings, saveInvoiceNumberSettings, getEnabledModules,
+  setEnabledModules, hydrateEnabledModules, getStockAlertSettings, saveStockAlertSettings, getInvoiceDisplayOptions,
+  saveInvoiceDisplayOptions, getBackupsList, restoreBackup, triggerBackup, deleteBackup,
+  getTrashedBills, restoreTrashedBill, purgeTrashedBill, verifyAuditTrail,
+} from '../store';
 import { ensureToken, findOrCreateFolder, uploadJSON } from '../services/googleDrive';
-import { getCountryConfig, getStatesForCountry, validateTaxId, detectCountryFromBrowser, getCountriesForRegion, FEATURE_GROUPS, isModuleEnabled, getPaymentAccounts, createEmptyAccount, maskAccountNumber, reorderAccounts, setDefaultAccount, isValidUpiId } from '../utils';
-import { Save, Upload, Download, Plus, Trash2, Edit3, Image as ImageIcon, PenTool, Cloud, CloudOff, Building2, Hash, Shield, Key, Lock } from 'lucide-react';
-import { initGoogleDrive, isConnected, disconnect } from '../services/googleDrive';
+import { getCountryConfig, getStatesForCountry, validateTaxId, FEATURE_GROUPS, isModuleEnabled, getPaymentAccounts, createEmptyAccount, maskAccountNumber, reorderAccounts, setDefaultAccount, isValidUpiId } from '../utils';
+import { Save, Upload, Download, Plus, Trash2, Edit3, Image as ImageIcon, PenTool, Building2, Hash, Shield, Key, Lock, Unlock, Users, UserPlus, ShieldCheck, ShieldAlert, CheckCircle2, AlertTriangle, RefreshCw } from 'lucide-react';
 import { toast } from './Toast';
 import { confirmAction } from './ConfirmModal';
 import PrintSettings from './PrintSettings';
 import HelpButton from './HelpButton';
+import BackupRecoveryPanel from './BackupRecoveryPanel';
 import { useAuth } from '../context/AuthContext';
-import { getBackupsList, restoreBackup, triggerBackup, deleteBackup, getTrashedBills, restoreTrashedBill, purgeTrashedBill } from '../store';
 
 const JUMP_NAV_SECTIONS = [
   ['section-company',  'Company'],
@@ -19,21 +26,42 @@ const JUMP_NAV_SECTIONS = [
   ['section-modules',  'Features'],
   ['section-stock',    'Stock'],
   ['section-backups',  'Backups'],
-  ['section-cloud',    'Google Drive'],
+  ['section-cloud',    'Off-PC & Cloud'],
   ['section-data',     'Import/Export'],
   ['section-security', 'Account Security'],
 ];
 
 const EMPTY_PROFILE = {
-  businessName: '', address: '', city: '', state: '', pin: '', country: '',
-  gstin: '', pan: '', email: '', phone: '', bankName: '', accountNumber: '', ifsc: '', swift: '',
+  businessName: '', tagline: '', address: '', city: '', state: '', pin: '', country: 'India',
+  gstin: '', licence: '', pan: '', email: '', phone: '', bankName: '', accountNumber: '', ifsc: '', swift: '',
   logo: '', logoHeight: 48, signature: '', upiId: '', googleClientId: '', googleDriveFolder: 'Arth Sutra Invoices',
-  paymentAccounts: []
+  paymentAccounts: [], aatoAbove5Cr: false, prevFYTurnover: '', currentFYTurnover: '',
 };
 
-export default function SettingsView({ onSaved }) {
-  const [profile, setProfile] = useState({ ...EMPTY_PROFILE, country: detectCountryFromBrowser() });
+const getIndianFyLabel = (date = new Date()) => {
+  const fyStart = date.getMonth() >= 3 ? date.getFullYear() : date.getFullYear() - 1;
+  return `${fyStart}-${(fyStart + 1).toString().slice(-2)}`;
+};
+
+const normalizeIndiaProfile = (p) => ({
+  ...EMPTY_PROFILE,
+  ...(p && typeof p === 'object' ? p : {}),
+  country: 'India',
+});
+
+export default function SettingsView({ onSaved, initialSection = '' }) {
+  const [profile, setProfile] = useState(() => normalizeIndiaProfile());
   const [activeSection, setActiveSection] = useState(JUMP_NAV_SECTIONS[0][0]);
+  const [backupSyncNonce, setBackupSyncNonce] = useState(0);
+
+  useEffect(() => {
+    if (!initialSection) return;
+    const t = setTimeout(() => {
+      const el = document.getElementById(initialSection);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 120);
+    return () => clearTimeout(t);
+  }, [initialSection]);
 
   useEffect(() => {
     const els = JUMP_NAV_SECTIONS
@@ -56,8 +84,6 @@ export default function SettingsView({ onSaved }) {
   const [saving, setSaving] = useState(false);
   const [termsTemplates, setTermsTemplates] = useState([]);
   const [editingTemplate, setEditingTemplate] = useState(null);
-  const [driveConnected, setDriveConnected] = useState(false);
-  const [connecting, setConnecting] = useState(false);
   const [businessProfiles, setBusinessProfiles] = useState([]);
   const [invNumSettings, setInvNumSettings] = useState({
     format: 'branded', brandPrefix: '', separator: '/', showFinYear: true, startNumber: 1, padDigits: 4,
@@ -80,11 +106,28 @@ export default function SettingsView({ onSaved }) {
   };
 
   // Account Security state
-  const { user, token, updateUser } = useAuth();
+  const { user, token, updateUser, isAdmin, isAccountant } = useAuth();
   const [currentPassword, setCurrentPassword] = useState('');
   const [newUsername, setNewUsername] = useState(user?.username || '');
   const [newPassword, setNewPassword] = useState('');
   const [updatingSecurity, setUpdatingSecurity] = useState(false);
+
+  // RBAC User Management state (Admin only)
+  const [rbacUsers, setRbacUsers] = useState([]);
+  const [loadingUsers, setLoadingUsers] = useState(false);
+  const [newUserUsername, setNewUserUsername] = useState('');
+  const [newUserPassword, setNewUserPassword] = useState('');
+  const [newUserRole, setNewUserRole] = useState('CLERK');
+  const [creatingUser, setCreatingUser] = useState(false);
+
+  // Audit Trail Verification state
+  const [auditResult, setAuditResult] = useState(null);
+  const [verifyingAudit, setVerifyingAudit] = useState(false);
+
+  // Business Profile Create/Edit Modal state
+  const [editingBizProfile, setEditingBizProfile] = useState(null);
+  const [savingBizProfile, setSavingBizProfile] = useState(false);
+  const [bizTaxIdWarning, setBizTaxIdWarning] = useState('');
 
   useEffect(() => {
     if (user?.username) {
@@ -140,17 +183,111 @@ export default function SettingsView({ onSaved }) {
   const fileInputRef = useRef(null);
   const logoInputRef = useRef(null);
   const sigInputRef = useRef(null);
-  const companyFormRef = useRef(null);
-  const visibleCountries = getCountriesForRegion('india');
+  const indiaConfig = getCountryConfig('India');
+  const indianStates = getStatesForCountry('India');
 
   useEffect(() => {
-    getProfile().then(setProfile);
+    getProfile().then(p => setProfile(normalizeIndiaProfile(p)));
     loadTemplates();
     loadBusinessProfiles();
-    setDriveConnected(isConnected());
     getInvoiceNumberSettings().then(setInvNumSettings);
     getStockAlertSettings().then(setStockAlerts).catch(() => {});
+    hydrateEnabledModules().then(setEnabledModulesState).catch(() => {});
   }, []);
+
+  const loadRbacUsers = async () => {
+    if (!isAdmin) return;
+    setLoadingUsers(true);
+    try {
+      const activeToken = token || localStorage.getItem('arthsutra_token');
+      const res = await fetch('/api/auth/users', {
+        headers: activeToken ? { Authorization: `Bearer ${activeToken}` } : {},
+      });
+      if (!res.ok) throw new Error('Failed to load users');
+      const data = await res.json();
+      setRbacUsers(Array.isArray(data) ? data : []);
+    } catch {
+      setRbacUsers([]);
+    } finally {
+      setLoadingUsers(false);
+    }
+  };
+
+  useEffect(() => {
+    if (isAdmin) loadRbacUsers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin, token]);
+
+  const handleCreateRbacUser = async (e) => {
+    e.preventDefault();
+    const uname = newUserUsername.trim();
+    if (uname.length < 3) {
+      toast('Username must be at least 3 characters', 'warning');
+      return;
+    }
+    if (newUserPassword.length < 4) {
+      toast('Password must be at least 4 characters', 'warning');
+      return;
+    }
+    setCreatingUser(true);
+    try {
+      const activeToken = token || localStorage.getItem('arthsutra_token');
+      const res = await fetch('/api/auth/users', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(activeToken ? { Authorization: `Bearer ${activeToken}` } : {}),
+        },
+        body: JSON.stringify({ username: uname, password: newUserPassword, role: newUserRole }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Failed to create user');
+      toast(`Created ${newUserRole} user "${uname}"`, 'success');
+      setNewUserUsername('');
+      setNewUserPassword('');
+      setNewUserRole('CLERK');
+      loadRbacUsers();
+    } catch (err) {
+      toast(err.message || 'Failed to create user', 'error');
+    } finally {
+      setCreatingUser(false);
+    }
+  };
+
+  const handleDeleteRbacUser = async (u) => {
+    if (!await confirmAction({
+      title: `Remove user "${u.username}" (${u.role})?`,
+      message: 'They will no longer be able to sign in on this server.',
+      confirmLabel: 'Remove user',
+      tone: 'danger',
+    })) return;
+    try {
+      const activeToken = token || localStorage.getItem('arthsutra_token');
+      const res = await fetch(`/api/auth/users/${encodeURIComponent(u.id)}`, {
+        method: 'DELETE',
+        headers: activeToken ? { Authorization: `Bearer ${activeToken}` } : {},
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Failed to delete user');
+      toast(`Removed user "${u.username}"`, 'info');
+      loadRbacUsers();
+    } catch (err) {
+      toast(err.message || 'Failed to delete user', 'error');
+    }
+  };
+
+  const handleVerifyAudit = async () => {
+    setVerifyingAudit(true);
+    try {
+      const data = await verifyAuditTrail();
+      setAuditResult({ ...data, checkedAt: new Date().toISOString() });
+    } catch (err) {
+      setAuditResult({ valid: false, error: err.message || 'Verification failed', checkedAt: new Date().toISOString() });
+      toast(err.message || 'Audit verification failed', 'error');
+    } finally {
+      setVerifyingAudit(false);
+    }
+  };
 
   const loadTemplates = async () => setTermsTemplates(await getTermsTemplates());
   const loadBusinessProfiles = async () => setBusinessProfiles(await getAllProfiles());
@@ -333,23 +470,45 @@ export default function SettingsView({ onSaved }) {
 
   const removeImage = (field) => setProfile(prev => ({ ...prev, [field]: '' }));
 
+  const saveCurrentProfileFields = async () => {
+    const normalized = normalizeIndiaProfile(profile);
+    await saveProfile(normalized);
+    setProfile(normalized);
+    if (onSaved) onSaved(normalized);
+    return normalized;
+  };
+
   const handleSave = async (e) => {
     e.preventDefault();
+    if (!isAccountant) {
+      toast('Only Admin or Accountant can edit company details', 'warning');
+      return;
+    }
     try {
       setSaving(true);
-      await saveProfile(profile);
+      const normalized = await saveCurrentProfileFields();
 
-      if (profile.logo || profile.signature) {
+      if (normalized.businessName?.trim()) {
+        const existing = businessProfiles.find(
+          bp => bp.businessName?.trim().toLowerCase() === normalized.businessName.trim().toLowerCase()
+        );
+        if (existing) {
+          await saveBusinessProfile({ ...normalized, id: existing.id }).catch(() => {});
+          loadBusinessProfiles();
+        }
+      }
+
+      if (normalized.logo || normalized.signature) {
         try {
           const raw = localStorage.getItem('arthsutra_invoiceOptions');
           const opts = raw ? JSON.parse(raw) : {};
           const serverOpts = await getInvoiceDisplayOptions().catch(() => null);
 
           let changed = false;
-          if (profile.logo && opts.showLogo === undefined && (!serverOpts || serverOpts.showLogo === undefined)) {
+          if (normalized.logo && opts.showLogo === undefined && (!serverOpts || serverOpts.showLogo === undefined)) {
             opts.showLogo = true; changed = true;
           }
-          if (profile.signature && opts.showSignature === undefined && (!serverOpts || serverOpts.showSignature === undefined)) {
+          if (normalized.signature && opts.showSignature === undefined && (!serverOpts || serverOpts.showSignature === undefined)) {
             opts.showSignature = true; changed = true;
           }
 
@@ -360,7 +519,6 @@ export default function SettingsView({ onSaved }) {
           }
         } catch { /* localStorage full or blocked — skip */ }
       }
-      if (onSaved) onSaved(profile);
       toast('Profile saved!', 'success');
     } catch { toast('Failed to save profile', 'error'); }
     finally { setSaving(false); }
@@ -386,34 +544,16 @@ export default function SettingsView({ onSaved }) {
     const padded = String(s.startNumber || 1).padStart(s.padDigits || 4, '0');
     if (s.format === 'random') return `${pfx}${sep}A3X9K2`;
     if (s.showFinYear) {
-      const yr = new Date().getFullYear();
-      const ny = (yr + 1).toString().slice(-2);
-      return `${pfx}${sep}${yr}-${ny}${sep}${padded}`;
+      return `${pfx}${sep}${getIndianFyLabel()}${sep}${padded}`;
     }
     return `${pfx}${sep}${padded}`;
   };
 
-  const handleConnectDrive = async () => {
-    if (!profile.googleClientId.trim()) { toast('Enter your Google OAuth Client ID first', 'warning'); return; }
-    setConnecting(true);
-    try {
-      const result = await initGoogleDrive(profile.googleClientId);
-      if (result.success) { setDriveConnected(true); toast('Connected to Google Drive!', 'success'); }
-      else { toast('Failed: ' + (result.error || 'Unknown error'), 'error'); }
-    } catch (err) { toast('Connection failed: ' + err.message, 'error'); }
-    setConnecting(false);
-  };
-
-  const handleDisconnectDrive = () => {
-    disconnect();
-    setDriveConnected(false);
-    toast('Disconnected from Google Drive', 'info');
-  };
-
   const ALL_BACKUP_PARTS = [
-    { id: 'profile',        label: 'Active business profile',  hint: 'Name, address, GSTIN, bank, logo, signature' },
+    { id: 'profile',        label: 'Active business profile',  hint: 'Name, address, GSTIN, DL No., bank, logo, signature' },
     { id: 'profiles',       label: 'All business profiles',    hint: 'Multi-business switcher entries' },
     { id: 'bills',          label: 'Invoices / bills',         hint: 'Tax invoices, proforma, credit notes, etc.' },
+    { id: 'trashedBills',   label: 'Trash bin invoices',       hint: 'Soft-deleted invoices inside the 30-day Trash Bin' },
     { id: 'clients',        label: 'Clients',                  hint: 'Saved client directory' },
     { id: 'products',       label: 'Products / Inventory',     hint: 'Product catalog with HSN, rate, stock' },
     { id: 'expenses',       label: 'Expenses',                 hint: 'Expense tracker entries' },
@@ -421,8 +561,8 @@ export default function SettingsView({ onSaved }) {
     { id: 'recurring',      label: 'Recurring invoices',       hint: 'Auto-billing schedule entries' },
     { id: 'receipts',       label: 'Receipts',                 hint: 'Payment receipts' },
     { id: 'termsTemplates', label: 'Terms templates',          hint: 'Reusable T&C library' },
-    { id: 'meta',           label: 'App settings',             hint: 'Region, modules, invoice number format, display options' },
-    { id: 'localStorage',   label: 'Local preferences',        hint: 'Custom units, theme, last region preference' },
+    { id: 'meta',           label: 'App settings',             hint: 'Modules, invoice number format, display options' },
+    { id: 'localStorage',   label: 'Local preferences',        hint: 'Custom units, theme, print settings' },
   ];
 
   const [showExportModal, setShowExportModal] = useState(false);
@@ -432,7 +572,10 @@ export default function SettingsView({ onSaved }) {
   const [importInspection, setImportInspection] = useState(null);
   const [importJsonText, setImportJsonText] = useState('');
   const [exportToDrive, setExportToDrive] = useState(false);
+  const [exportEncrypted, setExportEncrypted] = useState(false);
+  const [exportPassword, setExportPassword] = useState('');
   const [drivePending, setDrivePending] = useState(false);
+  const [unlockModal, setUnlockModal] = useState(null); // { file, password, error }
 
   const toggleExport = (id) => setExportSel(prev => ({ ...prev, [id]: !prev[id] }));
   const toggleImport = (id) => setImportSel(prev => ({ ...prev, [id]: !prev[id] }));
@@ -441,10 +584,24 @@ export default function SettingsView({ onSaved }) {
 
   const runExport = async () => {
     try {
-      const json = await exportAllData(exportSel);
-      const fileName = `arthsutra-backup-${new Date().toISOString().split('T')[0]}.json`;
+      if (exportEncrypted && exportPassword.trim().length < 4) {
+        toast('Recovery password must be at least 4 characters long', 'warning');
+        return;
+      }
 
-      const blob = new Blob([json], { type: 'application/json' });
+      const dateSlug = new Date().toISOString().split('T')[0];
+      let contentText;
+      let fileName;
+      if (exportEncrypted) {
+        const res = await exportEncryptedBackup(exportPassword.trim(), exportSel);
+        contentText = res.encryptedText;
+        fileName = `arthsutra-backup-${dateSlug}.arthbackup`;
+      } else {
+        contentText = await exportAllData(exportSel, { includeRecoveryMeta: true });
+        fileName = `arthsutra-backup-${dateSlug}.json`;
+      }
+
+      const blob = new Blob([contentText], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url; a.download = fileName; a.click();
@@ -460,7 +617,9 @@ export default function SettingsView({ onSaved }) {
           else {
             const folderName = (profile.googleDriveFolder || 'Arth Sutra Invoices') + ' - Backups';
             const folderId = await findOrCreateFolder(folderName);
-            const result = await uploadJSON(fileName, json, folderId);
+            const result = await uploadJSON(fileName, contentText, folderId);
+            await markGoogleDriveSync().catch(() => {});
+            setBackupSyncNonce(n => n + 1);
             toast(`Saved to Drive — ${result.name}`, 'success');
           }
           setDrivePending(false);
@@ -469,6 +628,7 @@ export default function SettingsView({ onSaved }) {
 
       toast('Backup downloaded', 'success');
       setShowExportModal(false);
+      setExportPassword('');
     } catch (err) {
       console.error(err);
       toast('Export failed: ' + (err.message || 'unknown error'), 'error');
@@ -476,21 +636,74 @@ export default function SettingsView({ onSaved }) {
     }
   };
 
+  const openInspectionModal = (inspection, jsonText) => {
+    setImportInspection(inspection);
+    setImportJsonText(jsonText);
+    const auto = {};
+    ALL_BACKUP_PARTS.forEach(p => { auto[p.id] = (inspection.counts?.[p.id] || 0) > 0; });
+    setImportSel(auto);
+    setShowImportModal(true);
+  };
+
   const handleImportPick = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const text = await file.text();
-      const inspection = inspectBackup(text);
-      if (!inspection.valid) { toast("This file doesn't look like an ArthSutra backup.", 'error'); return; }
-      setImportInspection(inspection);
-      setImportJsonText(text);
-      const auto = {};
-      ALL_BACKUP_PARTS.forEach(p => { auto[p.id] = (inspection.counts[p.id] || 0) > 0; });
-      setImportSel(auto);
-      setShowImportModal(true);
-    } catch { toast('Could not read the file', 'error'); }
+      if (/\.sqlite$/i.test(file.name)) {
+        const inspection = await inspectUploadedBackup({ file });
+        const counts = inspection.counts || {};
+        const confirmed = await confirmAction({
+          title: `Restore full SQLite snapshot "${file.name}"?`,
+          message: `Verified OK · Contains ${counts.bills || 0} invoice(s), ${counts.clients || 0} client(s), ${counts.products || 0} product(s). This overwrites current records (a safety snapshot will be taken first).`,
+          confirmLabel: 'Restore database',
+          tone: 'warning',
+        });
+        if (confirmed) {
+          await restoreUploadedBackup({ file, overwrite: true, allowUsers: true });
+          toast('SQLite database restored!', 'success');
+          const p = normalizeIndiaProfile(await getProfile());
+          setProfile(p);
+          if (onSaved) onSaved(p);
+          loadTemplates();
+          loadBusinessProfiles();
+          getInvoiceNumberSettings().then(setInvNumSettings).catch(() => {});
+          getStockAlertSettings().then(setStockAlerts).catch(() => {});
+          setBackupSyncNonce(n => n + 1);
+        }
+      } else {
+        const text = await file.text();
+        let parsed = null;
+        try { parsed = JSON.parse(text); } catch { /* handled below */ }
+        if (parsed && parsed.__arthsutra_encrypted_backup) {
+          setUnlockModal({ file, password: '', error: '' });
+        } else {
+          const inspection = inspectBackup(text);
+          if (!inspection.valid) { toast("This file doesn't look like an ArthSutra backup.", 'error'); return; }
+          openInspectionModal(inspection, text);
+        }
+      }
+    } catch (err) {
+      toast(err.message || 'Could not read the backup file', 'error');
+    }
     if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleUnlockImportModal = async (e) => {
+    e.preventDefault();
+    if (!unlockModal?.file || !unlockModal.password) return;
+    try {
+      const res = await inspectUploadedBackup({ file: unlockModal.file, password: unlockModal.password });
+      if (!res.valid || !res.unlocked) {
+        setUnlockModal(prev => prev ? { ...prev, error: 'Incorrect recovery password.' } : null);
+        return;
+      }
+      const unlockedText = res.unlockedJsonText;
+      const inspection = inspectBackup(unlockedText);
+      setUnlockModal(null);
+      openInspectionModal(inspection, unlockedText);
+    } catch (err) {
+      setUnlockModal(prev => prev ? { ...prev, error: err.message || 'Failed to decrypt' } : null);
+    }
   };
 
   const runImport = async () => {
@@ -503,9 +716,21 @@ export default function SettingsView({ onSaved }) {
       if (result.clientCount) parts.push(`${result.clientCount} client(s)`);
       if (result.productCount) parts.push(`${result.productCount} product(s)`);
       toast(parts.length ? `Restored: ${parts.join(', ')}` : 'Restore complete', 'success');
-      if (importSel.profile) { const p = await getProfile(); setProfile(p); if (onSaved) onSaved(p); }
+      if (importSel.profile) {
+        const p = normalizeIndiaProfile(await getProfile());
+        setProfile(p);
+        if (onSaved) onSaved(p);
+      }
       if (importSel.termsTemplates) loadTemplates();
       if (importSel.profiles) loadBusinessProfiles();
+      if (importSel.meta) {
+        getInvoiceNumberSettings().then(setInvNumSettings).catch(() => {});
+        getStockAlertSettings().then(setStockAlerts).catch(() => {});
+      }
+      if (importSel.localStorage) {
+        setEnabledModulesState(getEnabledModules());
+      }
+      setBackupSyncNonce(n => n + 1);
       setShowImportModal(false);
       setImportInspection(null);
       setImportJsonText('');
@@ -533,27 +758,33 @@ export default function SettingsView({ onSaved }) {
   };
 
   const handleSaveAsProfile = async () => {
+    if (!isAccountant) { toast('Only Admin or Accountant can save profiles', 'warning'); return; }
     if (!profile.businessName.trim()) { toast('Business name required', 'warning'); return; }
-    const existing = businessProfiles.find(bp => bp.businessName.trim().toLowerCase() === profile.businessName.trim().toLowerCase());
-    await saveBusinessProfile({ ...profile, id: existing?.id || undefined });
+    const normalized = normalizeIndiaProfile(profile);
+    const existing = businessProfiles.find(bp => bp.businessName.trim().toLowerCase() === normalized.businessName.trim().toLowerCase());
+    await saveBusinessProfile({ ...normalized, id: existing?.id || undefined });
     toast(existing ? 'Profile updated!' : 'Profile saved!', 'success');
     loadBusinessProfiles();
   };
 
   const handleLoadProfile = async (bp) => {
+    if (!isAccountant) { toast('Only Admin or Accountant can switch business profiles', 'warning'); return; }
     if (profile.businessName?.trim()) {
-      const existing = businessProfiles.find(p => p.businessName.trim().toLowerCase() === profile.businessName.trim().toLowerCase());
-      await saveBusinessProfile({ ...profile, id: existing?.id || undefined });
+      const normalizedCurrent = normalizeIndiaProfile(profile);
+      const existing = businessProfiles.find(p => p.businessName.trim().toLowerCase() === normalizedCurrent.businessName.trim().toLowerCase());
+      await saveBusinessProfile({ ...normalizedCurrent, id: existing?.id || undefined });
     }
-    const loaded = { ...bp };
+    const loaded = normalizeIndiaProfile(bp);
     delete loaded.id;
     setProfile(loaded);
     await saveProfile(loaded);
     if (onSaved) onSaved(loaded);
+    loadBusinessProfiles();
     toast(`Switched to ${bp.businessName}`, 'success');
   };
 
   const handleDeleteProfile = async (id) => {
+    if (!isAdmin) { toast('Only Admin can delete business profiles', 'warning'); return; }
     if (await confirmAction({
       title: 'Delete this saved business profile?',
       message: 'Invoices already saved under this profile stay untouched. Only removes the profile from your saved list.',
@@ -567,14 +798,60 @@ export default function SettingsView({ onSaved }) {
   };
 
   const handleAddNewProfile = () => {
-    setProfile({ ...EMPTY_PROFILE, country: detectCountryFromBrowser() });
-    setTaxIdWarning('');
-    companyFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (!isAccountant) { toast('Only Admin or Accountant can create profiles', 'warning'); return; }
+    setBizTaxIdWarning('');
+    setEditingBizProfile(normalizeIndiaProfile());
+  };
+
+  const handleEditBizProfile = (bp) => {
+    if (!isAccountant) { toast('Only Admin or Accountant can edit profiles', 'warning'); return; }
+    setBizTaxIdWarning('');
+    setEditingBizProfile({
+      ...normalizeIndiaProfile(bp),
+      id: bp.id,
+      _originalBusinessName: bp.businessName || '',
+    });
+  };
+
+  const handleSaveBizProfileModal = async (e) => {
+    e.preventDefault();
+    if (!editingBizProfile) return;
+    if (!editingBizProfile.businessName?.trim()) {
+      toast('Business name is required', 'warning');
+      return;
+    }
+    setSavingBizProfile(true);
+    try {
+      const { _originalBusinessName, ...raw } = editingBizProfile;
+      const toSave = normalizeIndiaProfile(raw);
+      if (editingBizProfile.id) toSave.id = editingBizProfile.id;
+      const saved = await saveBusinessProfile(toSave);
+      await loadBusinessProfiles();
+
+      const activeName = profile.businessName?.trim().toLowerCase();
+      const origName = (_originalBusinessName || '').trim().toLowerCase();
+      const isEditingActive = activeName && (activeName === origName || activeName === toSave.businessName.trim().toLowerCase());
+      if (isEditingActive || !activeName) {
+        const activeCopy = normalizeIndiaProfile(saved || toSave);
+        delete activeCopy.id;
+        setProfile(activeCopy);
+        await saveProfile(activeCopy);
+        if (onSaved) onSaved(activeCopy);
+      }
+
+      toast(editingBizProfile.id ? 'Business profile updated!' : 'Business profile created!', 'success');
+      setEditingBizProfile(null);
+      setBizTaxIdWarning('');
+    } catch (err) {
+      toast(err.message || 'Failed to save business profile', 'error');
+    } finally {
+      setSavingBizProfile(false);
+    }
   };
 
   const [taxIdWarning, setTaxIdWarning] = useState('');
   const handleTaxIdBlur = () => {
-    const result = validateTaxId(profile.country, profile.gstin);
+    const result = validateTaxId('India', profile.gstin);
     setTaxIdWarning(result.ok ? '' : result.message);
   };
 
@@ -612,7 +889,7 @@ export default function SettingsView({ onSaved }) {
               <li><strong>Multi-business profiles</strong> — Save as Profile keeps the current form as a switchable profile; switch between them from the invoice generator.</li>
               <li><strong>Payment Accounts</strong> — add multiple bank / UPI accounts; ⭐ marks the default. Every inline change auto-saves.</li>
               <li><strong>Invoice Number Settings</strong> — brand prefix, financial-year suffix, padding. Live preview at the bottom.</li>
-              <li><strong>Invoice Layout</strong> — toggles for what appears on printed invoices (logo, HSN, bank, UPI QR, watermark, multi-copy, margins, signature, T&amp;C page).</li>
+              <li><strong>Invoice Layout</strong> — toggles for what appears on printed invoices (logo, HSN, bank, UPI QR, 2-up tear sheet, watermark, multi-copy, margins, signature).</li>
               <li><strong>Backup Management</strong> — daily auto-backups kept 30 days. Restore any date, or Delete to reclaim disk.</li>
               <li><strong>Google Drive sync</strong> — connect once to auto-upload every backup to your own Drive.</li>
               <li><strong>Import / Export</strong> — JSON export for full backup portability.</li>
@@ -684,104 +961,97 @@ export default function SettingsView({ onSaved }) {
       <div style={{ display: 'flex', flexDirection: 'column' }}>
 
       {/* ---- Company Details ---- */}
-      <form id="section-company" onSubmit={handleSave} className="glass-panel p-6 mb-6" ref={companyFormRef}>
+      <form id="section-company" onSubmit={handleSave} className="glass-panel p-6 mb-6">
         <h3 className="section-title">Company Details</h3>
-        {(() => {
-          const cc = getCountryConfig(profile.country);
-          return (
-            <div className="grid grid-cols-2 gap-4">
-              <div className="form-group full-width">
-                <label className="form-label">Business Name *</label>
-                <input required type="text" name="businessName" className="form-input" value={profile.businessName} onChange={handleChange} />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Country</label>
-                <select name="country" className="form-input" value={profile.country || 'India'} onChange={handleChange}>
-                  {profile.country && !visibleCountries.some(c => c.name === profile.country) && (
-                    <option value={profile.country}>{profile.country}</option>
-                  )}
-                  {visibleCountries.map(c => <option key={c.code} value={c.name}>{c.name}</option>)}
-                </select>
-              </div>
-              <div className="form-group full-width">
-                <label className="form-label">Address</label>
-                <textarea rows="2" name="address" className="form-input" value={profile.address} onChange={handleChange} />
-              </div>
-              <div className="form-group">
-                <label className="form-label">City</label>
-                <input type="text" name="city" className="form-input" value={profile.city || ''} onChange={handleChange} placeholder="e.g. Mumbai" />
-              </div>
-              <div className="form-group">
-                <label className="form-label">{cc.postalLabel}</label>
-                <input type="text" name="pin" className="form-input" value={profile.pin || ''} onChange={handleChange} placeholder={cc.postalLabel} />
-              </div>
-              <div className="form-group">
-                <label className="form-label">{cc.stateLabel}</label>
-                {(() => {
-                  const stateOpts = getStatesForCountry(profile.country || 'India');
-                  return stateOpts.length > 0 ? (
-                    <select name="state" className="form-input" value={profile.state} onChange={handleChange}>
-                      <option value="">Select {cc.stateLabel}</option>
-                      {stateOpts.map(s => <option key={s} value={s}>{s}</option>)}
-                    </select>
-                  ) : (
-                    <input type="text" name="state" className="form-input" value={profile.state || ''} onChange={handleChange} placeholder={cc.stateLabel} />
-                  );
-                })()}
-              </div>
-              <div className="form-group">
-                <label className="form-label">{cc.taxIdLabel}</label>
-                <input type="text" name="gstin" className="form-input"
-                  style={taxIdWarning ? { borderColor: '#f59e0b' } : undefined}
-                  value={profile.gstin}
-                  onChange={(e) => { handleChange(e); if (taxIdWarning) setTaxIdWarning(''); }}
-                  onBlur={handleTaxIdBlur}
-                  placeholder={cc.taxIdPlaceholder} maxLength={20} />
-                {taxIdWarning && <small style={{ color: '#d97706', fontSize: '0.7rem', display: 'block', marginTop: '0.2rem' }}>⚠ {taxIdWarning}</small>}
-              </div>
-              <div className="form-group">
-                <label className="form-label">Email</label>
-                <input type="email" name="email" className="form-input" value={profile.email} onChange={handleChange} />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Phone</label>
-                <input type="text" name="phone" className="form-input" value={profile.phone} onChange={handleChange} />
-              </div>
-              {(profile.country || 'India') === 'India' && (
-                <div className="form-group full-width" style={{ background: 'var(--bg-secondary)', padding: '0.85rem 1rem', borderRadius: 8, border: '1px solid var(--border)' }}>
-                  <label className="form-label" style={{ marginBottom: 6 }}>GSTR filing details (used only for GSTR-1 / GSTR-3B JSON export)</label>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: 8 }}>
-                    <input type="checkbox" id="aato-above-5cr" name="aatoAbove5Cr"
-                      checked={!!profile.aatoAbove5Cr}
-                      onChange={(e) => setProfile(p => ({ ...p, aatoAbove5Cr: e.target.checked }))} />
-                    <label htmlFor="aato-above-5cr" style={{ fontSize: '0.82rem', margin: 0 }}>
-                      Aggregate turnover (AATO) is <strong>above ₹5 crore</strong>
-                    </label>
-                  </div>
-                  <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', margin: '0 0 0.6rem' }}>
-                    Drives HSN reporting rule — <strong>{profile.aatoAbove5Cr ? '6-digit HSN' : '4-digit HSN'}</strong> minimum on every item.
-                  </p>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.6rem' }}>
-                    <div>
-                      <label className="form-label" style={{ fontSize: '0.72rem' }}>Previous FY aggregate turnover (₹) — sets JSON <code>gt</code></label>
-                      <input type="number" min="0" step="1" name="prevFYTurnover" className="form-input"
-                        value={profile.prevFYTurnover ?? ''} onChange={handleChange} placeholder="e.g. 5000000" />
-                    </div>
-                    <div>
-                      <label className="form-label" style={{ fontSize: '0.72rem' }}>Current FY turnover so far (₹) — sets JSON <code>cur_gt</code></label>
-                      <input type="number" min="0" step="1" name="currentFYTurnover" className="form-input"
-                        value={profile.currentFYTurnover ?? ''} onChange={handleChange} placeholder="e.g. 1200000" />
-                    </div>
-                  </div>
-                </div>
-              )}
+        {!isAccountant && (
+          <div className="notice notice-info" style={{ marginBottom: '1rem' }}>
+            <span className="notice-icon">🔒</span>
+            <div>
+              <strong>Read-only mode:</strong> Signed in as <strong>{user?.role || 'CLERK'}</strong>. Only Admin or Accountant can update Company Details or Business Profiles.
             </div>
-          );
-        })()}
+          </div>
+        )}
+        <div className="grid grid-cols-2 gap-4">
+          <div className="form-group full-width">
+            <label className="form-label">Business Name *</label>
+            <input required type="text" name="businessName" className="form-input" value={profile.businessName} onChange={handleChange} disabled={!isAccountant} />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Business Tagline / Subtitle</label>
+            <input type="text" name="tagline" className="form-input" value={profile.tagline || ''} onChange={handleChange} disabled={!isAccountant} placeholder="e.g. Pharmaceutical Distributors" />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Drug Licence No.</label>
+            <input type="text" name="licence" className="form-input" value={profile.licence || ''} onChange={handleChange} disabled={!isAccountant} placeholder="e.g. 20B/21B/27/2026" />
+          </div>
+          <div className="form-group full-width">
+            <label className="form-label">Address</label>
+            <textarea rows="2" name="address" className="form-input" value={profile.address} onChange={handleChange} disabled={!isAccountant} />
+          </div>
+          <div className="form-group">
+            <label className="form-label">City</label>
+            <input type="text" name="city" className="form-input" value={profile.city || ''} onChange={handleChange} disabled={!isAccountant} placeholder="e.g. Mumbai" />
+          </div>
+          <div className="form-group">
+            <label className="form-label">{indiaConfig.postalLabel}</label>
+            <input type="text" name="pin" className="form-input" value={profile.pin || ''} onChange={handleChange} disabled={!isAccountant} placeholder="e.g. 400001" maxLength={10} />
+          </div>
+          <div className="form-group">
+            <label className="form-label">{indiaConfig.stateLabel}</label>
+            <select name="state" className="form-input" value={profile.state} onChange={handleChange} disabled={!isAccountant}>
+              <option value="">Select {indiaConfig.stateLabel}</option>
+              {indianStates.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div className="form-group">
+            <label className="form-label">{indiaConfig.taxIdLabel}</label>
+            <input type="text" name="gstin" className="form-input"
+              style={taxIdWarning ? { borderColor: '#f59e0b' } : undefined}
+              value={profile.gstin}
+              onChange={(e) => { handleChange(e); if (taxIdWarning) setTaxIdWarning(''); }}
+              onBlur={handleTaxIdBlur}
+              disabled={!isAccountant}
+              placeholder={indiaConfig.taxIdPlaceholder} maxLength={20} />
+            {taxIdWarning && <small style={{ color: '#d97706', fontSize: '0.7rem', display: 'block', marginTop: '0.2rem' }}>⚠ {taxIdWarning}</small>}
+          </div>
+          <div className="form-group">
+            <label className="form-label">Email</label>
+            <input type="email" name="email" className="form-input" value={profile.email} onChange={handleChange} disabled={!isAccountant} />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Phone</label>
+            <input type="text" name="phone" className="form-input" value={profile.phone} onChange={handleChange} disabled={!isAccountant} />
+          </div>
+          <div className="form-group full-width" style={{ background: 'var(--bg-secondary)', padding: '0.85rem 1rem', borderRadius: 8, border: '1px solid var(--border)' }}>
+            <label className="form-label" style={{ marginBottom: 6 }}>GSTR filing details (used only for GSTR-1 / GSTR-3B JSON export)</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: 8 }}>
+              <input type="checkbox" id="aato-above-5cr" name="aatoAbove5Cr"
+                checked={!!profile.aatoAbove5Cr}
+                disabled={!isAccountant}
+                onChange={(e) => setProfile(p => ({ ...p, aatoAbove5Cr: e.target.checked }))} />
+              <label htmlFor="aato-above-5cr" style={{ fontSize: '0.82rem', margin: 0 }}>
+                Aggregate turnover (AATO) is <strong>above ₹5 crore</strong>
+              </label>
+            </div>
+            <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', margin: '0 0 0.6rem' }}>
+              Drives HSN reporting rule — <strong>{profile.aatoAbove5Cr ? '6-digit HSN' : '4-digit HSN'}</strong> minimum on every item.
+            </p>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.6rem' }}>
+              <div>
+                <label className="form-label" style={{ fontSize: '0.72rem' }}>Previous FY aggregate turnover (₹) — sets JSON <code>gt</code></label>
+                <input type="number" min="0" step="1" name="prevFYTurnover" className="form-input"
+                  value={profile.prevFYTurnover ?? ''} onChange={handleChange} disabled={!isAccountant} placeholder="e.g. 5000000" />
+              </div>
+              <div>
+                <label className="form-label" style={{ fontSize: '0.72rem' }}>Current FY turnover so far (₹) — sets JSON <code>cur_gt</code></label>
+                <input type="number" min="0" step="1" name="currentFYTurnover" className="form-input"
+                  value={profile.currentFYTurnover ?? ''} onChange={handleChange} disabled={!isAccountant} placeholder="e.g. 1200000" />
+              </div>
+            </div>
+          </div>
+        </div>
 
         {(() => {
-          const bankCC = getCountryConfig(profile.country);
-          const isIndia = (profile.country || 'India') === 'India';
           const accounts = (profile.paymentAccounts || []).filter(a => a && a.id !== 'legacy');
           const hasLegacyFlat = !accounts.length && (profile.bankName || profile.accountNumber || profile.ifsc || profile.swift || profile.upiId);
           return (
@@ -793,7 +1063,7 @@ export default function SettingsView({ onSaved }) {
                     Multiple bank / UPI accounts per profile. Pick one per invoice in the Customize panel.
                   </p>
                 </div>
-                <button type="button" className="btn btn-primary" onClick={openAddAccount}>
+                <button type="button" className="btn btn-primary" onClick={openAddAccount} disabled={!isAccountant}>
                   <Plus size={16} /> Add account
                 </button>
               </div>
@@ -804,7 +1074,7 @@ export default function SettingsView({ onSaved }) {
                   <div style={{ flex: 1 }}>
                     <strong>Your existing bank details are still on this profile.</strong> Click below to import them as the first Payment Account, then add more.
                     <div style={{ marginTop: '0.5rem' }}>
-                      <button type="button" className="btn btn-secondary" onClick={importLegacyAsAccount} style={{ fontSize: '0.78rem', padding: '0.3rem 0.7rem' }}>
+                      <button type="button" className="btn btn-secondary" onClick={importLegacyAsAccount} disabled={!isAccountant} style={{ fontSize: '0.78rem', padding: '0.3rem 0.7rem' }}>
                         Import &amp; continue →
                       </button>
                     </div>
@@ -833,34 +1103,32 @@ export default function SettingsView({ onSaved }) {
                         <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '0.2rem', lineHeight: 1.55 }}>
                           {a.bankName && <span>{a.bankName} · </span>}
                           {a.accountNumber && <span>A/C {maskAccountNumber(a.accountNumber)} · </span>}
-                          {a.ifsc && <span>{bankCC.bankLabel || 'IFSC'} {a.ifsc}</span>}
+                          {a.ifsc && <span>IFSC {a.ifsc}</span>}
                           {a.swift && <span> · SWIFT {a.swift}</span>}
                           {a.upiId && <span> · 📱 {a.upiId}</span>}
                         </div>
                       </div>
                       <div style={{ display: 'flex', gap: '0.25rem', flexWrap: 'wrap' }}>
                         {!a.isDefault && (
-                          <button type="button" className="icon-btn" onClick={() => markDefault(a)} title="Set as default">⭐</button>
+                          <button type="button" className="icon-btn" onClick={() => markDefault(a)} disabled={!isAccountant} title="Set as default">⭐</button>
                         )}
-                        <button type="button" className="icon-btn" onClick={() => moveAccountIdx(idx, -1)} disabled={idx === 0} title="Move up">↑</button>
-                        <button type="button" className="icon-btn" onClick={() => moveAccountIdx(idx, 1)} disabled={idx === accounts.length - 1} title="Move down">↓</button>
-                        <button type="button" className="icon-btn" onClick={() => toggleAccountActive(a)} title={a.isActive === false ? 'Activate' : 'Deactivate'}>
+                        <button type="button" className="icon-btn" onClick={() => moveAccountIdx(idx, -1)} disabled={!isAccountant || idx === 0} title="Move up">↑</button>
+                        <button type="button" className="icon-btn" onClick={() => moveAccountIdx(idx, 1)} disabled={!isAccountant || idx === accounts.length - 1} title="Move down">↓</button>
+                        <button type="button" className="icon-btn" onClick={() => toggleAccountActive(a)} disabled={!isAccountant} title={a.isActive === false ? 'Activate' : 'Deactivate'}>
                           {a.isActive === false ? '✓' : '∅'}
                         </button>
-                        <button type="button" className="icon-btn icon-btn-blue" onClick={() => openEditAccount(a)} title="Edit"><Edit3 size={15} /></button>
-                        <button type="button" className="icon-btn icon-btn-red" onClick={() => removeAccount(a)} title="Delete"><Trash2 size={15} /></button>
+                        <button type="button" className="icon-btn icon-btn-blue" onClick={() => openEditAccount(a)} disabled={!isAccountant} title="Edit"><Edit3 size={15} /></button>
+                        <button type="button" className="icon-btn icon-btn-red" onClick={() => removeAccount(a)} disabled={!isAccountant} title="Delete"><Trash2 size={15} /></button>
                       </div>
                     </div>
                   ))}
                 </div>
               )}
 
-              {isIndia && (
-                <div className="form-group" style={{ marginTop: '1rem', maxWidth: '300px' }}>
-                  <label className="form-label">PAN Number (business-level)</label>
-                  <input type="text" name="pan" className="form-input" value={profile.pan || ''} onChange={handleChange} placeholder="e.g. AAAAA1234A" maxLength={10} />
-                </div>
-              )}
+              <div className="form-group" style={{ marginTop: '1rem', maxWidth: '300px' }}>
+                <label className="form-label">PAN Number (business-level)</label>
+                <input type="text" name="pan" className="form-input" value={profile.pan || ''} onChange={handleChange} disabled={!isAccountant} placeholder="e.g. AAAAA1234A" maxLength={10} />
+              </div>
 
               {editingAccount && (
                 <div className="modal-overlay" onClick={cancelAccount}>
@@ -898,15 +1166,15 @@ export default function SettingsView({ onSaved }) {
                         </select>
                       </div>
                       <div className="form-group">
-                        <label className="form-label">Account Number {!isIndia && '/ IBAN'}</label>
+                        <label className="form-label">Account Number</label>
                         <input type="text" className="form-input" value={editingAccount.accountNumber}
                           onChange={e => setEditingAccount(a => ({ ...a, accountNumber: e.target.value }))} />
                       </div>
                       <div className="form-group">
-                        <label className="form-label">{bankCC.bankLabel || 'IFSC Code'}</label>
+                        <label className="form-label">{indiaConfig.bankLabel || 'IFSC Code'}</label>
                         <input type="text" className="form-input" value={editingAccount.ifsc}
                           onChange={e => setEditingAccount(a => ({ ...a, ifsc: e.target.value }))}
-                          placeholder={bankCC.bankLabel} />
+                          placeholder="e.g. HDFC0001234" />
                       </div>
                       <div className="form-group">
                         <label className="form-label">SWIFT / BIC (optional)</label>
@@ -931,7 +1199,7 @@ export default function SettingsView({ onSaved }) {
                         <label className="form-label">Internal notes (not printed on the PDF)</label>
                         <textarea rows="2" className="form-input" value={editingAccount.notes}
                           onChange={e => setEditingAccount(a => ({ ...a, notes: e.target.value }))}
-                          placeholder="e.g. Use for export clients only" />
+                          placeholder="e.g. Primary current account for GST billing" />
                       </div>
                       <div className="form-group" style={{ gridColumn: 'span 2' }}>
                         <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem', cursor: 'pointer' }}>
@@ -1019,7 +1287,7 @@ export default function SettingsView({ onSaved }) {
                   <div style={{ display: 'flex', gap: '0.5rem', marginTop: 4 }}>
                     <button type="button"
                       className={`type-chip ${invNumSettings.showFinYear ? 'type-chip-active' : ''}`}
-                      onClick={() => handleInvNumChange('showFinYear', true)}>Yes (2026-27)</button>
+                      onClick={() => handleInvNumChange('showFinYear', true)}>Yes ({getIndianFyLabel()})</button>
                     <button type="button"
                       className={`type-chip ${!invNumSettings.showFinYear ? 'type-chip-active' : ''}`}
                       onClick={() => handleInvNumChange('showFinYear', false)}>No</button>
@@ -1034,6 +1302,13 @@ export default function SettingsView({ onSaved }) {
                     <option value={5}>5 digits (00001)</option>
                     <option value={6}>6 digits (000001)</option>
                   </select>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Starting Number</label>
+                  <input type="number" min="1" step="1" className="form-input"
+                    value={invNumSettings.startNumber ?? 1}
+                    onChange={e => handleInvNumChange('startNumber', Math.max(1, parseInt(e.target.value, 10) || 1))} />
+                  <p className="field-hint">Initial number when starting a fresh invoice prefix sequence.</p>
                 </div>
               </>
             )}
@@ -1094,7 +1369,7 @@ export default function SettingsView({ onSaved }) {
         </div>
 
         <div className="mt-6 flex justify-end">
-          <button type="submit" className="btn btn-primary" disabled={saving}>
+          <button type="submit" className="btn btn-primary" disabled={saving || !isAccountant}>
             <Save size={18} /> {saving ? 'Saving...' : 'Save Profile'}
           </button>
         </div>
@@ -1105,20 +1380,20 @@ export default function SettingsView({ onSaved }) {
         <div className="flex justify-between items-center mb-4">
           <h3 className="section-title" style={{ margin: 0 }}>Business Profiles</h3>
           <div className="flex gap-2">
-            <button type="button" className="btn btn-secondary" onClick={handleAddNewProfile}>
+            <button type="button" className="btn btn-secondary" onClick={handleAddNewProfile} disabled={!isAccountant}>
               <Plus size={16} /> Add New Profile
             </button>
-            <button type="button" className="btn btn-primary" onClick={handleSaveAsProfile}>
+            <button type="button" className="btn btn-primary" onClick={handleSaveAsProfile} disabled={!isAccountant}>
               <Building2 size={16} /> Save as Profile
             </button>
           </div>
         </div>
         <p className="page-subtitle mb-4">
-          Save multiple business profiles and switch between them instantly. Switching auto-saves your current profile first.
+          Save multiple Indian business profiles and switch between them instantly. Switching auto-saves your current profile first.
         </p>
         {businessProfiles.length === 0 ? (
           <p className="text-muted" style={{ fontSize: '0.85rem' }}>
-            No saved profiles yet. Fill in your business details above and click "Save as Profile".
+            No saved profiles yet. Click &quot;Add New Profile&quot; or fill in your Company Details above and click &quot;Save as Profile&quot;.
           </p>
         ) : (
           <div className="template-list">
@@ -1131,26 +1406,219 @@ export default function SettingsView({ onSaved }) {
                     <strong>{bp.businessName}</strong>
                     {isActive && <span style={{ fontSize: '0.68rem', background: 'var(--primary)', color: '#fff', borderRadius: '4px', padding: '0.1rem 0.4rem', marginLeft: '0.5rem' }}>Active</span>}
                     <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginLeft: '0.5rem' }}>
-                      {bp.state}{bp.gstin ? ` | ${bp.gstin}` : ''}
+                      {[bp.state, bp.gstin ? `GSTIN: ${bp.gstin}` : '', bp.licence ? `DL: ${bp.licence}` : ''].filter(Boolean).join(' | ')}
                     </span>
                   </div>
                   <div className="flex gap-2">
-                    <button className="btn btn-secondary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}
-                      onClick={() => handleLoadProfile(bp)} disabled={isActive}>
+                    <button type="button" className="btn btn-secondary" style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}
+                      onClick={() => handleLoadProfile(bp)} disabled={isActive || !isAccountant}>
                       {isActive ? 'Current' : 'Switch'}
                     </button>
-                    <button className="icon-btn icon-btn-red" onClick={() => handleDeleteProfile(bp.id)} title="Delete">
-                      <Trash2 size={14} />
-                    </button>
+                    {isAccountant && (
+                      <button type="button" className="icon-btn icon-btn-blue" onClick={() => handleEditBizProfile(bp)} title="Edit Profile">
+                        <Edit3 size={14} />
+                      </button>
+                    )}
+                    {isAdmin && (
+                      <button type="button" className="icon-btn icon-btn-red" onClick={() => handleDeleteProfile(bp.id)} title="Delete">
+                        <Trash2 size={14} />
+                      </button>
+                    )}
                   </div>
                 </div>
-                {bp.address && <p className="template-card-preview">{bp.address}</p>}
+                {(bp.address || bp.city || bp.pin) && (
+                  <p className="template-card-preview">
+                    {[bp.address, bp.city, bp.pin ? `PIN ${bp.pin}` : ''].filter(Boolean).join(', ')}
+                  </p>
+                )}
               </div>
             );
             })}
           </div>
         )}
       </div>
+
+      {editingBizProfile && (
+        <div className="modal-overlay" onClick={() => !savingBizProfile && setEditingBizProfile(null)}>
+          <div className="modal-content" style={{ maxWidth: '640px', maxHeight: '90vh', overflowY: 'auto' }} onClick={e => e.stopPropagation()}>
+            <h3 className="section-title" style={{ marginTop: 0 }}>
+              {editingBizProfile.id ? 'Edit Business Profile' : 'Create Business Profile'}
+            </h3>
+            <form onSubmit={handleSaveBizProfileModal}>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="form-group full-width">
+                  <label className="form-label">Business Name *</label>
+                  <input
+                    required
+                    type="text"
+                    className="form-input"
+                    value={editingBizProfile.businessName || ''}
+                    onChange={e => setEditingBizProfile(p => ({ ...p, businessName: e.target.value }))}
+                    placeholder="e.g. Shree Medical Agencies"
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Business Tagline / Subtitle</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={editingBizProfile.tagline || ''}
+                    onChange={e => setEditingBizProfile(p => ({ ...p, tagline: e.target.value }))}
+                    placeholder="e.g. Pharmaceutical Distributors"
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Drug Licence No.</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={editingBizProfile.licence || ''}
+                    onChange={e => setEditingBizProfile(p => ({ ...p, licence: e.target.value }))}
+                    placeholder="e.g. 20B/21B/27/2026"
+                  />
+                </div>
+                <div className="form-group full-width">
+                  <label className="form-label">Address</label>
+                  <textarea
+                    rows="2"
+                    className="form-input"
+                    value={editingBizProfile.address || ''}
+                    onChange={e => setEditingBizProfile(p => ({ ...p, address: e.target.value }))}
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">City</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={editingBizProfile.city || ''}
+                    onChange={e => setEditingBizProfile(p => ({ ...p, city: e.target.value }))}
+                    placeholder="e.g. Mumbai"
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">{indiaConfig.postalLabel}</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={editingBizProfile.pin || ''}
+                    onChange={e => setEditingBizProfile(p => ({ ...p, pin: e.target.value }))}
+                    placeholder="e.g. 400001"
+                    maxLength={10}
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">{indiaConfig.stateLabel}</label>
+                  <select
+                    className="form-input"
+                    value={editingBizProfile.state || ''}
+                    onChange={e => setEditingBizProfile(p => ({ ...p, state: e.target.value }))}
+                  >
+                    <option value="">Select {indiaConfig.stateLabel}</option>
+                    {indianStates.map(s => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">{indiaConfig.taxIdLabel}</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    style={bizTaxIdWarning ? { borderColor: '#f59e0b' } : undefined}
+                    value={editingBizProfile.gstin || ''}
+                    onChange={e => {
+                      const val = e.target.value;
+                      setEditingBizProfile(p => ({ ...p, gstin: val }));
+                      if (bizTaxIdWarning) setBizTaxIdWarning('');
+                    }}
+                    onBlur={() => {
+                      const res = validateTaxId('India', editingBizProfile.gstin);
+                      setBizTaxIdWarning(res.ok ? '' : res.message);
+                    }}
+                    placeholder={indiaConfig.taxIdPlaceholder}
+                    maxLength={20}
+                  />
+                  {bizTaxIdWarning && <small style={{ color: '#d97706', fontSize: '0.7rem', display: 'block', marginTop: '0.2rem' }}>⚠ {bizTaxIdWarning}</small>}
+                </div>
+                <div className="form-group">
+                  <label className="form-label">PAN Number</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={editingBizProfile.pan || ''}
+                    onChange={e => setEditingBizProfile(p => ({ ...p, pan: e.target.value }))}
+                    placeholder="e.g. AAAAA1234A"
+                    maxLength={10}
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Phone</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={editingBizProfile.phone || ''}
+                    onChange={e => setEditingBizProfile(p => ({ ...p, phone: e.target.value }))}
+                  />
+                </div>
+                <div className="form-group full-width">
+                  <label className="form-label">Email</label>
+                  <input
+                    type="email"
+                    className="form-input"
+                    value={editingBizProfile.email || ''}
+                    onChange={e => setEditingBizProfile(p => ({ ...p, email: e.target.value }))}
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Bank Name</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={editingBizProfile.bankName || ''}
+                    onChange={e => setEditingBizProfile(p => ({ ...p, bankName: e.target.value }))}
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Account Number</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={editingBizProfile.accountNumber || ''}
+                    onChange={e => setEditingBizProfile(p => ({ ...p, accountNumber: e.target.value }))}
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">IFSC Code</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={editingBizProfile.ifsc || ''}
+                    onChange={e => setEditingBizProfile(p => ({ ...p, ifsc: e.target.value }))}
+                    placeholder="e.g. HDFC0001234"
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">UPI ID</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={editingBizProfile.upiId || ''}
+                    onChange={e => setEditingBizProfile(p => ({ ...p, upiId: e.target.value }))}
+                    placeholder="e.g. business@upi"
+                  />
+                </div>
+              </div>
+              <div className="flex gap-2 justify-end mt-4">
+                <button type="button" className="btn btn-secondary" onClick={() => setEditingBizProfile(null)} disabled={savingBizProfile}>
+                  Cancel
+                </button>
+                <button type="submit" className="btn btn-primary" disabled={savingBizProfile}>
+                  <Save size={16} /> {savingBizProfile ? 'Saving…' : 'Save Profile'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* ---- Terms Templates ---- */}
       <div id="section-terms" className="glass-panel p-6 mb-6">
@@ -1369,93 +1837,70 @@ export default function SettingsView({ onSaved }) {
       </div>
 
       {/* ---- Backup Management + Trash Bin ---- */}
-      <div id="section-backups"><BackupAndTrashPanel /></div>
-
-      {/* ---- Cloud Backup ---- */}
-      <div id="section-cloud" className="glass-panel p-6 mb-6">
-        <h3 className="section-title">Cloud Backup (Google Drive)</h3>
-        <p className="page-subtitle mb-4">
-          Auto-sync your invoices to Google Drive — no coding or API setup needed.
-        </p>
-
-        <div style={{ background: 'var(--bg-secondary, #f8fafc)', borderRadius: '10px', padding: '1.25rem', marginBottom: '1rem', border: '1px solid var(--border)' }}>
-          <h4 style={{ fontSize: '0.95rem', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <Cloud size={18} color="var(--primary)" /> Easiest Way — Google Drive for Desktop (Recommended)
-          </h4>
-          <ol style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: 1.8, paddingLeft: '1.25rem', margin: 0 }}>
-            <li>
-              <a href="https://www.google.com/drive/download/" target="_blank" rel="noopener noreferrer"
-                style={{ color: 'var(--primary)', fontWeight: 600 }}>
-                Download Google Drive for Desktop
-              </a> (free from Google) and install it
-            </li>
-            <li>Sign in with your Google account — a <strong>Google Drive (G:)</strong> folder appears on your PC</li>
-            <li>Move your app's <strong>Saved Invoices</strong> folder into Google Drive, or set Windows to sync it</li>
-            <li>Done! All PDFs automatically sync to your Google Drive cloud</li>
-          </ol>
-        </div>
-
-        <details style={{ fontSize: '0.85rem' }}>
-          <summary style={{ cursor: 'pointer', color: 'var(--text-muted)', fontSize: '0.82rem', padding: '0.5rem 0' }}>
-            Advanced: Direct API Upload (for developers)
-          </summary>
-          <div style={{ paddingTop: '0.75rem' }}>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="form-group full-width">
-                <label className="form-label">Google OAuth Client ID</label>
-                <input type="text" name="googleClientId" className="form-input" value={profile.googleClientId} onChange={handleChange}
-                  placeholder="xxxx.apps.googleusercontent.com" />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Drive Folder Name</label>
-                <input type="text" name="googleDriveFolder" className="form-input" value={profile.googleDriveFolder} onChange={handleChange}
-                  placeholder="Arth Sutra Invoices" />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Status</label>
-                <div className="flex gap-2 mt-2">
-                  {driveConnected ? (
-                    <>
-                      <span className="status-badge" style={{ background: 'var(--info-bg)', color: 'var(--info-text)' }}>
-                        <Cloud size={14} /> Connected
-                      </span>
-                      <button type="button" className="btn btn-secondary" style={{ padding: '0.4rem 0.75rem', fontSize: '0.8rem' }}
-                        onClick={handleDisconnectDrive}>
-                        <CloudOff size={14} /> Disconnect
-                      </button>
-                    </>
-                  ) : (
-                    <button type="button" className="btn btn-primary" style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
-                      onClick={handleConnectDrive} disabled={connecting}>
-                      <Cloud size={16} /> {connecting ? 'Connecting...' : 'Connect Google Drive'}
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-        </details>
+      <div id="section-backups">
+        <BackupAndTrashPanel
+          key={backupSyncNonce}
+          isAdmin={isAdmin}
+          isAccountant={isAccountant}
+          onBackupTriggered={() => setBackupSyncNonce(n => n + 1)}
+          onRestored={async () => {
+            const p = normalizeIndiaProfile(await getProfile());
+            setProfile(p);
+            if (onSaved) onSaved(p);
+            loadTemplates();
+            loadBusinessProfiles();
+            getInvoiceNumberSettings().then(setInvNumSettings).catch(() => {});
+            getStockAlertSettings().then(setStockAlerts).catch(() => {});
+          }}
+        />
       </div>
+
+      {/* ---- Off-PC Disaster Recovery & Cloud Backup ---- */}
+      <BackupRecoveryPanel
+        key={`cloud-${backupSyncNonce}`}
+        profile={profile}
+        onProfileChange={handleChange}
+        onSaveProfile={saveCurrentProfileFields}
+        onAfterRestore={async () => {
+          const p = normalizeIndiaProfile(await getProfile());
+          setProfile(p);
+          if (onSaved) onSaved(p);
+          loadTemplates();
+          loadBusinessProfiles();
+          getInvoiceNumberSettings().then(setInvNumSettings).catch(() => {});
+          getStockAlertSettings().then(setStockAlerts).catch(() => {});
+          setBackupSyncNonce(n => n + 1);
+        }}
+      />
 
       {/* ---- Data Management ---- */}
       <div id="section-data" className="glass-panel p-6 mb-6">
-        <h3 className="section-title">Data Management</h3>
+        <h3 className="section-title">Portable Backup Export &amp; Restore</h3>
 
         <div className="notice notice-info" style={{ marginBottom: '1rem' }}>
           <span className="notice-icon">🔒</span>
           <div>
-            <strong>Your data is on this computer only.</strong> Nothing is uploaded to
-            us, our servers, or any third party. Files live under <code>data/</code> and <code>Saved Invoices/</code> next to the app.
+            <strong>100% local &amp; yours.</strong> Nothing goes to third-party SaaS servers.
+            Export either a <strong>Recovery Password encrypted</strong> file (<code>.arthbackup</code>) for Google Drive / OneDrive / USB, or a portable <code>.json</code> file, or restore directly from a <code>.sqlite</code> snapshot.
           </div>
         </div>
 
         <p className="page-subtitle mb-6">
-          Choose what to back up or restore. Backup files are plain JSON you can keep on a USB drive, OneDrive, or your own Google Drive.
+          Exported backups decrypt bank details cleanly inside password-protected or portable bundles so they restore on any replacement PC.
         </p>
-        <div className="flex gap-4" style={{ flexWrap: 'wrap' }}>
+        <div className="flex gap-4" style={{ flexWrap: 'wrap', alignItems: 'center' }}>
           <button type="button" className="btn btn-primary" onClick={() => setShowExportModal(true)}><Download size={18} /> Export Backup…</button>
-          <button type="button" className="btn btn-secondary" onClick={() => fileInputRef.current?.click()}><Upload size={18} /> Import Backup…</button>
-          <input ref={fileInputRef} type="file" accept=".json" onChange={handleImportPick} style={{ display: 'none' }} />
+          <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={!isAdmin}
+            title={!isAdmin ? 'Only Admin can restore backups' : undefined}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <Upload size={18} /> Import Backup (.json / .arthbackup / .sqlite)…
+          </button>
+          {!isAdmin && <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>Restore requires Admin role.</span>}
+          <input ref={fileInputRef} type="file" accept=".json,.arthbackup,.sqlite" onChange={handleImportPick} style={{ display: 'none' }} />
         </div>
       </div>
 
@@ -1467,10 +1912,10 @@ export default function SettingsView({ onSaved }) {
         </h3>
 
         <p className="page-subtitle mb-6" style={{ color: 'var(--text-muted)' }}>
-          Update your login username and password credentials.
+          Update your login credentials, manage team RBAC access, and verify cryptographic audit log integrity.
         </p>
 
-        <form onSubmit={handleUpdateCredentials} style={{ maxWidth: '480px' }}>
+        <form onSubmit={handleUpdateCredentials} style={{ maxWidth: '480px', marginBottom: '2rem' }}>
           <div className="mb-4" style={{ marginBottom: '1.25rem' }}>
             <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '0.4rem' }}>
               Current Password <span style={{ color: '#dc2626' }}>*</span>
@@ -1566,6 +2011,174 @@ export default function SettingsView({ onSaved }) {
             {updatingSecurity ? 'Updating Credentials…' : 'Update Credentials'}
           </button>
         </form>
+
+        {/* ---- RBAC User Management (Admin Only) ---- */}
+        <div style={{ borderTop: '1px solid var(--border)', paddingTop: '1.5rem', marginBottom: '1.5rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.75rem' }}>
+            <div>
+              <h4 style={{ margin: 0, fontSize: '0.98rem', display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                <Users size={17} color="var(--primary)" /> Team Users &amp; Roles (RBAC)
+              </h4>
+              <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: '0.2rem 0 0' }}>
+                ADMIN (full control) · ACCOUNTANT (invoicing, purchases, GST, expenses) · CLERK (billing &amp; clients).
+              </p>
+            </div>
+            {isAdmin && (
+              <button type="button" className="btn btn-secondary" style={{ fontSize: '0.78rem', padding: '0.35rem 0.7rem' }} onClick={loadRbacUsers} disabled={loadingUsers}>
+                <RefreshCw size={13} /> {loadingUsers ? 'Refreshing…' : 'Refresh'}
+              </button>
+            )}
+          </div>
+
+          {!isAdmin ? (
+            <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: 0 }}>
+              User management is restricted to <strong>ADMIN</strong> accounts.
+            </p>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '1rem' }}>
+              <form onSubmit={handleCreateRbacUser} style={{ padding: '0.95rem', background: 'var(--bg-secondary)', borderRadius: 8, border: '1px solid var(--border)' }}>
+                <div style={{ fontWeight: 600, fontSize: '0.85rem', marginBottom: '0.65rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <UserPlus size={15} /> Add New User
+                </div>
+                <div className="form-group" style={{ marginBottom: '0.6rem' }}>
+                  <label className="form-label" style={{ fontSize: '0.76rem' }}>Username</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={newUserUsername}
+                    onChange={e => setNewUserUsername(e.target.value)}
+                    placeholder="e.g. billing_clerk"
+                    minLength={3}
+                    required
+                  />
+                </div>
+                <div className="form-group" style={{ marginBottom: '0.6rem' }}>
+                  <label className="form-label" style={{ fontSize: '0.76rem' }}>Password</label>
+                  <input
+                    type="password"
+                    className="form-input"
+                    value={newUserPassword}
+                    onChange={e => setNewUserPassword(e.target.value)}
+                    placeholder="Min 4 characters"
+                    minLength={4}
+                    required
+                  />
+                </div>
+                <div className="form-group" style={{ marginBottom: '0.75rem' }}>
+                  <label className="form-label" style={{ fontSize: '0.76rem' }}>Role</label>
+                  <select className="form-input" value={newUserRole} onChange={e => setNewUserRole(e.target.value)}>
+                    <option value="CLERK">CLERK — Front-desk billing &amp; clients</option>
+                    <option value="ACCOUNTANT">ACCOUNTANT — Billing, purchases &amp; GST</option>
+                    <option value="ADMIN">ADMIN — Full access &amp; backups</option>
+                  </select>
+                </div>
+                <button type="submit" className="btn btn-primary" disabled={creatingUser} style={{ fontSize: '0.82rem' }}>
+                  <UserPlus size={14} /> {creatingUser ? 'Adding…' : 'Create User'}
+                </button>
+              </form>
+
+              <div style={{ padding: '0.95rem', background: 'var(--bg-secondary)', borderRadius: 8, border: '1px solid var(--border)' }}>
+                <div style={{ fontWeight: 600, fontSize: '0.85rem', marginBottom: '0.65rem' }}>
+                  Active Accounts ({rbacUsers.length})
+                </div>
+                {loadingUsers && rbacUsers.length === 0 ? (
+                  <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Loading users…</p>
+                ) : rbacUsers.length === 0 ? (
+                  <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>No users found.</p>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem', maxHeight: 240, overflowY: 'auto' }}>
+                    {rbacUsers.map(u => {
+                      const isSelf = u.id === user?.id;
+                      return (
+                        <div key={u.id} className="surface-card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.5rem 0.7rem', gap: '0.5rem' }}>
+                          <div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                              <strong style={{ fontSize: '0.84rem' }}>{u.username}</strong>
+                              <span style={{
+                                fontSize: '0.66rem', fontWeight: 700, padding: '0.1rem 0.45rem', borderRadius: 999,
+                                background: u.role === 'ADMIN' ? 'rgba(var(--primary-rgb), 0.16)' : 'var(--bg-secondary)',
+                                color: u.role === 'ADMIN' ? 'var(--primary)' : 'var(--text-muted)',
+                                border: '1px solid var(--border)',
+                              }}>
+                                {u.role}
+                              </span>
+                              {isSelf && <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>(you)</span>}
+                            </div>
+                            {u.createdAt && (
+                              <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                                Added {new Date(u.createdAt).toLocaleDateString('en-IN')}
+                              </div>
+                            )}
+                          </div>
+                          {!isSelf && (
+                            <button type="button" className="icon-btn icon-btn-red" onClick={() => handleDeleteRbacUser(u)} title="Remove user">
+                              <Trash2 size={14} />
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ---- Cryptographic Audit Trail Verification ---- */}
+        <div style={{ borderTop: '1px solid var(--border)', paddingTop: '1.5rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
+            <div>
+              <h4 style={{ margin: 0, fontSize: '0.98rem', display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                {auditResult?.valid === false
+                  ? <ShieldAlert size={17} color="#dc2626" />
+                  : <ShieldCheck size={17} color="var(--primary)" />}
+                Cryptographic Audit Trail Verification (SHA-256)
+              </h4>
+              <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: '0.2rem 0 0' }}>
+                Walks the SHA-256 hash chain from GENESIS to verify no bills, inventory, or purchase rows were manually altered in SQLite.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={handleVerifyAudit}
+              disabled={verifyingAudit || !isAdmin}
+              title={!isAdmin ? 'Admin role required to verify audit chain' : undefined}
+            >
+              <RefreshCw size={14} /> {verifyingAudit ? 'Verifying…' : 'Verify Audit Chain'}
+            </button>
+          </div>
+
+          {auditResult && (
+            <div
+              className={`notice ${auditResult.valid ? 'notice-info' : 'notice-danger'}`}
+              style={{ marginTop: '0.85rem', alignItems: 'flex-start' }}
+            >
+              <span className="notice-icon">
+                {auditResult.valid ? <CheckCircle2 size={18} /> : <AlertTriangle size={18} />}
+              </span>
+              <div style={{ fontSize: '0.82rem' }}>
+                {auditResult.valid ? (
+                  <>
+                    <strong>Audit chain verified OK</strong> — {auditResult.totalRecords ?? 0} cryptographic record(s) validated from GENESIS.
+                  </>
+                ) : (
+                  <>
+                    <strong>Audit integrity check failed</strong>
+                    {auditResult.corruptedAtId != null && <> at record #{auditResult.corruptedAtId}</>}:
+                    {' '}{auditResult.reason || auditResult.error || 'Hash chain mismatch detected.'}
+                  </>
+                )}
+                {auditResult.checkedAt && (
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.2rem' }}>
+                    Checked {new Date(auditResult.checkedAt).toLocaleTimeString('en-IN')}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       </div>
@@ -1594,6 +2207,27 @@ export default function SettingsView({ onSaved }) {
             </div>
 
             <label className="cbx-row" style={{ marginTop: '0.5rem' }}>
+              <input type="checkbox" checked={exportEncrypted} onChange={e => setExportEncrypted(e.target.checked)} />
+              <span>
+                <span className="cbx-label"><Lock size={13} style={{ display: 'inline', verticalAlign: '-2px' }} /> Encrypt backup with a Recovery Password (<code>.arthbackup</code>)</span>
+                <span className="cbx-hint">
+                  Recommended if saving to Google Drive, OneDrive, email, or USB. Required to restore on another PC.
+                </span>
+              </span>
+            </label>
+            {exportEncrypted && (
+              <div style={{ margin: '0.4rem 0 0.5rem 1.4rem' }}>
+                <input
+                  type="password"
+                  className="form-input"
+                  value={exportPassword}
+                  onChange={(e) => setExportPassword(e.target.value)}
+                  placeholder="Enter Recovery Password (min 4 chars)"
+                />
+              </div>
+            )}
+
+            <label className="cbx-row" style={{ marginTop: '0.5rem' }}>
               <input type="checkbox" checked={exportToDrive} onChange={e => setExportToDrive(e.target.checked)} />
               <span>
                 <span className="cbx-label">Also save a copy to my Google Drive</span>
@@ -1606,9 +2240,42 @@ export default function SettingsView({ onSaved }) {
             <div className="flex gap-2 justify-end mt-4">
               <button type="button" className="btn btn-secondary" onClick={() => setShowExportModal(false)} disabled={drivePending}>Cancel</button>
               <button type="button" className="btn btn-primary" onClick={runExport} disabled={drivePending || !Object.values(exportSel).some(Boolean)}>
-                {drivePending ? 'Uploading…' : <><Download size={16} /> Download Backup</>}
+                {drivePending ? 'Uploading…' : <><Download size={16} /> {exportEncrypted ? 'Download Encrypted Backup' : 'Download Backup'}</>}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {unlockModal && (
+        <div className="modal-overlay" onClick={() => setUnlockModal(null)}>
+          <div className="modal-content" style={{ maxWidth: '420px' }} onClick={e => e.stopPropagation()}>
+            <h3 className="section-title" style={{ marginTop: 0, display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+              <Lock size={18} /> Unlock Encrypted Backup
+            </h3>
+            <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
+              Enter the Recovery Password for <strong>{unlockModal.file?.name}</strong>.
+            </p>
+            {unlockModal.error && (
+              <div style={{ color: '#dc2626', fontSize: '0.8rem', marginBottom: '0.6rem' }}>{unlockModal.error}</div>
+            )}
+            <form onSubmit={handleUnlockImportModal}>
+              <input
+                type="password"
+                className="form-input"
+                autoFocus
+                value={unlockModal.password}
+                onChange={(e) => setUnlockModal(prev => prev ? { ...prev, password: e.target.value, error: '' } : null)}
+                placeholder="Recovery Password"
+                style={{ width: '100%', marginBottom: '0.85rem' }}
+              />
+              <div className="flex gap-2 justify-end">
+                <button type="button" className="btn btn-secondary" onClick={() => setUnlockModal(null)}>Cancel</button>
+                <button type="submit" className="btn btn-primary" disabled={!unlockModal.password}>
+                  <Unlock size={15} /> Unlock &amp; Preview
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
@@ -1671,10 +2338,10 @@ function EditIcon({ size }) {
   );
 }
 
-function BackupAndTrashPanel() {
+function BackupAndTrashPanel({ isAdmin, isAccountant, onBackupTriggered, onRestored }) {
   const [backups, setBackups] = useState([]);
   const [trash, setTrash] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   const loadAll = async () => {
     setLoading(true);
@@ -1689,25 +2356,47 @@ function BackupAndTrashPanel() {
     setLoading(false);
   };
 
-  useEffect(() => { loadAll(); }, []);
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      getBackupsList().catch(() => []),
+      getTrashedBills().catch(() => []),
+    ]).then(([b, t]) => {
+      if (cancelled) return;
+      setBackups(b);
+      setTrash(t);
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   const handleRestoreBackup = async (date) => {
+    if (!isAdmin) {
+      toast('Only Admin can restore database backups', 'warning');
+      return;
+    }
     if (!await confirmAction({
       title: `Restore all data from backup ${date}?`,
-      message: 'This OVERWRITES your current data. A snapshot of the current state will be taken first.',
+      message: 'This OVERWRITES your current data. A verified safety snapshot of the current state is created automatically before restoring.',
       confirmLabel: 'Restore backup',
       tone: 'warning',
     })) return;
     try {
-      await triggerBackup();
       await restoreBackup(date);
-      toast('Backup restored — please reload the page to see the data', 'success');
+      toast('Backup restored successfully', 'success');
+      await loadAll();
+      if (onRestored) onRestored();
+      if (onBackupTriggered) onBackupTriggered();
     } catch (err) {
       toast('Restore failed: ' + err.message, 'error');
     }
   };
 
   const handleRestoreTrash = async (id) => {
+    if (!isAccountant) {
+      toast('Only Admin or Accountant can restore trashed invoices', 'warning');
+      return;
+    }
     try {
       await restoreTrashedBill(id);
       toast('Invoice restored', 'success');
@@ -1718,6 +2407,10 @@ function BackupAndTrashPanel() {
   };
 
   const handlePurgeTrash = async (id) => {
+    if (!isAdmin) {
+      toast('Only Admin can permanently purge invoices', 'warning');
+      return;
+    }
     if (!await confirmAction({
       title: 'Permanently delete this invoice?',
       message: 'This bypasses the 30-day Trash grace period. The invoice and its PDF are gone for good.',
@@ -1734,6 +2427,10 @@ function BackupAndTrashPanel() {
   };
 
   const handleDeleteBackup = async (date) => {
+    if (!isAdmin) {
+      toast('Only Admin can delete backups', 'warning');
+      return;
+    }
     if (!await confirmAction({
       title: `Delete backup ${date}?`,
       message: 'Auto-backups still run daily. This just removes the archived snapshot.',
@@ -1754,17 +2451,29 @@ function BackupAndTrashPanel() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '1rem', marginBottom: '0.75rem' }}>
         <div>
           <h3 className="section-title" style={{ marginTop: 0, marginBottom: '0.25rem' }}>
-            💾 Backup Management + 🗑 Trash Bin
+            💾 Local Daily Snapshots + 🗑 Trash Bin
           </h3>
           <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: 0 }}>
-            Automatic daily snapshots kept for 30 days · Deleted invoices soft-trash for 30 days.
+            Verified daily SQLite snapshots kept for 30 days on this PC · Deleted invoices soft-trash for 30 days.
           </p>
         </div>
-        <button className="btn btn-secondary" style={{ fontSize: '0.82rem' }}
+        <button type="button" className="btn btn-secondary" style={{ fontSize: '0.82rem' }}
+          disabled={!isAccountant}
           onClick={async () => {
-            await triggerBackup();
-            toast('Manual backup triggered', 'success');
-            loadAll();
+            try {
+              const res = await triggerBackup();
+              if (res?.mirror?.ok) {
+                toast('Snapshot verified & synced to off-PC backup folder!', 'success');
+              } else if (res?.mirror?.error) {
+                toast(`Local snapshot saved, but off-PC sync failed: ${res.mirror.error}`, 'warning');
+              } else {
+                toast('Local snapshot saved & integrity verified', 'success');
+              }
+              loadAll();
+              if (onBackupTriggered) onBackupTriggered();
+            } catch (err) {
+              toast('Backup failed: ' + err.message, 'error');
+            }
           }}>
           <Save size={14} /> Backup now
         </button>
@@ -1774,7 +2483,7 @@ function BackupAndTrashPanel() {
         <div style={{ padding: '0.85rem', background: 'var(--bg-secondary)', borderRadius: 8 }}>
           <h4 style={{ margin: '0 0 0.5rem', fontSize: '0.9rem' }}>📅 Daily backups ({backups.length})</h4>
           {loading && backups.length === 0 && <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>Loading…</p>}
-          {!loading && backups.length === 0 && <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>No backups yet — the first will be created at midnight or click "Backup now" above.</p>}
+          {!loading && backups.length === 0 && <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>No backups yet — click &quot;Backup now&quot; above.</p>}
           <div style={{ maxHeight: 260, overflowY: 'auto' }}>
             {backups.map(b => (
               <div key={b.date} style={{
@@ -1786,18 +2495,21 @@ function BackupAndTrashPanel() {
                   <strong>{b.date}</strong>
                   <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
                     {b.createdAt ? new Date(b.createdAt).toLocaleTimeString('en-IN') : ''}
+                    {b.sizeBytes ? ` · ${(b.sizeBytes / 1024).toFixed(0)} KB` : ''}
                   </div>
                 </div>
-                <div style={{ display: 'flex', gap: '0.25rem' }}>
-                  <button className="btn btn-secondary" style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem' }}
-                    onClick={() => handleRestoreBackup(b.date)}>
-                    Restore
-                  </button>
-                  <button className="btn btn-secondary" style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem', color: '#dc2626', borderColor: '#fca5a5' }}
-                    onClick={() => handleDeleteBackup(b.date)} title="Delete this backup">
-                    Delete
-                  </button>
-                </div>
+                {isAdmin && (
+                  <div style={{ display: 'flex', gap: '0.25rem' }}>
+                    <button type="button" className="btn btn-secondary" style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem' }}
+                      onClick={() => handleRestoreBackup(b.date)}>
+                      Restore
+                    </button>
+                    <button type="button" className="btn btn-secondary" style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem', color: '#dc2626', borderColor: '#fca5a5' }}
+                      onClick={() => handleDeleteBackup(b.date)} title="Delete this backup">
+                      Delete
+                    </button>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -1821,10 +2533,14 @@ function BackupAndTrashPanel() {
                   </div>
                 </div>
                 <div style={{ display: 'flex', gap: '0.25rem' }}>
-                  <button className="btn btn-secondary" style={{ fontSize: '0.7rem', padding: '0.2rem 0.4rem' }}
-                    onClick={() => handleRestoreTrash(bill.id)}>Restore</button>
-                  <button className="btn btn-secondary" style={{ fontSize: '0.7rem', padding: '0.2rem 0.4rem', color: '#dc2626', borderColor: '#fca5a5' }}
-                    onClick={() => handlePurgeTrash(bill.id)}>Delete forever</button>
+                  {isAccountant && (
+                    <button type="button" className="btn btn-secondary" style={{ fontSize: '0.7rem', padding: '0.2rem 0.4rem' }}
+                      onClick={() => handleRestoreTrash(bill.id)}>Restore</button>
+                  )}
+                  {isAdmin && (
+                    <button type="button" className="btn btn-secondary" style={{ fontSize: '0.7rem', padding: '0.2rem 0.4rem', color: '#dc2626', borderColor: '#fca5a5' }}
+                      onClick={() => handlePurgeTrash(bill.id)}>Delete forever</button>
+                  )}
                 </div>
               </div>
             ))}

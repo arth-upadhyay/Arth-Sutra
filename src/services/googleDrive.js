@@ -88,13 +88,19 @@ export function disconnect() {
 export async function findOrCreateFolder(folderName) {
   if (!accessToken) throw new Error('Not connected to Google Drive');
 
+  const safeName = String(folderName || '').replace(/'/g, "\\'");
   // Search for existing folder
   const searchRes = await fetch(
     `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(
-      `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`
+      `name='${safeName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`
     )}&fields=files(id,name)`,
     { headers: { Authorization: `Bearer ${accessToken}` } }
   );
+
+  if (!searchRes.ok) {
+    const err = await searchRes.json().catch(() => ({}));
+    throw new Error(err.error?.message || 'Failed to search Google Drive folders');
+  }
 
   const searchData = await searchRes.json();
   if (searchData.files?.length > 0) {
@@ -113,6 +119,11 @@ export async function findOrCreateFolder(folderName) {
       mimeType: 'application/vnd.google-apps.folder',
     }),
   });
+
+  if (!createRes.ok) {
+    const err = await createRes.json().catch(() => ({}));
+    throw new Error(err.error?.message || 'Failed to create Google Drive folder');
+  }
 
   const folder = await createRes.json();
   return folder.id;
@@ -212,7 +223,36 @@ export async function uploadJSON(fileName, jsonString, folderId) {
   return await res.json();
 }
 
-// v1.10.6 — audit L6: `listBackupsInFolder()` and `downloadFileText()`
-// had no importers. The "Restore from Drive" UI they were built for
-// never landed; the current Drive integration is upload-only. Reintroduce
-// when the restore-from-Drive feature does.
+// List backup files (.arthbackup and .json) inside a Drive folder, newest first.
+export async function listBackupsInFolder(folderId) {
+  if (!accessToken) throw new Error('Not connected to Google Drive');
+  if (!folderId) return [];
+
+  const q = `'${String(folderId).replace(/'/g, "\\'")}' in parents and trashed=false`;
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&orderBy=modifiedTime desc&pageSize=30&fields=files(id,name,modifiedTime,size,mimeType)`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || 'Failed to list Google Drive backups');
+  }
+
+  const data = await res.json();
+  return (data.files || []).filter(f => /\.(json|arthbackup)$/i.test(f.name || ''));
+}
+
+// Download a backup file's text contents from Google Drive.
+export async function downloadFileText(fileId) {
+  if (!accessToken) throw new Error('Not connected to Google Drive');
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || 'Failed to download backup from Google Drive');
+  }
+  return await res.text();
+}

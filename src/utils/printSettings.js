@@ -51,6 +51,13 @@ export const DEFAULT_PRINT_SETTINGS = {
   watermarkAngle: -35,        // degrees; -35 is the diagonal classic
   watermarkFontSize: 90,      // pt
 
+  // -- 2 Bills Per Page (Top & bottom tear sheet: Client Copy + Office Copy) --
+  twoPerPageEnabled: true,
+  twoPerPageShowLabels: true,
+  twoPerPageShowCutLine: true,
+  twoPerPageLeftLabel: 'CLIENT COPY',
+  twoPerPageRightLabel: 'OFFICE / SELF COPY',
+
   // -- Multi-copy print (GST rule 48) --
   multiCopyEnabled: false,
   multiCopyCount: 3,          // 1|2|3 — Original / Duplicate / Triplicate

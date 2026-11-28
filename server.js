@@ -2,8 +2,8 @@ import express from 'express';
 import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import multer from 'multer';
-import Database from 'better-sqlite3';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { eq, ne, sql, desc, asc } from 'drizzle-orm';
@@ -21,12 +21,24 @@ import {
   requestLogs, users,
 } from './db/index.js';
 import { logEvent, verifyAuditChain } from './db/auditEngine.js';
-import { encryptProfileBankDetails, decryptProfileBankDetails } from './utils/crypto.js';
+import { encrypt, safeDecrypt, encryptProfileBankDetails, decryptProfileBankDetails } from './utils/crypto.js';
+import { isEncryptedBackup, encryptBackupBundle, decryptBackupBundle } from './utils/backupCrypto.js';
+import {
+  checkSqliteIntegrity,
+  createSafeSqliteSnapshot,
+  detectCloudFolders,
+  inspectSqliteBackup,
+  mirrorBackupToFolder,
+  restoreSqliteFromFile,
+  todayLocalIso,
+  validateMirrorFolder,
+} from './utils/disasterRecovery.js';
 import { hashPassword, hashPasswordSync, comparePassword, generateToken, verifyToken, ROLES } from './utils/auth.js';
 
 // Note: Automatic admin seeding on startup is disabled in favor of the First-Time Setup Wizard (/api/auth/setup)
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf-8'));
 
 // Port choice — see original comments. 47371 is in IANA's unassigned range.
 const DEFAULT_PORT = 47371;
@@ -45,6 +57,9 @@ const MAX_PORT_SCAN = 50;
 const app = express();
 let activeServer = null;
 let wss = null;
+let __autoMirrorTimer = null;
+let __backupInFlight = false;
+let __pendingResync = false;
 
 function broadcast(type, data) {
   if (!wss || !wss.clients) return;
@@ -58,10 +73,15 @@ function broadcast(type, data) {
   }
 }
 
-// ── Multer in-memory storage for GSTR-2B file uploads ─────────────────────
+// ── Multer in-memory storage for GSTR-2B and backup file uploads ───────────
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 }, // 25MB limit
+});
+
+const backupUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB limit for .sqlite / .arthbackup / .json
 });
 
 // ── Authentication & RBAC Middlewares ──────────────────────────────────────
@@ -114,7 +134,28 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: '5mb' }));
+app.use(express.json({ limit: '50mb' }));
+
+// ── Debounced Auto-Mirror Hook for Disaster Recovery ──────────────────────
+const MUTATING_DATA_PREFIXES = [
+  '/api/bills', '/api/clients', '/api/products', '/api/purchases',
+  '/api/expenses', '/api/receipts', '/api/profile', '/api/profiles',
+  '/api/templates', '/api/recurring', '/api/trash', '/api/save-pdf', '/api/import',
+  '/api/meta/invoiceNumberSettings', '/api/meta/stockAlertSettings',
+  '/api/meta/invoiceDisplayOptions', '/api/meta/enabledModules',
+];
+app.use((req, res, next) => {
+  if (['POST', 'PUT', 'DELETE'].includes(req.method.toUpperCase())) {
+    if (MUTATING_DATA_PREFIXES.some(pfx => req.path.startsWith(pfx))) {
+      res.on('finish', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          scheduleAutoMirror();
+        }
+      });
+    }
+  }
+  next();
+});
 
 // ── Backend Idempotency Middleware (for Offline PWA Write-Behind) ───────────
 app.use((req, res, next) => {
@@ -235,6 +276,87 @@ app.post('/api/auth/setup', async (req, res) => {
     });
   } catch (err) {
     errRes(res, 500, 'server-error', err);
+  }
+});
+
+// First-Time Crash Recovery / New PC Restore: ONLY enabled when database has 0 users
+app.post('/api/auth/setup-inspect-backup', backupUpload.single('file'), async (req, res) => {
+  try {
+    const countRow = sqlite.prepare('SELECT COUNT(*) as count FROM users').get();
+    if (countRow && Number(countRow.count) > 0) {
+      return res.status(403).json({ error: 'Setup has already been completed. Sign in to restore backups from Settings.' });
+    }
+    const result = await inspectUploadedBackupInput({
+      fileBuffer: req.file?.buffer || null,
+      text: req.body?.text || null,
+      password: req.body?.password || '',
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Unable to inspect backup file' });
+  }
+});
+
+app.post('/api/auth/setup-restore', backupUpload.single('file'), async (req, res) => {
+  try {
+    const countRow = sqlite.prepare('SELECT COUNT(*) as count FROM users').get();
+    if (countRow && Number(countRow.count) > 0) {
+      return res.status(403).json({ error: 'Setup has already been completed. Sign in to restore backups from Settings.' });
+    }
+
+    const password = req.body?.password || '';
+    const adminUsername = (req.body?.adminUsername || '').trim();
+    const adminPassword = req.body?.adminPassword || '';
+
+    let selection = null;
+    if (req.body?.selection) {
+      try { selection = typeof req.body.selection === 'string' ? JSON.parse(req.body.selection) : req.body.selection; }
+      catch { selection = null; }
+    }
+
+    const restored = await restoreUploadedBackupInput({
+      fileBuffer: req.file?.buffer || null,
+      text: req.body?.text || null,
+      password,
+      overwrite: true,
+      selection,
+      allowUsers: true,
+    });
+
+    // If the restored backup didn't include any user accounts (e.g. legacy JSON export),
+    // create the administrator account supplied by the user right away.
+    let userCount = Number(sqlite.prepare('SELECT COUNT(*) as c FROM users').get()?.c || 0);
+    let token = null;
+    let user = null;
+
+    if (userCount === 0 && adminUsername && adminPassword) {
+      if (adminPassword.length < 4) {
+        return res.status(400).json({ error: 'Password must be at least 4 characters long' });
+      }
+      const passwordHash = await hashPassword(adminPassword);
+      const insertRes = db.insert(users).values({
+        username: adminUsername,
+        passwordHash,
+        role: 'ADMIN',
+        createdAt: new Date().toISOString(),
+      }).run();
+      const created = db.select().from(users).where(eq(users.id, Number(insertRes.lastInsertRowid))).get();
+      token = generateToken(created);
+      user = { id: created.id, username: created.username, role: created.role };
+      userCount = 1;
+    }
+
+    const usernames = db.select({ username: users.username, role: users.role }).from(users).all();
+    res.json({
+      success: true,
+      ...restored,
+      hasUsers: userCount > 0,
+      restoredUsernames: usernames.map(u => u.username),
+      token,
+      user,
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Restore failed' });
   }
 });
 
@@ -446,7 +568,15 @@ function setMetaValue(key, value) {
 // the full object so the API response is identical to the old JSON-file one.
 
 function billRowToObj(row) {
-  try { return JSON.parse(row.data); } catch { return {}; }
+  try {
+    const obj = JSON.parse(row.data);
+    if (obj && obj.profile) {
+      obj.profile = decryptProfileBankDetails(obj.profile);
+    }
+    return obj;
+  } catch {
+    return {};
+  }
 }
 
 // ── DB helper: reconstruct a purchase/recurring object from a row ─────────
@@ -490,10 +620,116 @@ function productRowToObj(row) {
   };
 }
 
-function profileRowToObj(row) {
+const DEFAULT_PROFILE = {
+  businessName: '',
+  tagline: '',
+  address: '',
+  city: '',
+  pin: '',
+  state: '',
+  country: 'India',
+  gstin: '',
+  pan: '',
+  licence: '',
+  email: '',
+  phone: '',
+  bankName: '',
+  accountNumber: '',
+  ifsc: '',
+  swift: '',
+  logo: '',
+  logoHeight: 48,
+  signature: '',
+  upiId: '',
+  googleClientId: '',
+  googleDriveFolder: 'Arth Sutra Invoices',
+  paymentAccounts: [],
+  aatoAbove5Cr: false,
+  prevFYTurnover: '',
+  currentFYTurnover: '',
+};
+
+/**
+ * Normalizes a business profile payload or database record to canonical Indian defaults.
+ */
+function normalizeProfile(raw = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const accounts = typeof src.paymentAccounts === 'string'
+    ? safeParseJSON(src.paymentAccounts, [])
+    : (Array.isArray(src.paymentAccounts) ? src.paymentAccounts : []);
+  const parsedLogoHeight = Number(src.logoHeight);
+
   return {
+    ...DEFAULT_PROFILE,
+    ...src,
+    businessName: String(src.businessName ?? ''),
+    tagline: String(src.tagline ?? ''),
+    address: String(src.address ?? ''),
+    city: String(src.city ?? ''),
+    pin: String(src.pin ?? ''),
+    state: String(src.state ?? ''),
+    country: 'India',
+    gstin: String(src.gstin ?? ''),
+    pan: String(src.pan ?? ''),
+    licence: String(src.licence ?? src.licenceNo ?? ''),
+    email: String(src.email ?? ''),
+    phone: String(src.phone ?? ''),
+    bankName: String(src.bankName ?? ''),
+    accountNumber: String(src.accountNumber ?? ''),
+    ifsc: String(src.ifsc ?? ''),
+    swift: String(src.swift ?? ''),
+    logo: String(src.logo ?? ''),
+    logoHeight: Number.isFinite(parsedLogoHeight) && parsedLogoHeight >= 16 ? parsedLogoHeight : 48,
+    signature: String(src.signature ?? ''),
+    upiId: String(src.upiId ?? ''),
+    googleClientId: String(src.googleClientId ?? ''),
+    googleDriveFolder: String(src.googleDriveFolder || 'Arth Sutra Invoices'),
+    paymentAccounts: accounts,
+    aatoAbove5Cr: Boolean(src.aatoAbove5Cr),
+    prevFYTurnover: src.prevFYTurnover ?? '',
+    currentFYTurnover: src.currentFYTurnover ?? '',
+  };
+}
+
+function profileToDbValues(encrypted) {
+  return {
+    id: encrypted.id,
+    businessName: encrypted.businessName || '',
+    tagline: encrypted.tagline || '',
+    address: encrypted.address || '',
+    city: encrypted.city || '',
+    pin: encrypted.pin || '',
+    state: encrypted.state || '',
+    country: 'India',
+    gstin: encrypted.gstin || '',
+    pan: encrypted.pan || '',
+    licence: encrypted.licence || '',
+    email: encrypted.email || '',
+    phone: encrypted.phone || '',
+    bankName: encrypted.bankName || '',
+    accountNumber: encrypted.accountNumber || '',
+    ifsc: encrypted.ifsc || '',
+    swift: encrypted.swift || '',
+    logo: encrypted.logo || '',
+    logoHeight: Number(encrypted.logoHeight) || 48,
+    signature: encrypted.signature || '',
+    upiId: encrypted.upiId || '',
+    googleClientId: encrypted.googleClientId || '',
+    googleDriveFolder: encrypted.googleDriveFolder || 'Arth Sutra Invoices',
+    paymentAccounts: typeof encrypted.paymentAccounts === 'string'
+      ? encrypted.paymentAccounts
+      : JSON.stringify(encrypted.paymentAccounts || []),
+    aatoAbove5Cr: Boolean(encrypted.aatoAbove5Cr),
+    prevFYTurnover: String(encrypted.prevFYTurnover ?? ''),
+    currentFYTurnover: String(encrypted.currentFYTurnover ?? ''),
+  };
+}
+
+function profileRowToObj(row) {
+  return normalizeProfile({
     id: row.id,
     businessName: row.businessName,
+    tagline: row.tagline,
     address: row.address,
     city: row.city,
     pin: row.pin,
@@ -501,6 +737,7 @@ function profileRowToObj(row) {
     country: row.country,
     gstin: row.gstin,
     pan: row.pan,
+    licence: row.licence,
     email: row.email,
     phone: row.phone,
     bankName: row.bankName,
@@ -508,12 +745,16 @@ function profileRowToObj(row) {
     ifsc: row.ifsc,
     swift: row.swift,
     logo: row.logo,
+    logoHeight: row.logoHeight,
     signature: row.signature,
     upiId: row.upiId,
     googleClientId: row.googleClientId,
     googleDriveFolder: row.googleDriveFolder,
     paymentAccounts: safeParseJSON(row.paymentAccounts, []),
-  };
+    aatoAbove5Cr: row.aatoAbove5Cr,
+    prevFYTurnover: row.prevFYTurnover,
+    currentFYTurnover: row.currentFYTurnover,
+  });
 }
 
 function recurringRowToObj(row) {
@@ -651,7 +892,7 @@ function findCreditDependents(billId) {
 
 app.delete('/api/bills/:id', (req, res) => {
   const id = req.params.id;
-  const existing = db.select({ id: bills.id }).from(bills).where(eq(bills.id, id)).get();
+  const existing = db.select().from(bills).where(eq(bills.id, id)).get();
   if (!existing) return res.json({ success: true });
 
   // Credit dependency check
@@ -682,6 +923,10 @@ app.delete('/api/bills/:id', (req, res) => {
       }
     });
 
+    if (req.query.permanent === '1') {
+      deleteBillPdfEverywhere(existing);
+    }
+
     broadcast('BILL_DELETED', { id, permanent: req.query.permanent === '1', trashed: req.query.permanent !== '1' });
 
     if (req.query.permanent === '1') {
@@ -697,19 +942,14 @@ app.delete('/api/bills/:id', (req, res) => {
 // PROFILE (singleton — stored in meta table with key 'profile')
 // ════════════════════════════════════════════════════════════════════════════
 
-const DEFAULT_PROFILE = {
-  businessName: '', address: '', state: '', gstin: '', pan: '',
-  email: '', phone: '', bankName: '', accountNumber: '', ifsc: '',
-  logo: '', signature: '', upiId: '', googleClientId: '', googleDriveFolder: 'Arth Sutra Invoices',
-};
-
 app.get('/api/profile', (req, res) => {
   const raw = getMetaValue('profile', DEFAULT_PROFILE);
-  res.json(decryptProfileBankDetails(raw));
+  res.json(normalizeProfile(decryptProfileBankDetails(raw)));
 });
 
 app.post('/api/profile', requireAuth, requireRole(['ADMIN', 'ACCOUNTANT']), (req, res) => {
-  const encrypted = encryptProfileBankDetails(req.body);
+  const normalized = normalizeProfile(req.body);
+  const encrypted = encryptProfileBankDetails(normalized);
   setMetaValue('profile', encrypted);
   res.json({ success: true });
 });
@@ -722,44 +962,36 @@ app.get('/api/clients', (req, res) => {
   const rows = db.select().from(clients).orderBy(asc(clients.name)).all();
   res.json(rows.map(r => ({
     id: r.id, name: r.name, address: r.address, city: r.city, pin: r.pin,
-    state: r.state, gstin: r.gstin, country: r.country, email: r.email,
-    phone: r.phone, isSEZ: r.isSEZ, licence: r.licence,
+    state: r.state, gstin: r.gstin, country: (r.country || '').trim() || 'India',
+    email: r.email, phone: r.phone, isSEZ: r.isSEZ, licence: r.licence,
   })));
 });
 
 app.post('/api/clients', (req, res) => {
   const client = req.body;
   if (!client.id) client.id = 'cli_' + Date.now();
-  db.insert(clients).values({
-    id: client.id,
+  const normalizedCountry = (client.country || '').trim() || 'India';
+  const clientValues = {
     name: client.name || '',
     address: client.address || '',
     city: client.city || '',
     pin: client.pin || '',
     state: client.state || '',
     gstin: client.gstin || '',
-    country: client.country || '',
+    country: normalizedCountry,
     email: client.email || '',
     phone: client.phone || '',
     isSEZ: !!client.isSEZ,
     licence: client.licence || '',
+  };
+  db.insert(clients).values({
+    id: client.id,
+    ...clientValues,
   }).onConflictDoUpdate({
     target: clients.id,
-    set: {
-      name: client.name || '',
-      address: client.address || '',
-      city: client.city || '',
-      pin: client.pin || '',
-      state: client.state || '',
-      gstin: client.gstin || '',
-      country: client.country || '',
-      email: client.email || '',
-      phone: client.phone || '',
-      isSEZ: !!client.isSEZ,
-      licence: client.licence || '',
-    },
+    set: clientValues,
   }).run();
-  broadcast('CLIENT_UPDATED', client);
+  broadcast('CLIENT_UPDATED', { ...client, country: normalizedCountry });
   res.json({ success: true, id: client.id });
 });
 
@@ -1120,56 +1352,14 @@ app.get('/api/profiles', (req, res) => {
 });
 
 app.post('/api/profiles', requireAuth, requireRole(['ADMIN', 'ACCOUNTANT']), (req, res) => {
-  const prof = req.body;
+  const prof = normalizeProfile(req.body);
   if (!prof.id) prof.id = 'biz_' + Date.now();
   const encrypted = encryptProfileBankDetails(prof);
+  const dbValues = profileToDbValues(encrypted);
 
-  db.insert(profiles).values({
-    id: encrypted.id,
-    businessName: encrypted.businessName || '',
-    address: encrypted.address || '',
-    city: encrypted.city || '',
-    pin: encrypted.pin || '',
-    state: encrypted.state || '',
-    country: encrypted.country || '',
-    gstin: encrypted.gstin || '',
-    pan: encrypted.pan || '',
-    email: encrypted.email || '',
-    phone: encrypted.phone || '',
-    bankName: encrypted.bankName || '',
-    accountNumber: encrypted.accountNumber || '',
-    ifsc: encrypted.ifsc || '',
-    swift: encrypted.swift || '',
-    logo: encrypted.logo || '',
-    signature: encrypted.signature || '',
-    upiId: encrypted.upiId || '',
-    googleClientId: encrypted.googleClientId || '',
-    googleDriveFolder: encrypted.googleDriveFolder || 'Arth Sutra Invoices',
-    paymentAccounts: typeof encrypted.paymentAccounts === 'string' ? encrypted.paymentAccounts : JSON.stringify(encrypted.paymentAccounts || []),
-  }).onConflictDoUpdate({
+  db.insert(profiles).values(dbValues).onConflictDoUpdate({
     target: profiles.id,
-    set: {
-      businessName: encrypted.businessName || '',
-      address: encrypted.address || '',
-      city: encrypted.city || '',
-      pin: encrypted.pin || '',
-      state: encrypted.state || '',
-      country: encrypted.country || '',
-      gstin: encrypted.gstin || '',
-      pan: encrypted.pan || '',
-      email: encrypted.email || '',
-      phone: encrypted.phone || '',
-      bankName: encrypted.bankName || '',
-      accountNumber: encrypted.accountNumber || '',
-      ifsc: encrypted.ifsc || '',
-      swift: encrypted.swift || '',
-      logo: encrypted.logo || '',
-      signature: encrypted.signature || '',
-      upiId: encrypted.upiId || '',
-      googleClientId: encrypted.googleClientId || '',
-      googleDriveFolder: encrypted.googleDriveFolder || 'Arth Sutra Invoices',
-      paymentAccounts: typeof encrypted.paymentAccounts === 'string' ? encrypted.paymentAccounts : JSON.stringify(encrypted.paymentAccounts || []),
-    },
+    set: dbValues,
   }).run();
   res.json({ success: true, id: encrypted.id });
 });
@@ -1183,22 +1373,41 @@ app.delete('/api/profiles/:id', requireAuth, requireRole(['ADMIN']), (req, res) 
 // META (counters, settings)
 // ════════════════════════════════════════════════════════════════════════════
 
+const PROTECTED_META_KEYS = new Set(['profile', 'backupConfig']);
+
 app.get('/api/meta/:key', (req, res) => {
+  if (PROTECTED_META_KEYS.has(req.params.key)) {
+    return errRes(res, 403, 'forbidden');
+  }
   const val = getMetaValue(req.params.key, null);
   res.json({ value: val });
 });
 
 app.post('/api/meta/:key', (req, res) => {
+  if (PROTECTED_META_KEYS.has(req.params.key)) {
+    return errRes(res, 403, 'forbidden');
+  }
   setMetaValue(req.params.key, req.body.value);
   res.json({ success: true });
 });
 
 // Atomic increment — better-sqlite3 is synchronous so this is race-free.
 app.post('/api/meta/:key/increment', (req, res) => {
+  if (PROTECTED_META_KEYS.has(req.params.key)) {
+    return errRes(res, 403, 'forbidden');
+  }
   // Wrap in a transaction for ACID safety
   const result = sqlite.transaction(() => {
     const row = db.select().from(meta).where(eq(meta.key, req.params.key)).get();
-    const current = Number(row?.value || 0);
+    let startBase = 0;
+    if (req.params.key.startsWith('counter_')) {
+      const invCfg = getMetaValue('invoiceNumberSettings', null);
+      const startNum = parseInt(invCfg?.startNumber, 10);
+      if (Number.isFinite(startNum) && startNum > 1) {
+        startBase = startNum - 1;
+      }
+    }
+    const current = Math.max(Number(row?.value || 0), startBase);
     const next = current + 1;
     setMetaValue(req.params.key, next);
     return next;
@@ -1207,37 +1416,57 @@ app.post('/api/meta/:key/increment', (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// EXPORT / IMPORT
+// EXPORT / IMPORT (Portable — decrypts bank details on export, re-encrypts on import)
 // ════════════════════════════════════════════════════════════════════════════
 
-app.get('/api/export', (req, res) => {
-  const data = {
+function buildPortableExportPayload({ includeRecoveryMeta = false } = {}) {
+  const rawProfile = getMetaValue('profile', DEFAULT_PROFILE);
+  const metaObj = {};
+  for (const row of db.select().from(meta).all()) {
+    if (row.key === 'profile' || row.key === 'backupConfig') continue;
+    try { metaObj[row.key] = JSON.parse(row.value); } catch { metaObj[row.key] = row.value; }
+  }
+
+  const payload = {
+    __arthsutra_backup: true,
+    version:        pkg.version,
     bills:          db.select().from(bills).where(eq(bills.isTrashed, false)).all().map(billRowToObj),
-    profile:        getMetaValue('profile', DEFAULT_PROFILE),
-    clients:        db.select().from(clients).all().map(r => ({ id: r.id, name: r.name, address: r.address, city: r.city, pin: r.pin, state: r.state, gstin: r.gstin, country: r.country, email: r.email, phone: r.phone, isSEZ: r.isSEZ, licence: r.licence })),
+    profile:        normalizeProfile(decryptProfileBankDetails(rawProfile)),
+    clients:        db.select().from(clients).all().map(r => ({ id: r.id, name: r.name, address: r.address, city: r.city, pin: r.pin, state: r.state, gstin: r.gstin, country: (r.country || '').trim() || 'India', email: r.email, phone: r.phone, isSEZ: r.isSEZ, licence: r.licence })),
     termsTemplates: db.select().from(templates).all().map(r => ({ id: r.id, name: r.name, content: r.content })),
     products:       db.select().from(products).all().map(productRowToObj),
     expenses:       db.select().from(expenses).all().map(r => ({ id: r.id, date: r.date, description: r.description, category: r.category, amount: r.amount, gstAmount: r.gstAmount, gstPercent: r.gstPercent, vendorName: r.vendorName, vendorGstin: r.vendorGstin, invoiceNo: r.invoiceNo, paymentMode: r.paymentMode, interstate: r.interstate, note: r.note })),
     recurring:      db.select().from(recurring).all().map(recurringRowToObj),
     receipts:       db.select().from(receipts).all().map(r => ({ id: r.id, date: r.date, receiptNo: r.receiptNo, clientName: r.clientName, clientAddress: r.clientAddress, amount: r.amount, paymentMode: r.paymentMode, referenceNo: r.referenceNo, againstInvoice: r.againstInvoice, note: r.note, currency: r.currency, source: r.source, billId: r.billId })),
-    profiles:       db.select().from(profiles).all().map(profileRowToObj),
+    profiles:       db.select().from(profiles).all().map(profileRowToObj).map(decryptProfileBankDetails),
     purchases:      db.select().from(purchases).all().map(purchaseRowToObj),
-    meta:           (() => {
-      const obj = {};
-      for (const row of db.select().from(meta).all()) {
-        if (row.key === 'profile') continue; // exported separately above
-        try { obj[row.key] = JSON.parse(row.value); } catch { obj[row.key] = row.value; }
-      }
-      return obj;
-    })(),
-    exportedAt: new Date().toISOString(),
+    meta:           metaObj,
+    exportedAt:     new Date().toISOString(),
   };
-  res.json(data);
-});
 
-app.post('/api/import', (req, res) => {
-  const data = req.body;
-  const overwrite = req.query.overwrite === '1' || req.query.overwrite === 'true';
+  if (includeRecoveryMeta) {
+    payload.trashedBills = db.select().from(bills).where(eq(bills.isTrashed, true)).all().map(billRowToObj);
+    payload.users = db.select().from(users).all().map(u => ({
+      username: u.username,
+      passwordHash: u.passwordHash,
+      role: u.role,
+      createdAt: u.createdAt,
+    }));
+    payload.auditLogs = db.select().from(auditLogs).orderBy(asc(auditLogs.id)).all().map(a => ({
+      entityType: a.entityType,
+      entityId: a.entityId,
+      action: a.action,
+      payload: a.payload,
+      previousHash: a.previousHash,
+      currentHash: a.currentHash,
+      timestamp: a.timestamp,
+    }));
+  }
+
+  return payload;
+}
+
+function applyPortableImportData(data, { overwrite = false, allowUsers = false } = {}) {
   const counts = {
     billCount: 0, billSkipped: 0,
     clientCount: 0, clientSkipped: 0,
@@ -1248,12 +1477,10 @@ app.post('/api/import', (req, res) => {
     receiptCount: 0, receiptSkipped: 0,
     profileCount: 0, profileSkipped: 0,
     purchaseCount: 0, purchaseSkipped: 0,
+    userCount: 0,
   };
 
-  // Wrap the entire import in a transaction for ACID compliance
   sqlite.transaction(() => {
-
-    // Helper: upsert one entity, honouring the overwrite flag.
     const upsertEntity = (table, idField, entity, buildValues, countKey, skipKey) => {
       if (!entity?.id) return;
       if (!overwrite) {
@@ -1265,21 +1492,20 @@ app.post('/api/import', (req, res) => {
       counts[countKey]++;
     };
 
-    // Profile singleton
     if (data.profile) {
       if (overwrite || !getMetaValue('profile', null)) {
-        setMetaValue('profile', data.profile);
+        setMetaValue('profile', encryptProfileBankDetails(normalizeProfile(data.profile)));
       }
     }
 
-    // Bills
-    for (const b of (data.bills || [])) {
-      if (!b?.id) continue;
+    const upsertBillRecord = (b, isTrashedFlag) => {
+      if (!b?.id) return;
       if (!overwrite) {
         const existing = db.select({ id: bills.id }).from(bills).where(eq(bills.id, b.id)).get();
-        if (existing) { counts.billSkipped++; continue; }
+        if (existing) { counts.billSkipped++; return; }
       }
-      db.insert(bills).values({
+      const encryptedBill = b.profile ? { ...b, profile: encryptProfileBankDetails(b.profile) } : b;
+      const values = {
         id: b.id, clientName: b.clientName || '', invoiceNumber: b.invoiceNumber || b.id,
         invoiceDate: b.invoiceDate || '', invoiceType: b.invoiceType || 'tax-invoice',
         currency: b.currency || 'INR', totalAmount: b.totalAmount || 0,
@@ -1287,40 +1513,32 @@ app.post('/api/import', (req, res) => {
         paidAmount: b.paidAmount || 0, printedCount: b.printedCount || 0,
         lastPrintedAt: b.lastPrintedAt || null, generatedFrom: b.generatedFrom || null,
         autoGenerated: !!b.autoGenerated, autoGeneratedAt: b.autoGeneratedAt || null,
-        isTrashed: false, trashedAt: null, data: JSON.stringify(b),
-      }).onConflictDoUpdate({
-        target: bills.id,
-        set: {
-          clientName: b.clientName || '', invoiceNumber: b.invoiceNumber || b.id,
-          invoiceDate: b.invoiceDate || '', invoiceType: b.invoiceType || 'tax-invoice',
-          currency: b.currency || 'INR', totalAmount: b.totalAmount || 0,
-          totalTaxAmount: b.totalTaxAmount || 0, status: b.status || 'unpaid',
-          paidAmount: b.paidAmount || 0, printedCount: b.printedCount || 0,
-          lastPrintedAt: b.lastPrintedAt || null, generatedFrom: b.generatedFrom || null,
-          autoGenerated: !!b.autoGenerated, autoGeneratedAt: b.autoGeneratedAt || null,
-          isTrashed: false, trashedAt: null, data: JSON.stringify(b),
-        },
-      }).run();
-      counts.billCount++;
-    }
+        isTrashed: Boolean(isTrashedFlag),
+        trashedAt: isTrashedFlag ? (b.trashedAt || b._trashedAt || new Date().toISOString()) : null,
+        data: JSON.stringify(encryptedBill),
+      };
+      db.insert(bills).values(values).onConflictDoUpdate({ target: bills.id, set: values }).run();
+      if (!isTrashedFlag) counts.billCount++;
+    };
 
-    // Clients
+    for (const b of (data.bills || [])) upsertBillRecord(b, false);
+    for (const tb of (data.trashedBills || [])) upsertBillRecord(tb, true);
+
     for (const c of (data.clients || [])) {
       upsertEntity(clients, clients.id, c, (e) => ({
         id: e.id, name: e.name || '', address: e.address || '', city: e.city || '',
-        pin: e.pin || '', state: e.state || '', gstin: e.gstin || '', country: e.country || '',
+        pin: e.pin || '', state: e.state || '', gstin: e.gstin || '',
+        country: (e.country || '').trim() || 'India',
         email: e.email || '', phone: e.phone || '', isSEZ: !!e.isSEZ, licence: e.licence || '',
       }), 'clientCount', 'clientSkipped');
     }
 
-    // Templates
     for (const t of (data.termsTemplates || [])) {
       upsertEntity(templates, templates.id, t, (e) => ({
         id: e.id, name: e.name || '', content: e.content || '',
       }), 'templateCount', 'templateSkipped');
     }
 
-    // Products
     for (const p of (data.products || [])) {
       upsertEntity(products, products.id, p, (e) => ({
         id: e.id, name: e.name || '', hsn: e.hsn || '',
@@ -1332,7 +1550,6 @@ app.post('/api/import', (req, res) => {
       }), 'productCount', 'productSkipped');
     }
 
-    // Expenses
     for (const e of (data.expenses || [])) {
       upsertEntity(expenses, expenses.id, e, (x) => ({
         id: x.id, date: x.date || '', description: x.description || '',
@@ -1343,7 +1560,6 @@ app.post('/api/import', (req, res) => {
       }), 'expenseCount', 'expenseSkipped');
     }
 
-    // Recurring
     for (const r of (data.recurring || [])) {
       upsertEntity(recurring, recurring.id, r, (e) => ({
         id: e.id, active: e.active !== false, clientName: e.clientName || '',
@@ -1352,7 +1568,6 @@ app.post('/api/import', (req, res) => {
       }), 'recurringCount', 'recurringSkipped');
     }
 
-    // Receipts
     for (const r of (data.receipts || [])) {
       upsertEntity(receipts, receipts.id, r, (e) => ({
         id: e.id, date: e.date || '', receiptNo: e.receiptNo || '',
@@ -1364,22 +1579,13 @@ app.post('/api/import', (req, res) => {
       }), 'receiptCount', 'receiptSkipped');
     }
 
-    // Profiles (multi-business)
     for (const p of (data.profiles || [])) {
-      upsertEntity(profiles, profiles.id, p, (e) => ({
-        id: e.id, businessName: e.businessName || '', address: e.address || '',
-        city: e.city || '', pin: e.pin || '', state: e.state || '',
-        country: e.country || '', gstin: e.gstin || '', pan: e.pan || '',
-        email: e.email || '', phone: e.phone || '', bankName: e.bankName || '',
-        accountNumber: e.accountNumber || '', ifsc: e.ifsc || '', swift: e.swift || '',
-        logo: e.logo || '', signature: e.signature || '', upiId: e.upiId || '',
-        googleClientId: e.googleClientId || '',
-        googleDriveFolder: e.googleDriveFolder || 'Arth Sutra Invoices',
-        paymentAccounts: JSON.stringify(e.paymentAccounts || []),
-      }), 'profileCount', 'profileSkipped');
+      upsertEntity(profiles, profiles.id, p, (rawProf) => {
+        const e = encryptProfileBankDetails(normalizeProfile(rawProf));
+        return profileToDbValues(e);
+      }, 'profileCount', 'profileSkipped');
     }
 
-    // Purchases
     for (const p of (data.purchases || [])) {
       upsertEntity(purchases, purchases.id, p, (e) => ({
         id: e.id, date: e.date || '', supplierName: e.supplierName || '',
@@ -1392,21 +1598,63 @@ app.post('/api/import', (req, res) => {
       }), 'purchaseCount', 'purchaseSkipped');
     }
 
-    // Meta
-    if (data.meta) {
-      if (overwrite || db.select().from(meta).all().length === 0) {
+    if (data.meta && typeof data.meta === 'object') {
+      const nonProfileMetaCount = db.select().from(meta).all().filter(r => r.key !== 'profile' && r.key !== 'backupConfig').length;
+      if (overwrite || nonProfileMetaCount === 0) {
         for (const [key, value] of Object.entries(data.meta)) {
+          if (key === 'profile' || key === 'backupConfig') continue;
           setMetaValue(key, value);
         }
       }
     }
 
-    // Post-import counter reconciliation (same logic as original)
+    if (allowUsers && Array.isArray(data.users) && data.users.length > 0) {
+      const existingUsersCount = Number(sqlite.prepare('SELECT COUNT(*) as c FROM users').get()?.c || 0);
+      if (overwrite || existingUsersCount === 0) {
+        if (overwrite) sqlite.exec('DELETE FROM users');
+        for (const u of data.users) {
+          if (!u?.username || !u?.passwordHash) continue;
+          db.insert(users).values({
+            username: u.username,
+            passwordHash: u.passwordHash,
+            role: ['ADMIN', 'ACCOUNTANT', 'CLERK'].includes(u.role) ? u.role : 'CLERK',
+            createdAt: u.createdAt || new Date().toISOString(),
+          }).onConflictDoNothing().run();
+          counts.userCount++;
+        }
+      }
+    }
+
+    if (Array.isArray(data.auditLogs) && data.auditLogs.length > 0) {
+      const existingAuditCount = Number(sqlite.prepare('SELECT COUNT(*) as c FROM audit_logs').get()?.c || 0);
+      if (overwrite || existingAuditCount === 0) {
+        sqlite.exec('DELETE FROM audit_logs');
+        const insAudit = sqlite.prepare(`
+          INSERT INTO audit_logs (entity_type, entity_id, action, payload, previous_hash, current_hash, timestamp)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `);
+        for (const a of data.auditLogs) {
+          if (!a?.currentHash || !a?.previousHash) continue;
+          insAudit.run(
+            a.entityType || 'bill',
+            String(a.entityId || ''),
+            a.action || 'CREATE',
+            typeof a.payload === 'string' ? a.payload : JSON.stringify(a.payload || {}),
+            a.previousHash,
+            a.currentHash,
+            a.timestamp || new Date().toISOString()
+          );
+        }
+      }
+    }
+
+    // Post-import counter reconciliation
     const allBills = db.select({ data: bills.data }).from(bills)
       .where(eq(bills.isTrashed, false)).all();
     const maxByPrefix = {};
     for (const row of allBills) {
-      const bill = billRowToObj(row);
+      let bill = {};
+      try { bill = JSON.parse(row.data); } catch { /* ignore */ }
       const num = String(bill?.invoiceNumber || bill?.id || '');
       const m = num.match(/^([A-Z]+)[\W_].*?(\d+)\s*$/i);
       if (!m) continue;
@@ -1422,14 +1670,31 @@ app.post('/api/import', (req, res) => {
     }
   })();
 
-  res.json({ ...counts, hasProfile: !!data.profile });
+  return { ...counts, hasProfile: !!data.profile };
+}
+
+app.get('/api/export', requireAuth, requireRole(['ADMIN', 'ACCOUNTANT']), (req, res) => {
+  const includeRecoveryMeta = req.query.includeRecovery === '1' || req.query.includeRecovery === 'true';
+  res.json(buildPortableExportPayload({ includeRecoveryMeta }));
+});
+
+app.post('/api/import', requireAuth, requireRole(['ADMIN']), (req, res) => {
+  const data = req.body;
+  const overwrite = req.query.overwrite === '1' || req.query.overwrite === 'true';
+  const result = applyPortableImportData(data, { overwrite, allowUsers: false });
+  broadcast('DATA_RESTORED', { format: 'json' });
+  res.json(result);
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// Save PDF to local folder (file system — NOT migrated to SQLite)
+// Save PDF to local folder (file system — routed to DATA_DIR when packaged)
 // ════════════════════════════════════════════════════════════════════════════
 
-const INVOICES_DIR = path.join(__dirname, 'Saved Invoices');
+const DEFAULT_DATA_DIR = path.join(__dirname, 'data');
+const IS_PACKAGED_DATA_DIR = path.resolve(DATA_DIR) !== path.resolve(DEFAULT_DATA_DIR);
+const INVOICES_DIR = IS_PACKAGED_DATA_DIR
+  ? path.join(DATA_DIR, 'Saved Invoices')
+  : path.join(__dirname, 'Saved Invoices');
 if (!fs.existsSync(INVOICES_DIR)) fs.mkdirSync(INVOICES_DIR, { recursive: true });
 
 app.post('/api/save-pdf', express.raw({ type: 'application/pdf', limit: '20mb' }), (req, res) => {
@@ -1446,7 +1711,8 @@ app.post('/api/save-pdf', express.raw({ type: 'application/pdf', limit: '20mb' }
 
     if (!fs.existsSync(folderPath)) fs.mkdirSync(folderPath, { recursive: true });
     fs.writeFileSync(filePath, req.body);
-    res.json({ saved: true, relPath: path.relative(__dirname, filePath).split(path.sep).join('/') });
+    const baseRoot = IS_PACKAGED_DATA_DIR ? DATA_DIR : __dirname;
+    res.json({ saved: true, relPath: path.relative(baseRoot, filePath).split(path.sep).join('/') });
   } catch (err) {
     errRes(res, 500, 'server-error', err);
   }
@@ -1456,8 +1722,94 @@ app.post('/api/save-pdf', express.raw({ type: 'application/pdf', limit: '20mb' }
 // Move saved PDF to Trash (file system operation)
 // ════════════════════════════════════════════════════════════════════════════
 
-const TRASH_DIR = path.join(__dirname, 'Trash');
+const TRASH_DIR = IS_PACKAGED_DATA_DIR
+  ? path.join(DATA_DIR, 'Trash')
+  : path.join(__dirname, 'Trash');
 if (!fs.existsSync(TRASH_DIR)) fs.mkdirSync(TRASH_DIR, { recursive: true });
+
+const BILL_PDF_PREFIX = {
+  'tax-invoice': 'INV',
+  'proforma': 'EST',
+  'bill-of-supply': 'BOS',
+  'composition': 'COMP',
+  'credit-note': 'CN',
+  'delivery-challan': 'DC',
+};
+
+function getBillPdfNames(billRowOrObj) {
+  let bill = billRowOrObj;
+  if (typeof billRowOrObj?.data === 'string') {
+    bill = billRowToObj(billRowOrObj);
+  }
+  const invType = bill?.invoiceType || billRowOrObj?.invoiceType || 'tax-invoice';
+  const prefix = BILL_PDF_PREFIX[invType] || 'INV';
+  const invNum = String(bill?.invoiceNumber || billRowOrObj?.invoiceNumber || bill?.id || billRowOrObj?.id || '');
+  const fileName = `${prefix}_${invNum.replace(/\//g, '-')}.pdf`;
+  const clientName = bill?.clientName || bill?.data?.client?.name || billRowOrObj?.clientName || 'General';
+  return {
+    safeClient: safePathSegment(clientName, 'General'),
+    safeName: safePathSegment(fileName, 'Untitled.pdf'),
+  };
+}
+
+function relocatePdfAcrossDirs(srcRoot, dstRoot, safeClient, safeName, { removeOnly = false } = {}) {
+  const clientDir = path.join(srcRoot, safeClient);
+  if (!isPathInside(clientDir, srcRoot)) return false;
+  let handled = false;
+
+  const handleFile = (srcFile, dstSubDir) => {
+    if (!isPathInside(srcFile, srcRoot) || !fs.existsSync(srcFile)) return false;
+    if (removeOnly) {
+      try { fs.unlinkSync(srcFile); } catch { /* ignore */ }
+      return true;
+    }
+    const dstDir = path.join(dstRoot, safeClient, ...dstSubDir);
+    const dstFile = path.join(dstDir, safeName);
+    if (!isPathInside(dstFile, dstRoot)) return false;
+    if (!fs.existsSync(dstDir)) fs.mkdirSync(dstDir, { recursive: true });
+    try { fs.renameSync(srcFile, dstFile); }
+    catch { fs.copyFileSync(srcFile, dstFile); fs.unlinkSync(srcFile); }
+    return true;
+  };
+
+  if (fs.existsSync(clientDir)) {
+    const entries = fs.readdirSync(clientDir);
+    for (const entry of entries) {
+      const fullEntry = path.join(clientDir, entry);
+      let isDir = false;
+      try { isDir = fs.statSync(fullEntry).isDirectory(); } catch { /* ignore */ }
+      if (isDir) {
+        if (handleFile(path.join(fullEntry, safeName), [entry])) handled = true;
+      } else if (entry === safeName) {
+        if (handleFile(fullEntry, [])) handled = true;
+      }
+    }
+  }
+
+  if (!handled && !removeOnly) {
+    const flatPath = path.join(srcRoot, safeName);
+    if (handleFile(flatPath, [])) handled = true;
+  }
+
+  return handled;
+}
+
+function restoreBillPdfFromTrash(billRow) {
+  try {
+    const { safeClient, safeName } = getBillPdfNames(billRow);
+    return relocatePdfAcrossDirs(TRASH_DIR, INVOICES_DIR, safeClient, safeName);
+  } catch {
+    return false;
+  }
+}
+
+function deleteBillPdfEverywhere(billRow) {
+  try {
+    const { safeClient, safeName } = getBillPdfNames(billRow);
+    relocatePdfAcrossDirs(TRASH_DIR, INVOICES_DIR, safeClient, safeName, { removeOnly: true });
+    relocatePdfAcrossDirs(INVOICES_DIR, TRASH_DIR, safeClient, safeName, { removeOnly: true });
+  } catch { /* ignore */ }
+}
 
 app.post('/api/trash-pdf', express.json(), (req, res) => {
   try {
@@ -1469,41 +1821,7 @@ app.post('/api/trash-pdf', express.json(), (req, res) => {
 
     const clientDir = path.join(INVOICES_DIR, safeClient);
     if (!isPathInside(clientDir, INVOICES_DIR)) return errRes(res, 400, 'invalid-path');
-    let found = false;
-
-    if (fs.existsSync(clientDir)) {
-      const months = fs.readdirSync(clientDir).filter(f => {
-        try { return fs.statSync(path.join(clientDir, f)).isDirectory(); } catch { return false; }
-      });
-      for (const month of months) {
-        const filePath = path.join(clientDir, month, safeName);
-        if (!isPathInside(filePath, INVOICES_DIR)) continue;
-        if (fs.existsSync(filePath)) {
-          const trashPath = path.join(TRASH_DIR, safeClient, month);
-          const trashFile = path.join(trashPath, safeName);
-          if (!isPathInside(trashFile, TRASH_DIR)) return errRes(res, 400, 'invalid-path');
-          if (!fs.existsSync(trashPath)) fs.mkdirSync(trashPath, { recursive: true });
-          try { fs.renameSync(filePath, trashFile); }
-          catch { fs.copyFileSync(filePath, trashFile); fs.unlinkSync(filePath); }
-          found = true;
-          break;
-        }
-      }
-    }
-
-    if (!found) {
-      const flatPath = path.join(INVOICES_DIR, safeName);
-      if (isPathInside(flatPath, INVOICES_DIR) && fs.existsSync(flatPath)) {
-        const trashPath = path.join(TRASH_DIR, safeClient);
-        const trashFile = path.join(trashPath, safeName);
-        if (isPathInside(trashFile, TRASH_DIR)) {
-          if (!fs.existsSync(trashPath)) fs.mkdirSync(trashPath, { recursive: true });
-          try { fs.renameSync(flatPath, trashFile); }
-          catch { fs.copyFileSync(flatPath, trashFile); fs.unlinkSync(flatPath); }
-          found = true;
-        }
-      }
-    }
+    const found = relocatePdfAcrossDirs(INVOICES_DIR, TRASH_DIR, safeClient, safeName);
 
     res.json({ trashed: found });
   } catch (err) {
@@ -1514,8 +1832,6 @@ app.post('/api/trash-pdf', express.json(), (req, res) => {
 // ════════════════════════════════════════════════════════════════════════════
 // Version check
 // ════════════════════════════════════════════════════════════════════════════
-
-const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf-8'));
 
 app.get('/api/version', (req, res) => {
   res.json({ current: pkg.version });
@@ -1611,30 +1927,192 @@ const indexPath = path.join(distPath, 'index.html');
 app.use(express.static(distPath, { fallthrough: true }));
 
 // ════════════════════════════════════════════════════════════════════════════
-// Backups — now simplified to SQLite file copy
+// Backups, Off-PC Mirroring & Disaster Recovery
 // ════════════════════════════════════════════════════════════════════════════
 
 const BACKUPS_DIR = path.join(DATA_DIR, 'backups');
 function ensureDir(p) { if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true }); }
 
-function todayLocalIso() {
-  return new Date().toLocaleDateString('sv-SE');
+const DEFAULT_BACKUP_CONFIG = {
+  mirrorEnabled: false,
+  mirrorPath: '',
+  mirrorProvider: '',
+  mirrorPdfs: true,
+  autoSyncOnChange: true,
+  useRecoveryPassword: false,
+  recoveryPasswordEnc: '',
+  recoveryPasswordHint: '',
+  googleDriveAutoSync: false,
+  lastLocalBackupAt: null,
+  lastMirrorSyncAt: null,
+  lastMirrorStatus: 'not-configured',
+  lastMirrorError: '',
+  lastDriveSyncAt: null,
+};
+
+function getBackupConfig() {
+  const saved = getMetaValue('backupConfig', null);
+  return { ...DEFAULT_BACKUP_CONFIG, ...(saved && typeof saved === 'object' ? saved : {}) };
 }
 
-function runDailyBackup() {
+function sanitizeBackupConfig(cfg) {
+  const { recoveryPasswordEnc, ...rest } = cfg;
+  return {
+    ...rest,
+    hasRecoveryPassword: Boolean(recoveryPasswordEnc),
+  };
+}
+
+function saveBackupConfig(next) {
+  setMetaValue('backupConfig', next);
+  return next;
+}
+
+function summarizeJsonBackupData(data) {
+  return {
+    valid: Boolean(data && (data.__arthsutra_backup || data.__freegstbill_backup || data.bills || data.profile)),
+    format: 'json',
+    exportedAt: data?.exportedAt || null,
+    version: data?.version || null,
+    businessName: data?.profile?.businessName || '',
+    hasUsers: Array.isArray(data?.users) && data.users.length > 0,
+    counts: {
+      profile: data?.profile && Object.keys(data.profile).length > 0 ? 1 : 0,
+      profiles: Array.isArray(data?.profiles) ? data.profiles.length : 0,
+      bills: Array.isArray(data?.bills) ? data.bills.length : 0,
+      clients: Array.isArray(data?.clients) ? data.clients.length : 0,
+      termsTemplates: Array.isArray(data?.termsTemplates) ? data.termsTemplates.length : 0,
+      products: Array.isArray(data?.products) ? data.products.length : 0,
+      expenses: Array.isArray(data?.expenses) ? data.expenses.length : 0,
+      purchases: Array.isArray(data?.purchases) ? data.purchases.length : 0,
+      recurring: Array.isArray(data?.recurring) ? data.recurring.length : 0,
+      receipts: Array.isArray(data?.receipts) ? data.receipts.length : 0,
+      meta: data?.meta ? Object.keys(data.meta).length : 0,
+      users: Array.isArray(data?.users) ? data.users.length : 0,
+    },
+  };
+}
+
+function isSqliteBuffer(buf) {
+  return Buffer.isBuffer(buf) && buf.length >= 16 && buf.subarray(0, 15).toString('ascii') === 'SQLite format 3';
+}
+
+async function inspectUploadedBackupInput({ fileBuffer, text, password = '' }) {
+  if (isSqliteBuffer(fileBuffer)) {
+    const tmpPath = path.join(os.tmpdir(), `arthsutra-inspect-${process.pid}-${Date.now()}.sqlite`);
+    try {
+      fs.writeFileSync(tmpPath, fileBuffer);
+      const info = inspectSqliteBackup(tmpPath);
+      if (!info.valid) {
+        throw new Error(info.error || 'SQLite backup file failed integrity check');
+      }
+      return { ...info, encrypted: false, unlocked: true };
+    } finally {
+      try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+    }
+  }
+
+  const rawText = text || (fileBuffer ? fileBuffer.toString('utf-8') : '');
+  if (!rawText || !rawText.trim()) {
+    throw new Error('No backup file or content provided.');
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch {
+    throw new Error("This file doesn't look like a valid ArthSutra JSON, .arthbackup, or .sqlite backup.");
+  }
+
+  if (isEncryptedBackup(parsed)) {
+    if (!password) {
+      return {
+        valid: true,
+        format: 'arthbackup',
+        encrypted: true,
+        unlocked: false,
+        summary: parsed.summary || null,
+        createdAt: parsed.createdAt || null,
+      };
+    }
+    const decryptedObj = decryptBackupBundle(parsed, password);
+    const inspection = summarizeJsonBackupData(decryptedObj);
+    return {
+      valid: inspection.valid,
+      format: 'arthbackup',
+      encrypted: true,
+      unlocked: true,
+      ...inspection,
+      unlockedJsonText: JSON.stringify(decryptedObj),
+    };
+  }
+
+  const inspection = summarizeJsonBackupData(parsed);
+  if (!inspection.valid) {
+    throw new Error("This file doesn't look like an ArthSutra backup.");
+  }
+  return {
+    ...inspection,
+    encrypted: false,
+    unlocked: true,
+    unlockedJsonText: rawText,
+  };
+}
+
+async function restoreUploadedBackupInput({ fileBuffer, text, password = '', overwrite = true, selection = null, allowUsers = false }) {
+  if (isSqliteBuffer(fileBuffer)) {
+    const tmpPath = path.join(os.tmpdir(), `arthsutra-restore-${process.pid}-${Date.now()}.sqlite`);
+    try {
+      fs.writeFileSync(tmpPath, fileBuffer);
+      const result = await restoreSqliteFromFile(sqlite, DB_PATH, tmpPath, { backupsDir: BACKUPS_DIR });
+      broadcast('DATA_RESTORED', { format: 'sqlite' });
+      return { format: 'sqlite', ...result };
+    } finally {
+      try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+    }
+  }
+
+  const rawText = text || (fileBuffer ? fileBuffer.toString('utf-8') : '');
+  if (!rawText || !rawText.trim()) {
+    throw new Error('No backup content provided.');
+  }
+
+  let data = JSON.parse(rawText);
+  let format = 'json';
+  if (isEncryptedBackup(data)) {
+    data = decryptBackupBundle(data, password);
+    format = 'arthbackup';
+  }
+
+  let payload = data;
+  if (selection && typeof selection === 'object') {
+    payload = {};
+    for (const key of ['profile', 'profiles', 'bills', 'trashedBills', 'clients', 'termsTemplates', 'products', 'expenses', 'recurring', 'receipts', 'purchases', 'meta', 'users', 'auditLogs']) {
+      if (selection[key] && data[key] !== undefined) {
+        payload[key] = data[key];
+      }
+    }
+  }
+
+  const counts = applyPortableImportData(payload, { overwrite, allowUsers });
+  broadcast('DATA_RESTORED', { format });
+  return { format, ...counts };
+}
+
+async function runDailyBackup({ force = false } = {}) {
   try {
     ensureDir(BACKUPS_DIR);
     const today = todayLocalIso();
     const target = path.join(BACKUPS_DIR, `${today}.sqlite`);
-    if (fs.existsSync(target)) return;
 
-    // Use SQLite's backup API — safe even while the DB is in use (WAL mode).
-    // better-sqlite3's .backup() is async; we use the synchronous file-copy
-    // approach after checkpointing WAL so the copy is consistent.
-    sqlite.pragma('wal_checkpoint(TRUNCATE)');
-    fs.copyFileSync(DB_PATH, target);
+    if (!force && fs.existsSync(target)) {
+      return { skipped: true, date: today, target };
+    }
 
-    console.log(`[backup] Daily snapshot saved: ${target}`);
+    const snap = await createSafeSqliteSnapshot(sqlite, target);
+    const cfg = getBackupConfig();
+    saveBackupConfig({ ...cfg, lastLocalBackupAt: new Date().toISOString() });
+    console.log(`[backup] Daily snapshot saved & verified: ${target}`);
 
     // Retention: keep last 30 backups
     const all = fs.readdirSync(BACKUPS_DIR)
@@ -1644,17 +2122,105 @@ function runDailyBackup() {
       const oldest = all.shift();
       try { fs.unlinkSync(path.join(BACKUPS_DIR, oldest)); } catch { /* ignore */ }
     }
+    return { skipped: false, date: today, target, ...snap };
   } catch (err) {
     console.warn('[backup] Daily backup failed:', err.message);
+    return { error: err.message };
   }
 }
 
-setTimeout(runDailyBackup, 5000);
-setInterval(runDailyBackup, 24 * 60 * 60 * 1000);
+async function performMirrorSync({ reason = 'manual' } = {}) {
+  const cfg = getBackupConfig();
+  if (!cfg.mirrorEnabled || !cfg.mirrorPath) {
+    return { skipped: true, reason: 'mirror-disabled' };
+  }
+  if (__backupInFlight) {
+    __pendingResync = true;
+    return { skipped: true, reason: 'in-flight' };
+  }
+
+  __backupInFlight = true;
+  try {
+    const recoveryPassword = (cfg.useRecoveryPassword && cfg.recoveryPasswordEnc)
+      ? safeDecrypt(cfg.recoveryPasswordEnc, '')
+      : '';
+    if (cfg.useRecoveryPassword && !recoveryPassword) {
+      throw new Error('Recovery password could not be unlocked; re-save it in Backup Settings.');
+    }
+
+    const exportPayload = buildPortableExportPayload({ includeRecoveryMeta: true });
+    const result = await mirrorBackupToFolder({
+      mirrorPath: cfg.mirrorPath,
+      sqliteConn: sqlite,
+      exportPayload,
+      recoveryPassword,
+      mirrorPdfs: cfg.mirrorPdfs !== false,
+      invoicesDir: INVOICES_DIR,
+      dataDir: DATA_DIR,
+      appDir: __dirname,
+    });
+
+    const latestCfg = getBackupConfig();
+    saveBackupConfig({
+      ...latestCfg,
+      lastMirrorSyncAt: result.syncedAt,
+      lastMirrorStatus: 'ok',
+      lastMirrorError: '',
+    });
+    console.log(`[backup] Off-PC mirror synced (${reason}) -> ${result.resolvedPath}`);
+    return result;
+  } catch (err) {
+    const latestCfg = getBackupConfig();
+    saveBackupConfig({
+      ...latestCfg,
+      lastMirrorStatus: 'error',
+      lastMirrorError: err.message || 'Mirror sync failed',
+    });
+    console.warn(`[backup] Off-PC mirror sync failed (${reason}):`, err.message);
+    return { ok: false, error: err.message };
+  } finally {
+    __backupInFlight = false;
+    if (__pendingResync) {
+      __pendingResync = false;
+      setTimeout(() => { performMirrorSync({ reason: 'queued' }).catch(() => {}); }, 2000);
+    }
+  }
+}
+
+function scheduleAutoMirror() {
+  try {
+    const cfg = getBackupConfig();
+    if (!cfg.mirrorEnabled || !cfg.autoSyncOnChange || !cfg.mirrorPath) return;
+    if (__autoMirrorTimer) clearTimeout(__autoMirrorTimer);
+    __autoMirrorTimer = setTimeout(() => {
+      __autoMirrorTimer = null;
+      performMirrorSync({ reason: 'auto-change' }).catch(() => {});
+    }, 10000);
+  } catch { /* ignore */ }
+}
+
+setTimeout(async () => {
+  await runDailyBackup({ force: false });
+  const cfg = getBackupConfig();
+  if (cfg.mirrorEnabled && cfg.mirrorPath) {
+    const stale = !cfg.lastMirrorSyncAt || (Date.now() - Date.parse(cfg.lastMirrorSyncAt)) > 15 * 60 * 1000;
+    if (stale) {
+      await performMirrorSync({ reason: 'startup' });
+    }
+  }
+}, 5000);
+setInterval(() => {
+  runDailyBackup({ force: false }).then(() => {
+    const cfg = getBackupConfig();
+    if (cfg.mirrorEnabled && cfg.mirrorPath) {
+      performMirrorSync({ reason: 'daily' }).catch(() => {});
+    }
+  });
+}, 24 * 60 * 60 * 1000);
 
 // Backup management endpoints
 
-app.get('/api/backups', (req, res) => {
+app.get('/api/backups', requireAuth, (req, res) => {
   try {
     ensureDir(BACKUPS_DIR);
     const list = fs.readdirSync(BACKUPS_DIR)
@@ -1662,13 +2228,13 @@ app.get('/api/backups', (req, res) => {
       .sort().reverse()
       .map(name => {
         const stat = fs.statSync(path.join(BACKUPS_DIR, name));
-        return { date: name.replace('.sqlite', ''), createdAt: stat.mtime.toISOString() };
+        return { date: name.replace('.sqlite', ''), createdAt: stat.mtime.toISOString(), sizeBytes: stat.size };
       });
     res.json(list);
   } catch (err) { errRes(res, 500, 'server-error', err); }
 });
 
-app.delete('/api/backups/:date', (req, res) => {
+app.delete('/api/backups/:date', requireAuth, requireRole(['ADMIN']), (req, res) => {
   try {
     const date = req.params.date;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return errRes(res, 400, 'bad-request');
@@ -1684,7 +2250,7 @@ app.delete('/api/backups/:date', (req, res) => {
   } catch (err) { errRes(res, 500, 'server-error', err); }
 });
 
-app.post('/api/backups/:date/restore', (req, res) => {
+app.post('/api/backups/:date/restore', requireAuth, requireRole(['ADMIN']), async (req, res) => {
   try {
     const date = req.params.date;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return errRes(res, 400, 'bad-request');
@@ -1697,81 +2263,239 @@ app.post('/api/backups/:date/restore', (req, res) => {
       return errRes(res, 400, 'bad-request');
     }
 
-    // Create a pre-restore snapshot
-    const preRestorePath = path.join(BACKUPS_DIR, `pre-restore-${Date.now()}.sqlite`);
-    sqlite.pragma('wal_checkpoint(TRUNCATE)');
-    fs.copyFileSync(DB_PATH, preRestorePath);
-
-    try {
-      // Close current DB, copy backup over, re-open would require restart.
-      // Instead, we do an in-process restore: read the backup DB and copy
-      // all tables into the current DB inside a transaction.
-      const backupDb = new Database(backupFile, { readonly: true });
-
-      sqlite.transaction(() => {
-        // Clear all tables
-        for (const table of ['bills', 'clients', 'products', 'purchases', 'expenses',
-                             'receipts', 'profiles', 'templates', 'recurring', 'meta']) {
-          sqlite.exec(`DELETE FROM ${table}`);
-        }
-
-        // Copy from backup
-        for (const table of ['bills', 'clients', 'products', 'purchases', 'expenses',
-                             'receipts', 'profiles', 'templates', 'recurring', 'meta']) {
-          const rows = backupDb.prepare(`SELECT * FROM ${table}`).all();
-          if (rows.length === 0) continue;
-          const cols = Object.keys(rows[0]);
-          const placeholders = cols.map(() => '?').join(', ');
-          const insert = sqlite.prepare(
-            `INSERT OR REPLACE INTO ${table} (${cols.join(', ')}) VALUES (${placeholders})`
-          );
-          for (const row of rows) {
-            insert.run(...cols.map(c => row[c]));
-          }
-        }
-      })();
-
-      backupDb.close();
-
-      // Success — remove pre-restore snapshot
-      try { fs.unlinkSync(preRestorePath); } catch { /* keep for safety */ }
-      res.json({ success: true, restored: date });
-    } catch (restoreErr) {
-      // Rollback: restore from pre-restore snapshot
-      try {
-        const rollbackDb = new Database(preRestorePath, { readonly: true });
-        sqlite.transaction(() => {
-          for (const table of ['bills', 'clients', 'products', 'purchases', 'expenses',
-                               'receipts', 'profiles', 'templates', 'recurring', 'meta']) {
-            sqlite.exec(`DELETE FROM ${table}`);
-            const rows = rollbackDb.prepare(`SELECT * FROM ${table}`).all();
-            if (rows.length === 0) continue;
-            const cols = Object.keys(rows[0]);
-            const placeholders = cols.map(() => '?').join(', ');
-            const insert = sqlite.prepare(
-              `INSERT OR REPLACE INTO ${table} (${cols.join(', ')}) VALUES (${placeholders})`
-            );
-            for (const row of rows) {
-              insert.run(...cols.map(c => row[c]));
-            }
-          }
-        })();
-        rollbackDb.close();
-      } catch { /* if rollback fails, pre-restore file stays for manual recovery */ }
-      errRes(res, 500, 'server-error', restoreErr);
-    }
-  } catch (err) { errRes(res, 500, 'server-error', err); }
+    await restoreSqliteFromFile(sqlite, DB_PATH, backupFile, { backupsDir: BACKUPS_DIR });
+    broadcast('DATA_RESTORED', { date });
+    res.json({ success: true, restored: date });
+  } catch (err) {
+    errRes(res, 500, 'server-error', err);
+  }
 });
 
 let __lastBackupNowMs = 0;
-app.post('/api/backups/now', (req, res) => {
+app.post('/api/backups/now', requireAuth, requireRole(['ADMIN', 'ACCOUNTANT']), async (req, res) => {
   const now = Date.now();
   if (now - __lastBackupNowMs < 5000) {
-    return errRes(res, 429, 'server-error');
+    return res.status(429).json({
+      error: 'Please wait a few seconds before triggering another backup.',
+      code: 'rate-limited',
+    });
   }
   __lastBackupNowMs = now;
-  runDailyBackup();
-  res.json({ success: true });
+  const local = await runDailyBackup({ force: true });
+  const cfg = getBackupConfig();
+  let mirror = null;
+  if (cfg.mirrorEnabled && cfg.mirrorPath) {
+    mirror = await performMirrorSync({ reason: 'manual' });
+  }
+  res.json({ success: !local?.error, local, mirror });
+});
+
+// Disaster recovery health, cloud folder detection & off-PC mirror endpoints
+
+app.get('/api/backup/health', (req, res) => {
+  try {
+    ensureDir(BACKUPS_DIR);
+    const list = fs.readdirSync(BACKUPS_DIR)
+      .filter(n => /^\d{4}-\d{2}-\d{2}\.sqlite$/.test(n))
+      .sort().reverse();
+    const latestName = list[0] || null;
+    const latestStat = latestName ? fs.statSync(path.join(BACKUPS_DIR, latestName)) : null;
+    const cfg = getBackupConfig();
+    const detected = detectCloudFolders();
+    const integrity = checkSqliteIntegrity(sqlite);
+
+    const mirrorOk = Boolean(cfg.mirrorEnabled && cfg.mirrorPath && cfg.lastMirrorStatus === 'ok');
+    const latestOffPcIso = [cfg.lastMirrorSyncAt, cfg.lastDriveSyncAt]
+      .filter(Boolean)
+      .sort()
+      .reverse()[0] || null;
+
+    const daysSinceLastOffPcSync = latestOffPcIso
+      ? Math.max(0, Math.floor((Date.now() - Date.parse(latestOffPcIso)) / 86400000))
+      : null;
+
+    const recentDriveOk = Boolean(cfg.lastDriveSyncAt && (Date.now() - Date.parse(cfg.lastDriveSyncAt)) < 7 * 86400000);
+    const isOffPcProtected = mirrorOk || recentDriveOk;
+    let protectionLevel = 'local-only';
+    if (cfg.mirrorEnabled && cfg.lastMirrorStatus === 'error') {
+      protectionLevel = 'warning';
+    } else if (isOffPcProtected) {
+      protectionLevel = 'protected';
+    } else if (latestOffPcIso) {
+      protectionLevel = 'warning';
+    }
+
+    res.json({
+      integrity,
+      localBackups: {
+        count: list.length,
+        latestDate: latestName ? latestName.replace('.sqlite', '') : null,
+        latestAt: latestStat ? latestStat.mtime.toISOString() : cfg.lastLocalBackupAt,
+        dir: BACKUPS_DIR,
+      },
+      dataDir: DATA_DIR,
+      invoicesDir: INVOICES_DIR,
+      detectedCloudFolders: detected,
+      config: sanitizeBackupConfig(cfg),
+      isOffPcProtected,
+      protectionLevel,
+      latestOffPcSyncAt: latestOffPcIso,
+      daysSinceLastOffPcSync,
+    });
+  } catch (err) {
+    errRes(res, 500, 'server-error', err);
+  }
+});
+
+app.post('/api/backup/test-folder', requireAuth, requireRole(['ADMIN', 'ACCOUNTANT']), (req, res) => {
+  const folderPath = req.body?.path || '';
+  const result = validateMirrorFolder(folderPath, { dataDir: DATA_DIR, appDir: __dirname });
+  res.json(result);
+});
+
+app.post('/api/backup/config', requireAuth, requireRole(['ADMIN']), async (req, res) => {
+  try {
+    const body = req.body || {};
+    const prev = getBackupConfig();
+    const next = { ...prev };
+
+    if (typeof body.mirrorEnabled === 'boolean') next.mirrorEnabled = body.mirrorEnabled;
+    if (typeof body.mirrorPath === 'string') next.mirrorPath = body.mirrorPath.trim();
+    if (typeof body.mirrorProvider === 'string') next.mirrorProvider = body.mirrorProvider.trim();
+    if (typeof body.mirrorPdfs === 'boolean') next.mirrorPdfs = body.mirrorPdfs;
+    if (typeof body.autoSyncOnChange === 'boolean') next.autoSyncOnChange = body.autoSyncOnChange;
+    if (typeof body.googleDriveAutoSync === 'boolean') next.googleDriveAutoSync = body.googleDriveAutoSync;
+    if (typeof body.recoveryPasswordHint === 'string') next.recoveryPasswordHint = body.recoveryPasswordHint.trim().slice(0, 120);
+
+    if (body.clearRecoveryPassword) {
+      next.useRecoveryPassword = false;
+      next.recoveryPasswordEnc = '';
+    } else if (typeof body.recoveryPassword === 'string' && body.recoveryPassword.length > 0) {
+      if (body.recoveryPassword.length < 4) {
+        return res.status(400).json({ error: 'Recovery password must be at least 4 characters long.' });
+      }
+      next.useRecoveryPassword = true;
+      next.recoveryPasswordEnc = encrypt(body.recoveryPassword);
+    } else if (typeof body.useRecoveryPassword === 'boolean') {
+      if (body.useRecoveryPassword && !next.recoveryPasswordEnc) {
+        return res.status(400).json({ error: 'Set a Recovery Password before enabling encrypted backups.' });
+      }
+      next.useRecoveryPassword = body.useRecoveryPassword;
+    }
+
+    if (next.mirrorEnabled) {
+      const check = validateMirrorFolder(next.mirrorPath, { dataDir: DATA_DIR, appDir: __dirname });
+      if (!check.ok) {
+        return res.status(400).json({ error: check.error });
+      }
+      next.mirrorPath = check.resolvedPath;
+      next.lastMirrorStatus = 'pending';
+      next.lastMirrorError = '';
+    } else {
+      next.lastMirrorStatus = 'not-configured';
+      next.lastMirrorError = '';
+    }
+
+    saveBackupConfig(next);
+
+    let mirrorResult = null;
+    if (next.mirrorEnabled && body.syncNow !== false) {
+      await runDailyBackup({ force: true });
+      mirrorResult = await performMirrorSync({ reason: 'config-save' });
+    }
+
+    res.json({
+      success: true,
+      config: sanitizeBackupConfig(getBackupConfig()),
+      mirrorResult,
+    });
+  } catch (err) {
+    errRes(res, 500, 'server-error', err);
+  }
+});
+
+app.post('/api/backup/sync-mirror', requireAuth, requireRole(['ADMIN', 'ACCOUNTANT']), async (req, res) => {
+  try {
+    const local = await runDailyBackup({ force: true });
+    const mirror = await performMirrorSync({ reason: 'manual-sync' });
+    if (mirror?.ok === false) {
+      return res.status(400).json({ error: mirror.error || 'Mirror sync failed', local, mirror });
+    }
+    res.json({ success: true, local, mirror, config: sanitizeBackupConfig(getBackupConfig()) });
+  } catch (err) {
+    errRes(res, 500, 'server-error', err);
+  }
+});
+
+app.post('/api/backup/mark-drive-sync', requireAuth, requireRole(['ADMIN', 'ACCOUNTANT']), (req, res) => {
+  const cfg = getBackupConfig();
+  saveBackupConfig({ ...cfg, lastDriveSyncAt: new Date().toISOString() });
+  res.json({ success: true, lastDriveSyncAt: getBackupConfig().lastDriveSyncAt });
+});
+
+app.post('/api/backup/export-encrypted', requireAuth, requireRole(['ADMIN', 'ACCOUNTANT']), (req, res) => {
+  try {
+    const { password, selection, includeRecoveryMeta = true, localStorageData = null } = req.body || {};
+    if (!password || typeof password !== 'string' || password.length < 4) {
+      return res.status(400).json({ error: 'Recovery password must be at least 4 characters long.' });
+    }
+
+    const full = buildPortableExportPayload({ includeRecoveryMeta: Boolean(includeRecoveryMeta) });
+    let payload = full;
+    if (selection && typeof selection === 'object') {
+      payload = { __arthsutra_backup: true, version: full.version, exportedAt: full.exportedAt };
+      for (const key of ['profile', 'profiles', 'bills', 'trashedBills', 'clients', 'termsTemplates', 'products', 'expenses', 'recurring', 'receipts', 'purchases', 'meta', 'users', 'auditLogs']) {
+        if (selection[key] && full[key] !== undefined) {
+          payload[key] = full[key];
+        }
+      }
+    }
+    if (localStorageData && (!selection || selection.localStorage)) {
+      payload.localStorage = localStorageData;
+    }
+
+    const encryptedText = encryptBackupBundle(payload, password);
+    res.json({ success: true, encryptedText });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Failed to encrypt backup' });
+  }
+});
+
+app.post('/api/backup/inspect-upload', requireAuth, requireRole(['ADMIN', 'ACCOUNTANT']), backupUpload.single('file'), async (req, res) => {
+  try {
+    const result = await inspectUploadedBackupInput({
+      fileBuffer: req.file?.buffer || null,
+      text: req.body?.text || null,
+      password: req.body?.password || '',
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Unable to inspect backup file' });
+  }
+});
+
+app.post('/api/backup/restore-upload', requireAuth, requireRole(['ADMIN']), backupUpload.single('file'), async (req, res) => {
+  try {
+    let selection = null;
+    if (req.body?.selection) {
+      try { selection = typeof req.body.selection === 'string' ? JSON.parse(req.body.selection) : req.body.selection; }
+      catch { selection = null; }
+    }
+    const overwrite = req.body?.overwrite !== 'false' && req.body?.overwrite !== false;
+    const allowUsers = req.body?.allowUsers === 'true' || req.body?.allowUsers === true;
+
+    const result = await restoreUploadedBackupInput({
+      fileBuffer: req.file?.buffer || null,
+      text: req.body?.text || null,
+      password: req.body?.password || '',
+      overwrite,
+      selection,
+      allowUsers,
+    });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Restore failed' });
+  }
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1791,7 +2515,7 @@ app.get('/api/trash', (req, res) => {
 
 app.post('/api/trash/:id/restore', (req, res) => {
   try {
-    const row = db.select({ id: bills.id }).from(bills)
+    const row = db.select().from(bills)
       .where(eq(bills.id, req.params.id))
       .get();
     if (!row) return res.status(404).json({ error: 'Not in trash' });
@@ -1805,17 +2529,20 @@ app.post('/api/trash/:id/restore', (req, res) => {
       logEvent('bill', req.params.id, 'UPDATE', { id: req.params.id, isTrashed: false, restored: true }, tx);
     });
 
+    const pdfRestored = restoreBillPdfFromTrash(row);
     broadcast('BILL_UPDATED', { id: req.params.id, isTrashed: false, restored: true });
-    res.json({ success: true });
+    res.json({ success: true, pdfRestored });
   } catch (err) { errRes(res, 500, 'server-error', err); }
 });
 
 app.delete('/api/trash/:id', (req, res) => {
   try {
+    const existing = db.select().from(bills).where(eq(bills.id, req.params.id)).get();
     db.transaction((tx) => {
       tx.delete(bills).where(eq(bills.id, req.params.id)).run();
       logEvent('bill', req.params.id, 'DELETE', { id: req.params.id, permanent: true, fromTrash: true }, tx);
     });
+    if (existing) deleteBillPdfEverywhere(existing);
     broadcast('BILL_DELETED', { id: req.params.id, permanent: true, fromTrash: true });
     res.json({ success: true });
   } catch (err) { errRes(res, 500, 'server-error', err); }
@@ -1825,8 +2552,15 @@ app.delete('/api/trash/:id', (req, res) => {
 function purgeOldTrash() {
   try {
     const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-    // Delete trashed bills whose trashedAt is older than 30 days
-    sqlite.exec(`DELETE FROM bills WHERE is_trashed = 1 AND trashed_at IS NOT NULL AND trashed_at < '${cutoff}'`);
+    const expired = sqlite.prepare(
+      'SELECT id, client_name as clientName, invoice_number as invoiceNumber, invoice_type as invoiceType, data FROM bills WHERE is_trashed = 1 AND trashed_at IS NOT NULL AND trashed_at < ?'
+    ).all(cutoff);
+    for (const row of expired) {
+      deleteBillPdfEverywhere(row);
+    }
+    sqlite.prepare(
+      'DELETE FROM bills WHERE is_trashed = 1 AND trashed_at IS NOT NULL AND trashed_at < ?'
+    ).run(cutoff);
   } catch { /* ignore */ }
 }
 setInterval(purgeOldTrash, 24 * 60 * 60 * 1000);
@@ -2053,15 +2787,23 @@ function advanceDate(dateStr, frequency, interval) {
   return d.toISOString().split('T')[0];
 }
 
+function getCurrentIndianFY(date = new Date()) {
+  const yr = date.getMonth() >= 3 ? date.getFullYear() : date.getFullYear() - 1;
+  const ny = String(yr + 1).slice(-2);
+  return `${yr}-${ny}`;
+}
+
 function nextInvoiceNumber(prefix, _settings = {}) {
   // ACID: runs inside the caller's transaction
   const metaRow = db.select().from(meta).where(eq(meta.key, `counter_${prefix}`)).get();
   const settingsRow = db.select().from(meta).where(eq(meta.key, 'invoiceNumberSettings')).get();
   const cfg = {
-    format: 'branded', brandPrefix: '', separator: '/', showFinYear: true, padDigits: 4,
+    format: 'branded', brandPrefix: '', separator: '/', showFinYear: true, startNumber: 1, padDigits: 4,
     ...(settingsRow ? safeParseJSON(settingsRow.value, {}) : {}),
   };
-  const next = (Number(metaRow?.value) || 0) + 1;
+  const startNum = parseInt(cfg.startNumber, 10);
+  const startBase = Number.isFinite(startNum) && startNum > 1 ? startNum - 1 : 0;
+  const next = Math.max(Number(metaRow?.value) || 0, startBase) + 1;
   setMetaValue(`counter_${prefix}`, next);
 
   if (cfg.format === 'random') {
@@ -2071,8 +2813,7 @@ function nextInvoiceNumber(prefix, _settings = {}) {
   const pfx = cfg.brandPrefix || prefix;
   const padded = String(next).padStart(cfg.padDigits || 4, '0');
   if (cfg.showFinYear) {
-    const y = new Date().getFullYear();
-    return `${pfx}${sep}${y}-${String(y + 1).slice(-2)}${sep}${padded}`;
+    return `${pfx}${sep}${getCurrentIndianFY()}${sep}${padded}`;
   }
   return `${pfx}${sep}${padded}`;
 }
@@ -2094,13 +2835,16 @@ async function processDueRecurring() {
     if (tpl.endMode === 'afterN' && tpl.maxOccurrences && (tpl.occurrencesCreated || 0) >= tpl.maxOccurrences) continue;
 
     try {
+      let createdBill = null;
       // Wrap each recurring fire in a transaction: create bill + update template + bump counter
       sqlite.transaction(() => {
         // Resolve live profile
         const profileRows = db.select().from(profiles).all();
         let profile = profileRows.find(p => p.id && tpl.profileId && p.id === tpl.profileId);
         if (!profile) profile = profileRows.find(p => (p.businessName || '') === tpl.profileBusinessName);
-        profile = profile ? profileRowToObj(profile) : getMetaValue('profile', {});
+        profile = profile
+          ? decryptProfileBankDetails(profileRowToObj(profile))
+          : normalizeProfile(decryptProfileBankDetails(getMetaValue('profile', DEFAULT_PROFILE)));
 
         const prefix = (tpl.invoiceType === 'proforma' ? 'EST'
                      : tpl.invoiceType === 'credit-note' ? 'CN'
@@ -2117,7 +2861,10 @@ async function processDueRecurring() {
           gstin: tpl.clientGstin,
           isSEZ: !!tpl.isSEZ,
         };
-        const details = { placeOfSupply: tpl.placeOfSupply };
+        const details = {
+          placeOfSupply: tpl.placeOfSupply || '',
+          sellerLicence: profile.licence || '',
+        };
         const invoiceOptions = tpl.invoiceOptions || {};
         const totals = computeInvoiceTotals({
           items: tpl.items || [],
@@ -2148,11 +2895,17 @@ async function processDueRecurring() {
             profile,
             client: {
               name: tpl.clientName, state: tpl.clientState, gstin: tpl.clientGstin,
-              address: tpl.clientAddress, country: tpl.clientCountry, city: tpl.clientCity,
+              address: tpl.clientAddress, country: tpl.clientCountry || 'India', city: tpl.clientCity,
               pin: tpl.clientPin, email: tpl.clientEmail, phone: tpl.clientPhone,
               isSEZ: tpl.isSEZ,
             },
-            details: { invoiceNumber, invoiceDate, dueDate: '', placeOfSupply: '' },
+            details: {
+              invoiceNumber,
+              invoiceDate,
+              dueDate: '',
+              placeOfSupply: tpl.placeOfSupply || '',
+              sellerLicence: profile.licence || '',
+            },
             items: (tpl.items || []).map(i => ({
               ...i,
               name: i.name || i.description || '',
@@ -2199,9 +2952,10 @@ async function processDueRecurring() {
           nextDate: tpl.nextDate,
           data: JSON.stringify(tpl),
         }).where(eq(recurring.id, tpl.id)).run();
+        createdBill = bill;
       })();
 
-      broadcast('BILL_CREATED', bill);
+      if (createdBill) broadcast('BILL_CREATED', createdBill);
       fired += 1;
     } catch (err) {
       logFatal(err, 'recurring');
@@ -2268,8 +3022,18 @@ function startServer(port) {
   });
 }
 
-function gracefulShutdown(signal) {
+async function gracefulShutdown(signal) {
   console.log(`\n  Received ${signal}, closing connections...`);
+  if (__autoMirrorTimer) {
+    clearTimeout(__autoMirrorTimer);
+    __autoMirrorTimer = null;
+    try {
+      await Promise.race([
+        performMirrorSync({ reason: 'shutdown' }),
+        new Promise((resolve) => setTimeout(resolve, 2500)),
+      ]);
+    } catch { /* ignore */ }
+  }
   if (wss) try { wss.close(); } catch { /* ignore */ }
   // Close SQLite cleanly
   try { sqlite.close(); } catch { /* ignore */ }

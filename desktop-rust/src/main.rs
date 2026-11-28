@@ -15,7 +15,7 @@ use tao::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
-    window::WindowBuilder,
+    window::{Icon, WindowBuilder},
 };
 use wry::WebViewBuilder;
 
@@ -138,8 +138,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let start_url = format!("http://localhost:{}", port);
 
     let event_loop = EventLoop::new();
+    let window_icon = Icon::from_rgba(include_bytes!("window-icon.rgba").to_vec(), 64, 64).ok();
     let window = WindowBuilder::new()
         .with_title("Arth Sutra")
+        .with_window_icon(window_icon)
         .with_inner_size(LogicalSize::new(1280.0, 850.0))
         .with_min_inner_size(LogicalSize::new(1024.0, 700.0))
         .build(&event_loop)?;

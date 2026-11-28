@@ -41,6 +41,9 @@ Section "Install"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ArthSutra" "DisplayIcon" "$INSTDIR\ArthSutra.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ArthSutra" "Publisher" "ARTH"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ArthSutra" "DisplayVersion" "1.2.0"
+
+  ; Refresh Windows Explorer icon cache so replaced EXE/shortcut icons appear immediately
+  System::Call 'shell32.dll::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
 SectionEnd
 
 Section "Uninstall"

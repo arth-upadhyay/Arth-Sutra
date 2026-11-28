@@ -999,6 +999,39 @@ body:has(.lock-screen-active) .lock-screen-card {
   @page { margin: 0; size: auto; }
 }
 
+/* Remove artificial A4 min-height blank void and excess outer padding inside 2-up tear sheets */
+.two-up-sheet-frame .invoice-preview-container {
+  min-height: 0 !important;
+  padding: 3px 4px !important;
+}
+
+/* Temporarily unwrap TwoUpSheetPreview during html2canvas PDF capture */
+.pdf-capturing-raw .two-up-sheet-frame {
+  width: auto !important;
+  min-height: 0 !important;
+  padding: 0 !important;
+  display: block !important;
+  box-shadow: none !important;
+  border: none !important;
+}
+.pdf-capturing-raw .two-up-column {
+  width: auto !important;
+  height: auto !important;
+  display: block !important;
+}
+.pdf-capturing-raw .two-up-slot {
+  width: auto !important;
+  height: auto !important;
+  overflow: visible !important;
+}
+.pdf-capturing-raw .two-up-scale-box {
+  transform: none !important;
+  width: auto !important;
+}
+.pdf-capturing-raw .two-up-hide-on-capture {
+  display: none !important;
+}
+
 .invoice-preview-container {
   background: white;
   margin: 0 auto;
@@ -1317,6 +1350,86 @@ a:focus-visible { outline: 2px solid var(--primary) !important; outline-offset: 
 .li-suggestion.active { background: var(--primary); color: #fff; }
 .li-suggestion strong { font-weight: 500; }
 .li-suggestion .meta { font-size: 0.72rem; opacity: 0.75; }
+
+.client-search-popup {
+  max-height: 260px;
+  padding: 0.25rem;
+}
+.client-popup-row {
+  display: flex;
+  align-items: stretch;
+  border-radius: 6px;
+  overflow: hidden;
+  transition: background 0.12s;
+}
+.client-popup-row:hover,
+.client-popup-row.active {
+  background: var(--primary);
+  color: #fff;
+}
+.client-popup-select {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.55rem 0.7rem;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  font-size: 0.85rem;
+}
+.client-popup-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+}
+.client-popup-main strong {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.client-popup-addr {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.client-popup-meta {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  text-align: right;
+  max-width: 52%;
+}
+.client-popup-edit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  flex-shrink: 0;
+  border: none;
+  border-left: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.client-popup-row:hover .client-popup-addr,
+.client-popup-row.active .client-popup-addr,
+.client-popup-row:hover .client-popup-meta,
+.client-popup-row.active .client-popup-meta,
+.client-popup-row:hover .client-popup-edit,
+.client-popup-row.active .client-popup-edit {
+  color: rgba(255, 255, 255, 0.9);
+  border-left-color: rgba(255, 255, 255, 0.25);
+}
 
 .li-hsn-hint {
   position: absolute;

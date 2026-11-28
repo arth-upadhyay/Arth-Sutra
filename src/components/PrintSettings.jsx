@@ -1,30 +1,85 @@
 import { useState, useEffect, useRef } from 'react';
 import { Printer, RotateCcw, Info } from 'lucide-react';
 import { toast } from './Toast';
-import { confirmAction } from './ConfirmModal';
 import InvoicePreview from './InvoicePreview';
-import { getProfile } from '../store';
+import TwoUpSheetPreview from './TwoUpSheetPreview';
+import { getProfile, getInvoiceDisplayOptions, saveInvoiceDisplayOptions } from '../store';
 import { getPrintSettings, savePrintSettings, buildSampleInvoice, DEFAULT_PRINT_SETTINGS } from '../utils/printSettings';
+
+const DISPLAY_OPTION_KEYS = ['showLogo', 'showHSN', 'showAmountWords', 'showBankDetails', 'showUPI'];
+
+function syncDisplayOptionsFromPrint(next) {
+  try {
+    const raw = localStorage.getItem('arthsutra_invoiceOptions');
+    const current = raw ? JSON.parse(raw) : {};
+    const updated = { ...current };
+    for (const k of DISPLAY_OPTION_KEYS) {
+      if (next[k] !== undefined) updated[k] = !!next[k];
+    }
+    if (next.signatureShow !== undefined) updated.showSignature = !!next.signatureShow;
+    localStorage.setItem('arthsutra_invoiceOptions', JSON.stringify(updated));
+    saveInvoiceDisplayOptions(updated).catch(() => {});
+  } catch { /* ignore */ }
+}
 
 export default function PrintSettings() {
   const [settings, setSettings] = useState(() => {
     const s = getPrintSettings();
-    return s.paperSize === 'a4' ? s : { ...s, paperSize: 'a4' };
+    let opts = {};
+    try {
+      const raw = localStorage.getItem('arthsutra_invoiceOptions');
+      if (raw) opts = JSON.parse(raw) || {};
+    } catch { /* ignore */ }
+    return {
+      ...s,
+      paperSize: 'a4',
+      ...(opts.showLogo !== undefined ? { showLogo: !!opts.showLogo } : {}),
+      ...(opts.showHSN !== undefined ? { showHSN: !!opts.showHSN } : {}),
+      ...(opts.showAmountWords !== undefined ? { showAmountWords: !!opts.showAmountWords } : {}),
+      ...(opts.showBankDetails !== undefined ? { showBankDetails: !!opts.showBankDetails } : {}),
+      ...(opts.showUPI !== undefined ? { showUPI: !!opts.showUPI } : {}),
+      ...(opts.showSignature !== undefined ? { signatureShow: !!opts.showSignature } : {}),
+    };
   });
   const [profile, setProfile] = useState(null);
   const previewRef = useRef(null);
 
-  useEffect(() => { getProfile().then(setProfile).catch(() => {}); }, []);
+  useEffect(() => {
+    getProfile().then(p => setProfile(p ? { ...p, country: 'India' } : null)).catch(() => {});
+    if (!localStorage.getItem('arthsutra_invoiceOptions')) {
+      getInvoiceDisplayOptions().then((opts) => {
+        if (!opts || typeof opts !== 'object') return;
+        setSettings((prev) => {
+          const next = {
+            ...prev,
+            ...(opts.showLogo !== undefined ? { showLogo: !!opts.showLogo } : {}),
+            ...(opts.showHSN !== undefined ? { showHSN: !!opts.showHSN } : {}),
+            ...(opts.showAmountWords !== undefined ? { showAmountWords: !!opts.showAmountWords } : {}),
+            ...(opts.showBankDetails !== undefined ? { showBankDetails: !!opts.showBankDetails } : {}),
+            ...(opts.showUPI !== undefined ? { showUPI: !!opts.showUPI } : {}),
+            ...(opts.showSignature !== undefined ? { signatureShow: !!opts.showSignature } : {}),
+          };
+          savePrintSettings(next);
+          return next;
+        });
+      }).catch(() => {});
+    }
+  }, []);
 
   const set = (patch) => {
     const next = { ...settings, ...patch };
-    setSettings(next);
     savePrintSettings(next);
+    setSettings(next);
+    if (DISPLAY_OPTION_KEYS.some(k => k in patch) || 'signatureShow' in patch) {
+      syncDisplayOptionsFromPrint(next);
+    }
   };
 
   const reset = () => {
-    setSettings({ ...DEFAULT_PRINT_SETTINGS, paperSize: 'a4' });
-    savePrintSettings({ ...DEFAULT_PRINT_SETTINGS, paperSize: 'a4' });
+    const next = { ...DEFAULT_PRINT_SETTINGS, paperSize: 'a4' };
+    savePrintSettings(next);
+    setSettings(next);
+    syncDisplayOptionsFromPrint(next);
     toast('Print settings reset to defaults', 'info');
   };
 
@@ -36,6 +91,7 @@ export default function PrintSettings() {
     showAmountWords: settings.showAmountWords,
     showHSN: settings.showHSN,
     showLogo: settings.showLogo,
+    showSignature: settings.signatureShow !== false,
     showTerms: false,
     showNotes: false,
   };
@@ -72,16 +128,15 @@ export default function PrintSettings() {
             <ToggleRow label="Show business logo" value={settings.showLogo} onChange={v => set({ showLogo: v })} />
             <ToggleRow label="Show HSN code per item" value={settings.showHSN} onChange={v => set({ showHSN: v })}
               hint="Required for GST compliance on tax invoices." />
-            <ToggleRow label='Show "Qty × Rate" line per item' value={settings.showRateLine} onChange={v => set({ showRateLine: v })} />
             <ToggleRow label="Show amount in words" value={settings.showAmountWords} onChange={v => set({ showAmountWords: v })} />
             <ToggleRow label="Show bank details" value={settings.showBankDetails} onChange={v => set({ showBankDetails: v })} />
             <ToggleRow label="Show UPI QR code" value={settings.showUPI} onChange={v => set({ showUPI: v })} />
             {settings.showUPI && (
               <SelectRow label="UPI QR size" value={settings.qrSize} onChange={v => set({ qrSize: v })}
                 options={[
-                  ['small', 'Small (60 × 60 px)'],
-                  ['medium', 'Medium (90 × 90 px)'],
-                  ['large', 'Large (120 × 120 px)'],
+                  ['small', 'Small (56 × 56 px)'],
+                  ['medium', 'Medium (75 × 75 px)'],
+                  ['large', 'Large (100 × 100 px)'],
                 ]} />
             )}
           </SettingGroup>
@@ -96,6 +151,29 @@ export default function PrintSettings() {
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1rem' }}>
 
+              <SettingGroup title="2 Bills Per Page (Client + Self Tear Sheet)">
+                <ToggleRow
+                  label="Print 2 bills per A4 page (top &amp; bottom)"
+                  value={settings.twoPerPageEnabled !== false}
+                  onChange={v => set({ twoPerPageEnabled: v })}
+                  hint="Shrinks the exact invoice proportionally so two copies stack top and bottom on one A4 portrait sheet — tear across the middle for Client & Office copies."
+                />
+                {settings.twoPerPageEnabled !== false && (
+                  <>
+                    <ToggleRow
+                      label="Show dashed tear line in center"
+                      value={settings.twoPerPageShowCutLine !== false}
+                      onChange={v => set({ twoPerPageShowCutLine: v })}
+                    />
+                    <ToggleRow
+                      label='Show "CLIENT COPY" / "OFFICE / SELF COPY" labels'
+                      value={settings.twoPerPageShowLabels !== false}
+                      onChange={v => set({ twoPerPageShowLabels: v })}
+                    />
+                  </>
+                )}
+              </SettingGroup>
+
               <SettingGroup title="Auto-print">
                 <ToggleRow label="Auto-print on save" value={settings.autoPrintOnSave} onChange={v => set({ autoPrintOnSave: v })}
                   hint="Send to your default printer immediately after Save & Download PDF." />
@@ -103,7 +181,7 @@ export default function PrintSettings() {
 
               <SettingGroup title="Watermark">
                 <ToggleRow label="Show watermark" value={settings.watermarkEnabled} onChange={v => set({ watermarkEnabled: v })}
-                  hint="Big diagonal stamp across the PDF (e.g. PAID / DUPLICATE / DRAFT)." />
+                  hint="Big diagonal stamp across the invoice (e.g. PAID / DUPLICATE / DRAFT)." />
                 {settings.watermarkEnabled && (
                   <>
                     <ToggleRow label="Use custom text instead of preset" value={settings.watermarkUseCustomText}
@@ -128,7 +206,7 @@ export default function PrintSettings() {
 
               <SettingGroup title="Multi-copy (GST rule 48)">
                 <ToggleRow label="Print multiple copies with labels" value={settings.multiCopyEnabled} onChange={v => set({ multiCopyEnabled: v })}
-                  hint="Prints the invoice N times with corner labels (ORIGINAL FOR RECIPIENT / DUPLICATE FOR TRANSPORTER / etc.). GST rule 48 requires 3 copies for goods, 2 for services." />
+                  hint="Applies to 1-bill-per-page PDFs — prints N labeled copies (ORIGINAL FOR RECIPIENT / DUPLICATE FOR TRANSPORTER / TRIPLICATE FOR SUPPLIER)." />
                 {settings.multiCopyEnabled && (
                   <SelectRow label="Number of copies" value={String(settings.multiCopyCount)} onChange={v => set({ multiCopyCount: parseInt(v, 10) })}
                     options={[['2', '2 (Original + Duplicate — services)'], ['3', '3 (Original + Duplicate + Triplicate — goods)']]} />
@@ -136,10 +214,10 @@ export default function PrintSettings() {
               </SettingGroup>
 
               <SettingGroup title="Multi-page invoices">
-                <ToggleRow label="Page numbers on every page" value={settings.pageNumbersEnabled} onChange={v => set({ pageNumbersEnabled: v })}
-                  hint='Shows "Page 2 of 5" bottom-right on pages 2+.' />
+                <ToggleRow label="Page numbers on multi-page PDFs" value={settings.pageNumbersEnabled} onChange={v => set({ pageNumbersEnabled: v })}
+                  hint='Shows "Page 2 of N" bottom-right on multi-page 1-up PDFs.' />
                 <ToggleRow label="Business name header on pages 2+" value={settings.pageHeaderEnabled} onChange={v => set({ pageHeaderEnabled: v })}
-                  hint="Repeats your business name at the top so multi-page invoices look professional." />
+                  hint="Repeats your business name at the top of continuation pages on multi-page PDFs." />
               </SettingGroup>
 
               <SettingGroup title="Print margins (mm)">
@@ -152,31 +230,6 @@ export default function PrintSettings() {
                 <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', margin: '3px 0 0' }}>
                   For pre-printed letterhead — shift content down to avoid your logo, or in from the edge to fit binding.
                 </p>
-              </SettingGroup>
-
-              <SettingGroup title="Verification codes">
-                <ToggleRow label="Invoice number as QR" value={settings.invoiceQrEnabled} onChange={v => set({ invoiceQrEnabled: v })}
-                  hint="Prints a QR of the invoice number (or verification URL if set below) in the bottom-right corner." />
-                {settings.invoiceQrEnabled && (
-                  <TextRow label="Verification URL (optional)" value={settings.invoiceQrUrl} onChange={v => set({ invoiceQrUrl: v })}
-                    placeholder="https://mycompany.com/verify/{invoice_number}"
-                    hint="{invoice_number} gets replaced with the actual invoice #. Leave blank to encode just the number." />
-                )}
-                <ToggleRow label="Invoice number as barcode text" value={settings.invoiceBarcodeEnabled} onChange={v => set({ invoiceBarcodeEnabled: v })}
-                  hint="Prints the invoice number in large monospace at the bottom-left for warehouse scanning / filing." />
-              </SettingGroup>
-
-              <SettingGroup title="Customer feedback QR">
-                <ToggleRow label="Feedback / review QR" value={settings.feedbackQrEnabled} onChange={v => set({ feedbackQrEnabled: v })}
-                  hint="Adds a QR at the bottom-left of the PDF that opens a URL — Google Reviews, feedback form, WhatsApp chat, anything you want." />
-                {settings.feedbackQrEnabled && (
-                  <>
-                    <TextRow label="URL to encode" value={settings.feedbackQrUrl} onChange={v => set({ feedbackQrUrl: v })}
-                      placeholder="e.g. https://g.page/r/YOUR_ID/review" />
-                    <TextRow label="Label above QR" value={settings.feedbackQrLabel} onChange={v => set({ feedbackQrLabel: v })}
-                      placeholder="Rate us · Give feedback" />
-                  </>
-                )}
               </SettingGroup>
 
               <SettingGroup title="Digital signature">
@@ -195,7 +248,7 @@ export default function PrintSettings() {
                       </>
                     ) : (
                       <>
-                        <label style={{ fontSize: '0.78rem', display: 'block', marginBottom: 3 }}>Upload signature (PNG / JPG)</label>
+                        <label style={{ fontSize: '0.78rem', display: 'block', marginBottom: 3 }}>Fallback signature image (PNG / JPG)</label>
                         <input type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml"
                           onChange={e => {
                             const file = e.target.files?.[0];
@@ -208,16 +261,11 @@ export default function PrintSettings() {
                           style={{ fontSize: '0.78rem' }} />
                       </>
                     )}
-                    <TextRow label="Signatory name" value={settings.signatureName} onChange={v => set({ signatureName: v })}
+                    <TextRow label="Signatory label" value={settings.signatureName} onChange={v => set({ signatureName: v })}
                       placeholder="e.g. Rakesh Kumar · Director"
-                      hint="Falls back to business name if left blank." />
+                      hint='Falls back to "Authorized Signatory" if left blank.' />
                   </>
                 )}
-              </SettingGroup>
-
-              <SettingGroup title="Terms &amp; Conditions">
-                <ToggleRow label="Print T&amp;C on a separate page" value={settings.termsSeparatePage} onChange={v => set({ termsSeparatePage: v })}
-                  hint="For long terms — puts them on page 2 instead of squishing on page 1. Only affects invoices with T&amp;C enabled." />
               </SettingGroup>
 
             </div>
@@ -238,22 +286,49 @@ export default function PrintSettings() {
               <Info size={14} style={{ display: 'inline', verticalAlign: -2, marginRight: 5 }} />
               Live preview
             </strong>
-            <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>A4 · updates as you type</span>
+            <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+              {settings.twoPerPageEnabled !== false ? 'A4 Tear Sheet (Top & Bottom)' : 'A4 · updates as you type'}
+            </span>
           </div>
           <div style={{ overflow: 'auto', flex: 1, background: '#fff', padding: '0.75rem', borderRadius: 6, minHeight: 200 }}>
-            <div style={{ zoom: 0.5, minWidth: 0 }}>
-              <InvoicePreview
-                ref={previewRef}
-                profile={sample.profile}
-                client={sample.client}
-                details={sample.details}
-                items={sample.items}
-                totals={sample.totals}
-                invoiceType={sample.invoiceType}
-                options={previewInvoiceOptions}
-                customTerms=""
-                customNotes=""
-                extraSections={[]}
+            <div style={{ zoom: settings.twoPerPageEnabled !== false ? 0.48 : 0.5, minWidth: 0 }}>
+              <TwoUpSheetPreview
+                enabled={settings.twoPerPageEnabled !== false}
+                showLabels={settings.twoPerPageShowLabels !== false}
+                showCutLine={settings.twoPerPageShowCutLine !== false}
+                leftLabel={settings.twoPerPageLeftLabel || 'CLIENT COPY'}
+                rightLabel={settings.twoPerPageRightLabel || 'OFFICE / SELF COPY'}
+                renderPrimary={() => (
+                  <InvoicePreview
+                    ref={previewRef}
+                    previewOnly
+                    profile={sample.profile}
+                    client={sample.client}
+                    details={sample.details}
+                    items={sample.items}
+                    totals={sample.totals}
+                    invoiceType={sample.invoiceType}
+                    options={previewInvoiceOptions}
+                    customTerms=""
+                    customNotes=""
+                    extraSections={[]}
+                  />
+                )}
+                renderSecondary={() => (
+                  <InvoicePreview
+                    previewOnly
+                    profile={sample.profile}
+                    client={sample.client}
+                    details={sample.details}
+                    items={sample.items}
+                    totals={sample.totals}
+                    invoiceType={sample.invoiceType}
+                    options={previewInvoiceOptions}
+                    customTerms=""
+                    customNotes=""
+                    extraSections={[]}
+                  />
+                )}
               />
             </div>
           </div>

@@ -11,12 +11,12 @@ Runs 100% locally on your own machine. Zero monthly subscriptions. Zero cloud lo
 | Attribute | Specification |
 |---|---|
 | **Version** | `v1.2.0` |
-| **Target Jurisdiction** | India (A4 Invoices · CGST / SGST / UTGST / IGST · HSN & SAC) |
+| **Target Jurisdiction** | India-Only (`INR ₹` · `PIN Code` · Indian States/UTs · `GSTIN` / `PAN` / `IFSC` · Drug Licence No. · CGST / SGST / UTGST / IGST · HSN & SAC) |
 | **Frontend Stack** | React 19 · Vite 7 · Lucide Icons · HTML2Canvas · jsPDF |
 | **Backend Stack** | Express 5 · Node.js 18+ · WebSockets (`ws`) |
 | **Database** | SQLite (`better-sqlite3`) via Drizzle ORM (ACID Compliant) |
-| **Desktop App** | Electron 45 · NSIS Desktop Installer |
-| **Security** | AES-256-GCM Encryption · Pure JS `bcryptjs` Hashing · JWT Authentication · Role-Based Access Control (RBAC) · SHA-256 Audit Trail |
+| **Desktop App** | Native Rust + WebView2 Installer (`ArthSutra-Lite-Setup.exe`) · Electron 45 · NSIS Installer |
+| **Security** | AES-256-GCM Encryption (DB & `.arthbackup` Bundles) · Pure JS `bcryptjs` Hashing · JWT Authentication · Role-Based Access Control (RBAC) · SHA-256 Audit Trail |
 | **Offline Capabilities** | PWA (Service Workers) · IndexedDB Queue · Offline-to-Online Idempotent Sync |
 | **License** | Apache 2.0 |
 
@@ -34,16 +34,17 @@ same for my father the marg erp was too bloated for him
 ## What's New in v1.2.0
 
 - 🗄️ **SQLite + Drizzle ORM Engine:** Migrated from legacy flat JSON files to a high-concurrency, ACID-compliant SQLite database (`data/arth-sutra.sqlite`) with schema safety and automated JSON-to-SQLite migration.
-- 🔗 **Cryptographic Tamper-Evident Audit Trail:** Every business transaction is cryptographically signed using SHA-256 hash chaining (Merkle-style). Real-time verification detects any manual row edits or database tampering.
-- 🛡️ **Role-Based Access Control (RBAC) & JWT Authentication:** Multi-user security with `ADMIN`, `ACCOUNTANT`, and `CLERK` permission tiers, pure JavaScript `bcryptjs` password hashing (zero native compilation toolchains), and signed 24h JWT sessions.
-- 🔒 **Unified Sepia Lock Screen & In-App Security Settings:** Integrated authentication flow styled in the signature sepia parchment palette, paired with a dedicated **Account Security** settings panel to update username and password credentials on the fly.
-- 🌱 **Non-Destructive Database Seeding:** The server boots with smart seeding logic that inspects `SELECT COUNT(*) FROM users` — only provisioning default credentials on an empty database, so customized or renamed administrator credentials are never overwritten on server restart.
-- 🔐 **AES-256-GCM Financial Encryption at Rest:** NIST SP 800-38D compliant encryption with 12-byte IV and 16-byte authentication tags protecting bank details, IFSC, and financial credentials.
-- 🔄 **Real-Time WebSocket Sync:** Live multi-terminal synchronization across local network (LAN) clients with JWT-authenticated WebSocket streams.
-- 📴 **Offline PWA & Write-Behind Sync:** Complete offline functionality with service workers, local IndexedDB queuing, and an HTTP `X-Idempotency-Key` backend to prevent duplicate bills on reconnect.
-- 🔍 **AI/Fuzzy GSTR-2B Reconciliation Engine:** Reconciles supplier invoices against portal GSTR-2B JSON using Levenshtein distance fuzzy matching, tax tolerance, and mismatch categorization.
-- 🖥️ **Native Desktop App (Electron):** Standalone native desktop application with single-instance locking and automatic user-data routing.
-- 🧩 **Modular Plugin System & Tally XML Export:** Dynamic plugin architecture with a built-in Tally ERP exporter generating standard XML sales vouchers for direct import into TallyPrime and Tally.ERP 9.
+- 🔗 **Cryptographic Tamper-Evident Audit Trail:** Every business transaction is cryptographically signed using SHA-256 hash chaining (Merkle-style). Real-time verification (via API or **Settings → Account Security**) detects any manual row edits or database tampering.
+- 🇮🇳 **India-Only Business Configuration & Drug Licence Tracking:** Locked strictly to Indian MSME defaults (`PIN Code`, Indian States & UTs, `GSTIN`, `PAN`, `IFSC Code`, `INR ₹`) with zero foreign country, ZIP, or EIN chrome. Tracks **Drug Licence No.** (`licence`) across Company Details, multi-Business Profiles, Clients, and automatic Seller Licence seeding on invoices.
+- ✂️ **2-Bills-Per-Page Tear Sheets & Print Layout Engine:** Default `2/Page` | `1/Page` mode stacks `CLIENT COPY` and `OFFICE / SELF COPY` top-and-bottom on A4 Portrait with a horizontal `TEAR` divider, alongside full **Invoice Layout** settings (logo, HSN, amount in words, bank/UPI QR sizes, watermarks, GST Rule 48 multi-copy labels, continuation headers/page numbers, margins, and digital signature).
+- 🛡️ **Role-Based Access Control (RBAC), Team Users & JWT Authentication:** Multi-user `ADMIN`, `ACCOUNTANT`, and `CLERK` permission tiers, pure JS `bcryptjs` hashing, signed 24h JWT sessions, and an ADMIN **Team Users & Roles** panel inside **Settings → Account Security**.
+- 🔒 **Unified Sepia Lock Screen & First-Time Setup Wizard:** Integrated sepia authentication screen paired with a First-Time Setup Wizard (`POST /api/auth/setup`) where the admin defines custom credentials (no hardcoded default passwords are ever seeded) or restores directly from an existing backup.
+- 🔐 **AES-256-GCM Encryption at Rest:** NIST SP 800-38D encryption protecting bank/IFSC credentials inside SQLite and PBKDF2 + AES-256-GCM encryption for portable `.arthbackup` bundles.
+- 🔄 **Real-Time WebSocket Sync & Offline PWA Write-Behind Queue:** Live multi-terminal LAN sync via JWT-authenticated WebSockets, Service Worker caching, and IndexedDB `X-Idempotency-Key` replay on reconnect.
+- 🔍 **AI/Fuzzy GSTR-2B Reconciliation Engine:** Reconciles supplier invoices against portal GSTR-2B JSON/Excel using Levenshtein distance fuzzy matching, tax tolerance, and mismatch categorization.
+- ☁️ **Off-PC Disaster Recovery & Cloud Sync:** Auto-detects **Google Drive for Desktop**, **OneDrive**, and external/USB drives to mirror rolling SQLite snapshots, `HOW-TO-RESTORE.txt`, incremental PDFs, and optional `.arthbackup` bundles, plus direct Google Drive OAuth upload/restore.
+- 🖥️ **Compact Native Rust + WebView2 & Electron Desktop Apps:** Ultra-compact native Windows installer (`ArthSutra-Lite-Setup.exe` via `desktop-rust/` + NSIS) alongside Electron 45 NSIS desktop packaging (`release/ArthSutra Setup.exe`).
+- 🧩 **Modular Plugin System & Tally XML Export:** Dynamic plugin loader with a built-in Tally ERP exporter generating XML sales vouchers for TallyPrime and Tally.ERP 9.
 
 ---
 
@@ -66,10 +67,16 @@ same for my father the marg erp was too bloated for him
   - Invoice-level global discounts.
 * **TDS & TCS Calculations:**
   - Automatic calculation of TCS (Section 206C(1H)) and TDS (Section 194Q) with cumulative-threshold tracking.
+* **2-Bills-Per-Page Tear Sheets & Invoice Layout:**
+  - `2/Page` | `1/Page` quick toggle in the live preview toolbar & Print Preview modal (`TwoUpSheetPreview.jsx` & `invoicePdfBuilder.js`).
+  - Stacks `CLIENT COPY` and `OFFICE / SELF COPY` top-and-bottom on one A4 Portrait sheet with an optional horizontal dashed `TEAR` divider.
+  - Supports **1-up GST Rule 48 multi-copy printing** (`ORIGINAL FOR RECIPIENT`, `DUPLICATE FOR TRANSPORTER`, `TRIPLICATE FOR SUPPLIER`), diagonal watermarks, continuation headers & page numbers, custom margins (mm), and digital signature stamps.
+* **Seller Drug Licence & Multi-Profile Billing:**
+  - Automatic `details.sellerLicence` seeding from the active business profile (`profile.licence`) on new invoices and **Billing From** profile switches, plus multi-account bank/UPI selection per invoice.
 * **Instant Digital Payments:**
-  - Dynamic UPI QR codes rendered on invoices with payee VPA, business name, and exact invoice payable amount.
+  - Dynamic UPI QR codes (`56 × 56 px`, `75 × 75 px`, or `100 × 100 px`) rendered on invoices with payee VPA, business name, and exact invoice payable amount.
 * **A4 Print & PDF Archival:**
-  - High-resolution, professional A4 print format with company logo, signatures, and terms.
+  - High-resolution A4 & thermal PDF export with company logo, signatures, and Indian Terms & Conditions presets (`TERMS_PRESETS`).
   - Auto-saved PDF archive under `Saved Invoices/<ClientName>/<Month>/`.
 
 ### 2. Inventory & Batch Management (FEFO)
@@ -124,10 +131,13 @@ same for my father the marg erp was too bloated for him
   - Advance tax installment calculator and statutory due date tracker.
 
 ### 6. Client & Vendor Ledgers
-* **Client Directory:**
-  - GSTIN, PAN, billing/shipping address, contact details, and credit terms.
+* **Client Directory & Drug Licence Tracking:**
+  - India-locked directory (`PIN Code`, Indian `State`, `GSTIN`, `PAN`, `Drug Licence No.` / `licence`, SEZ flag, billing/shipping address, contact details, and credit terms).
+* **Predictive Client Search Popup & Auto-Save:**
+  - `ClientSuggestingInput` (`useClientSearch` & `clientDirectory.js`) merges saved clients with historical invoice snapshots so typing a name, GSTIN, DL No., phone, or city surfaces instant matches.
+  - Automatically creates or updates client details (including newly entered `GSTIN` or `licence`) when saving an invoice.
 * **Client Statement (Dr / Cr Ledger):**
-  - Generates running debit/credit ledger statements as downloadable PDFs with date ranges and closing balances.
+  - Generates running debit/credit ledger statements as downloadable PDFs with date ranges and closing balances (including Drug Licence No.).
 * **Accounts Receivable Aging:**
   - Categorized aging breakdown: `0–30 days`, `31–60 days`, `61–90 days`, and `90+ days`.
 
@@ -158,15 +168,13 @@ same for my father the marg erp was too bloated for him
   - **`CLERK`:** Front-desk billing, invoice creation, and customer directory.
   - **Pure JS `bcryptjs` Hashing:** Passwords hashed with high-entropy salt rounds in pure JavaScript, removing native build toolchains (`node-gyp` / MSVC).
   - **Unified Sepia Lock Screen:** Seamless aesthetic continuity styled with the warm parchment, dark slate, and green badge palette. Handles credential validation, offline session restoration, and 24h JWT token issuance.
-* **Account Security & In-App Credential Management:**
-  - Update login credentials directly under **Settings → Account Security** (`PUT /api/auth/profile`).
-  - Requires verifying current password before accepting changes to username or password.
-  - Automatically re-issues a fresh signed JWT upon modification so sessions remain active without disruptive logouts.
-  - Prevents username collisions and enforces unique accounts across the system.
-* **Non-Destructive Database Seeding:**
-  - Server startup verification uses `SELECT COUNT(*) FROM users` rather than checking specific usernames.
-  - Seeds the default `admin` / `admin123` account only if the database is 100% empty on initial install.
-  - Any customized, renamed, or deleted admin credentials will never be overwritten or recreated on server restarts.
+* **Account Security, Team Users (RBAC) & In-App Audit Verification:**
+  - Update login credentials directly under **Settings → Account Security** (`PUT /api/auth/profile`) with current-password verification and automatic JWT re-issuance.
+  - **Team Users & Roles (RBAC):** `ADMIN` users can create, list, and delete `ADMIN`, `ACCOUNTANT`, and `CLERK` accounts directly in **Settings → Account Security** (`GET/POST/DELETE /api/auth/users`).
+  - **In-App Audit Trail Verification:** Click **Verify Audit Chain** inside **Settings → Account Security** (or call `GET /api/audit/verify`) to validate the SHA-256 chain from `GENESIS`.
+* **First-Time Setup Wizard & Backup Recovery:**
+  - On a fresh install with no users in the database, the app presents a First-Time Setup Wizard (`SetupScreen.jsx`) to either configure the master `ADMIN` account (`POST /api/auth/setup`) or restore an entire business directly from a `.json` / `.arthbackup` / `.sqlite` backup (`POST /api/auth/setup-inspect-backup` & `POST /api/auth/setup-restore`).
+  - No hardcoded default password is ever seeded, and existing admin credentials are never overwritten on server restarts.
 * **Cryptographic Event Log (SHA-256 Hash Chain):**
   - Immutable audit trail linking each state change to the previous block hash:
     $$\text{currentHash} = \text{SHA256}(\text{previousHash} + \text{timestamp} + \text{action} + \text{payload} + \text{entity})$$
@@ -196,14 +204,30 @@ same for my father the marg erp was too bloated for him
 
 ### 12. Backup & Disaster Recovery
 * **Automated Daily Backups:**
-  - SQLite database snapshots taken daily and retained for 30 rolling days.
+  - Integrity-checked SQLite snapshots taken daily and retained for 30 rolling days.
 * **On-Demand Snapshots & One-Click Restore:**
-  - Instant backup creation and one-click database restoration from the UI.
+  - Instant backup creation and one-click database restoration from Settings (`BackupAndTrashPanel`).
 * **Soft-Delete Trash Bin:**
-  - Deleted invoices are moved to a 30-day restorable Trash Bin before permanent purge.
-* **Single-File Full Export/Import:**
-  - Complete JSON and SQLite database export for portability.
-  - Optional Google Drive cloud backup to your personal Google account.
+  - Deleted invoices (and their archived PDFs) move to a 30-day restorable Trash Bin before permanent purge.
+* **Off-PC Disaster Recovery & Cloud Sync (`BackupRecoveryPanel`):**
+  - Auto-detects **Google Drive for Desktop**, **OneDrive**, and external/USB drives (`Re-scan PC Drives`) to mirror rolling snapshots, `HOW-TO-RESTORE.txt`, and incremental `Saved Invoices/` PDFs automatically on changes.
+  - Supports **PBKDF2 + AES-256-GCM encrypted `.arthbackup` bundles** with Recovery Password protection, restorable both in Settings and directly from the **First-Time Setup Wizard** (`Restore Backup` tab).
+  - Includes an optional direct Google Drive OAuth upload & restore panel (`Save Drive Settings`, Connect, Upload, Restore).
+* **Single-File Portable Export/Import:**
+  - Granular category export and `?overwrite=1` idempotent restoration for `.arthbackup`, `.json`, and `.sqlite` backups.
+
+### 13. Settings & Administration Hub
+All 10 jump-nav sections in **Settings** (`SettingsView.jsx`) operate on Indian business defaults:
+1. **Company (`#section-company`):** Business identity, tagline, **Drug Licence No.** (`licence`), `PIN Code`, Indian `State` dropdown, `GSTIN`, `PAN`, GSTR `AATO > ₹5 Cr` HSN rule & FY turnover (`gt` / `cur_gt`), multi-account Payment Accounts (`IFSC`, `UPI ID`, default⭐), Invoice Number Format (Branded/Simple Sequential/Random, Indian Apr–Mar FY `YYYY-YY`, padding, `startNumber`), and Logo/Signature uploads (`CLERK` read-only protection).
+2. **Profiles (`#section-profiles`):** Switchable multi-business profiles with auto-save on switch, a **Create / Edit Business Profile** modal, and saved cards displaying `State`, `GSTIN`, and `DL` number.
+3. **Terms (`#section-terms`):** Reusable Terms & Conditions templates and Indian quick-start presets (`TERMS_PRESETS`).
+4. **Invoice Layout (`#section-print`):** Unified `PrintSettings` editor synced with `arthsutra_invoiceOptions` and live A4 / 2-up tear-sheet preview.
+5. **Features (`#section-modules`):** Live-synced modular feature switches across Sales, Directory, Purchases & GSTR-2B, GST/E-Way Bill/TDS-TCS/Income Tax, Reports, Google Drive, and UPI QR (`hydrateEnabledModules` + `fgsb-modules-changed`).
+6. **Stock (`#section-stock`):** Low-stock alert toggle & threshold paired with near-expiry / expired batch notifications (`computeNearExpiryBatches`).
+7. **Backups (`#section-backups`):** Local daily SQLite snapshots + 30-day Trash Bin.
+8. **Off-PC & Cloud (`#section-cloud`):** PC Crash Protection health banner, automatic Drive/OneDrive/USB folder mirror, and direct Google Drive OAuth backup/restore.
+9. **Import/Export (`#section-data`):** Granular `.arthbackup`, `.json`, and `.sqlite` export/restore.
+10. **Account Security (`#section-security`):** Credential updates (`PUT /api/auth/profile`), `ADMIN` **Team Users & Roles (RBAC)** management, and **Cryptographic Audit Trail Verification (SHA-256)** (`Verify Audit Chain`).
 
 ---
 
@@ -211,45 +235,73 @@ same for my father the marg erp was too bloated for him
 
 ```
 Arth-Sutra/
-├── electron/                    Electron desktop runtime
+├── desktop-rust/                Compact native Rust + WebView2 desktop launcher
+│   ├── src/main.rs              Single-instance launcher, Express bootstrap & WebView2 window
+│   ├── Cargo.toml               Rust dependencies & app metadata
+│   ├── icon.ico                 Application & installer icon
+│   └── installer.nsi            NSIS script producing release/ArthSutra-Lite-Setup.exe
+├── electron/                    Electron 45 desktop runtime
 │   └── main.js                  Main process, window management & port listener
 ├── server.js                    Express 5 daemon & WebSocket server
 ├── db/                          Database layer (SQLite + Drizzle ORM)
-│   ├── index.js                 SQLite connection, table bootstrap & migrations
-│   ├── schema.js                Drizzle ORM typed schema definitions
+│   ├── index.js                 SQLite connection, table bootstrap & ensureColumn() migrations
+│   ├── schema.js                Drizzle ORM schema definitions (mirroring schema.ts)
+│   ├── schema.ts                TypeScript Drizzle schema source for drizzle-kit
 │   └── auditEngine.js           SHA-256 cryptographic hash chain engine
 ├── plugins/                     Modular extensions directory
 │   └── tally-export.js          TallyPrime / Tally.ERP 9 XML export engine
 ├── utils/                       Server-side core utilities
 │   ├── auth.js                  Bcrypt hashing, JWT tokens & RBAC middleware
+│   ├── backupCrypto.js          PBKDF2 + AES-256-GCM .arthbackup bundle encryption
 │   ├── crypto.js                AES-256-GCM encryption at rest
+│   ├── disasterRecovery.js      SQLite snapshots, integrity checks & off-PC folder mirroring
 │   └── recon.js                 Levenshtein fuzzy GSTR-2B reconciliation
-├── public/                      Static assets & offline Tesseract WASM files
-├── scripts/                     Maintenance, test & migration scripts
-│   ├── migrate-json-to-sqlite.js Migrate legacy data/*.json into SQLite
+├── public/                      Static assets, app icons & offline Tesseract WASM files
+├── scripts/                     Build, packaging, test & migration scripts
+│   ├── build-native.mjs         Builds Vite + Rust WebView2 + ArthSutra-Lite-Setup.exe
+│   ├── generate-icons.mjs       Generates SVG/PNG/ICO/RGBA application icon assets
+│   ├── bundle-tesseract-assets.mjs Bundles offline OCR assets into public/tesseract/
+│   ├── migrate-json-to-sqlite.js Migrates legacy data/*.json into SQLite
 │   └── migrate-phase-2-3.js      RBAC & crypto migration scripts
 ├── src/                         React 19 Frontend
 │   ├── context/
 │   │   └── AuthContext.jsx      JWT authentication state & session management
+│   ├── services/
+│   │   └── googleDrive.js       Google Drive OAuth & backup file helpers
 │   ├── components/
-│   │   ├── Dashboard/           Sales analytics, gross profit & filing alerts
-│   │   ├── InvoiceGenerator/    Tax invoice form, FEFO logic & line items
-│   │   ├── InvoicePreview.jsx   A4 printable template engine
+│   │   ├── Dashboard/           Sales analytics, gross profit, low-stock & near-expiry alerts
+│   │   ├── InvoiceGenerator/    Tax invoice form, FEFO logic, predictive client search & hooks
+│   │   ├── InvoicePreview.jsx   A4 & thermal printable GST template engine
+│   │   ├── TwoUpSheetPreview.jsx 2-bills-per-page top & bottom tear-sheet wrapper
+│   │   ├── PrintPreviewModal.jsx Fullscreen print/PDF preview with 2/Page | 1/Page toggle
+│   │   ├── PrintSettings.jsx    Invoice Layout & PDF print configuration UI
+│   │   ├── BackupRecoveryPanel.jsx Off-PC folder mirror & Google Drive OAuth backup panel
+│   │   ├── ClientModal.jsx      India-locked client add/edit modal with Drug Licence No.
+│   │   ├── ClientsView.jsx      Client directory & statement PDF
 │   │   ├── ReconView.jsx        GSTR-2B automated reconciliation interface
 │   │   ├── ExtensionsView.jsx   Plugins dashboard & Tally XML export UI
-│   │   ├── SetupScreen.jsx      First-time administrator setup wizard
+│   │   ├── SetupScreen.jsx      First-time admin setup & backup restore wizard
 │   │   ├── LockScreen.jsx       Sepia-themed authentication & lock screen
-│   │   ├── GSTReturns/          GSTR-1, GSTR-3B & e-Way Bill export hub
+│   │   ├── GstReturns/          GSTR-1, GSTR-3B & e-Way Bill export hub
+│   │   ├── IncomeTax.jsx        Old vs New regime & 44AD/44ADA/44AE tax helper
 │   │   ├── InventoryView.jsx    Products, batches, and stock management
 │   │   ├── PurchaseBills.jsx    Purchases & OCR bill scanning
-│   │   ├── ClientsView.jsx      Client directory & statement PDF
-│   │   ├── ExpensesView.jsx     Expense tracking with ITC tags
-│   │   └── SettingsView.jsx     Company profile, RBAC users & backups
+│   │   ├── ReceiptVoucher.jsx   Payment receipts & invoice settlement
+│   │   ├── RecurringInvoices.jsx Automated recurring invoice schedules
+│   │   ├── ReportsView.jsx      P&L, receivables aging & turnover reports
+│   │   ├── ExpenseTracker.jsx   Expense tracking with ITC tags
+│   │   ├── UserGuideView.jsx    Built-in searchable user guide
+│   │   └── SettingsView.jsx     10-section settings, multi-profiles, RBAC users & audit UI
 │   ├── hooks/
 │   │   └── useSocket.js         Real-time WebSocket event listener
-│   └── utils/
-│       ├── audit.js             Client-side audit hashing utilities
-│       └── offlineSync.js       IndexedDB offline write-behind queue
+│   ├── utils/
+│   │   ├── audit.js             Client-side audit hashing utilities
+│   │   ├── clientDirectory.js   Predictive search merge & client auto-save payload builder
+│   │   ├── invoicePdfBuilder.js 2-up tear-sheet & 1-up multi-copy jsPDF compositor
+│   │   ├── offlineSync.js       IndexedDB offline write-behind queue
+│   │   └── printSettings.js     Print settings persistence & sample invoice builder
+│   ├── store.js                 Frontend API client, module sync & backup helpers
+│   └── utils.js                 India GST math, Indian states, TERMS_PRESETS & module map
 ├── data/                        Local SQLite database & config (gitignored)
 │   ├── arth-sutra.sqlite        Primary ACID-compliant database
 │   └── backups/                 Rolling 30-day database backups
@@ -274,13 +326,18 @@ Arth-Sutra/
    cd Arth-Sutra
    ```
 2. Double-click **`Install ArthSutra.bat`** (or run `npm install`).
-3. To build and package the native Windows installer (`.exe` via NSIS):
+3. **Compact Native Rust + WebView2 Installer (Recommended — `<30 MB`):**
+   Requires Rust (`cargo`) and NSIS (`makensis.exe` from electron-builder cache). Builds the Vite bundle, compiles `desktop-rust/`, stages `release-native/app/`, and produces `release/ArthSutra-Lite-Setup.exe`:
+   ```bash
+   npm run build:native
+   ```
+4. **Electron NSIS Desktop Installer (Alternative):**
    ```bash
    npm run electron:build
    ```
-4. The installer will be generated under `release/ArthSutra Setup.exe`.
+   Generates `release/ArthSutra Setup.exe`.
 
-To launch in desktop development mode:
+To launch in Electron desktop development mode:
 ```bash
 npm run electron:dev
 ```
@@ -327,7 +384,7 @@ npm run dev
 When Arth-Sutra is launched for the first time with an empty database:
 
 1. **Automatic Detection:** The frontend polls `GET /api/auth/status` on load. If no user accounts exist (`isSetupComplete: false`), the application seamlessly displays the **First-Time Setup Wizard** (`SetupScreen`).
-2. **Master Administrator Setup:** You are prompted to define your custom **Admin Username** and **Password** (with confirmation).
+2. **New Business or Restore Backup:** Choose **New Business** to define your custom **Admin Username** and **Password**, or switch to **Restore Backup** to migrate directly from an existing `.json`, `.arthbackup`, or `.sqlite` backup (`POST /api/auth/setup-inspect-backup` & `POST /api/auth/setup-restore`).
 3. **Instant Auto-Login:** Upon submitting, `POST /api/auth/setup` validates the empty database condition, securely hashes your password with `bcryptjs`, assigns the `ADMIN` role, and returns a signed 24h JWT token. You are instantly routed into the Dashboard.
 4. **Permanent Security:** The `POST /api/auth/setup` endpoint automatically locks down after the initial setup. Any subsequent calls to `/api/auth/setup` return HTTP `403 Forbidden`, preventing rogue account creation.
 5. **Subsequent Launches:** On all subsequent runs, the app loads the standard sepia **Lock Screen** (`LockScreen.jsx`) to authenticate returning users.
@@ -369,7 +426,7 @@ When Arth-Sutra is launched for the first time with an empty database:
    - Select the downloaded XML file. All inventory items, batches, godowns, and CGST/SGST/IGST ledgers will import automatically.
 
 ### 4. Cryptographic Audit Verification
-1. To verify that no transactions or audit logs have been manually edited, tampered with, or deleted inside the SQLite database, open:
+1. Verify transaction integrity directly inside the app under **Settings → Account Security → Verify Audit Chain**, or query:
    ```
    http://localhost:47371/api/audit/verify
    ```
@@ -410,16 +467,20 @@ The migration runs inside atomic database transactions with zero data loss. Your
 Arth-Sutra includes comprehensive unit and integration tests powered by Vitest:
 
 ```bash
-npm test
+npm test -- --run
 ```
 
-Test coverage includes (32/32 tests passing across 6 test suites):
-- **`auth-profile.test.js`:** Database empty-table seeding lifecycle, password verification, profile updates, duplicate username rejection, and JWT regeneration.
-- **`crypto-auth.test.js`:** AES-256-GCM encryption/decryption, pure JS bcryptjs password hashing, JWT issuance, and RBAC authorization.
-- **`recon.test.js`:** Fuzzy matching, Levenshtein distance calculations, and tolerance evaluations.
-- **`audit.test.js`:** SHA-256 hash chaining and tamper-detection verification.
-- **`db.test.js`:** SQLite schema validation, foreign keys, and Drizzle queries.
-- **`utils.test.jsx`:** GST math, currency formatting, and discount calculations.
+Test coverage includes (81/81 tests passing across 10 test suites):
+- **`india-settings.test.js` (24 tests):** India-only country lock (`PIN Code`, `GSTIN`, `IFSC Code`, Indian states), `profiles` & `clients` Drug Licence No. (`licence`) and `country = 'India'` persistence, `TERMS_PRESETS`, near-expiry batch alert computation, 1-up PrintSettings PDF flags, and `store.js` `?overwrite=1` import + live module sync event.
+- **`two-up-pdf.test.js` (9 tests):** 2-bills-per-page A4 Portrait tear-sheet layout geometry, `CLIENT COPY` / `OFFICE / SELF COPY` & `TEAR` divider markings, 1-up fallback, thermal single-copy isolation, and multi-page slicing.
+- **`auth-profile.test.js` (8 tests):** Empty-database user lifecycle, current password verification, profile updates, duplicate username rejection, JWT regeneration, and First-Time Setup Wizard (`/api/auth/status` & `/api/auth/setup`).
+- **`crypto-auth.test.js` (7 tests):** AES-256-GCM encryption/decryption, pure JS `bcryptjs` password hashing, JWT issuance, and RBAC authorization.
+- **`recon.test.js` (7 tests):** Fuzzy matching, Levenshtein distance calculations, and GSTR-2B tolerance evaluations.
+- **`components/utils.test.jsx` (7 tests):** GST math, currency formatting, and discount calculations.
+- **`disaster-recovery.test.js` (6 tests):** PBKDF2 + AES-256-GCM `.arthbackup` bundle encryption/decryption, integrity-checked SQLite snapshots & cross-DB restore, and incremental off-PC folder mirroring.
+- **`client-search.test.js` (6 tests):** Merged directory + historical bill client discovery, multi-field predictive filtering, and idempotent client auto-save/upsert payloads.
+- **`audit.test.js` (4 tests):** SHA-256 payload sanitization, hash chaining, and tamper-detection verification.
+- **`db.test.js` (3 tests):** SQLite schema validation, Drizzle queries, and ACID transactions.
 
 ---
 
@@ -442,4 +503,4 @@ Test coverage includes (32/32 tests passing across 6 test suites):
 
 ## License
 
-This project is licensed under the **Apache License 2.0**. See the [LICENSE]
+This project is licensed under the **Apache License 2.0**. See the [LICENSE](LICENSE) file for details.

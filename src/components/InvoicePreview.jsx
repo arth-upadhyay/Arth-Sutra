@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import QRCode from 'qrcode';
 import DOMPurify from 'dompurify';
-import { numberToWords, INVOICE_TYPES, getCountryConfig, getAccountById, getPaperSize, resolveLineDiscount } from '../utils';
+import { numberToWords, INVOICE_TYPES, getAccountById, getPaperSize, resolveLineDiscount, isModuleEnabled } from '../utils';
+import { getPrintSettings } from '../utils/printSettings';
+import { getEnabledModules } from '../store';
 
 const SANITIZE_CONFIG = {
   ALLOWED_TAGS: ['p','br','b','strong','i','em','u','ul','ol','li','a','h1','h2','h3','h4','h5','h6','table','thead','tbody','tr','th','td','span','div','blockquote','code','pre','hr'],
@@ -35,23 +37,44 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
   const isIntraUT = !!totals?.isUtgst || !!totals?.isIntraUT;
 
   const typeConfig = INVOICE_TYPES[invoiceType] || INVOICE_TYPES['tax-invoice'];
-  const sellerCC = getCountryConfig(profile?.country);
+  const ps = getPrintSettings();
+  const upiModuleOn = isModuleEnabled('upiQr', getEnabledModules());
 
   const account = options.paymentAccountSnapshot || getAccountById(profile, options.selectedAccountId);
 
-  const opt = (key, fallback = true) => options[key] !== undefined ? options[key] : fallback;
-  const showGST          = opt('showGST', typeConfig.showGST);
+  const opt = (key, fallback = true) => (
+    options[key] !== undefined
+      ? options[key]
+      : (ps[key] !== undefined ? ps[key] : fallback)
+  );
+  const showGST          = options.showGST !== undefined ? options.showGST : typeConfig.showGST;
   const showHSN          = opt('showHSN', true);
-  const showUPI          = opt('showUPI', true);
+  const showUPI          = upiModuleOn && opt('showUPI', true);
   const showLogo         = opt('showLogo', true);
   const showBankDetails  = opt('showBankDetails', true);
   const showAmountWords  = opt('showAmountWords', true);
-  const showSignature    = opt('showSignature', true);
+  const showSignature    = options.showSignature !== undefined
+    ? options.showSignature
+    : (ps.signatureShow !== undefined ? ps.signatureShow : true);
   const showRoundOff     = opt('showRoundOff', true);
   const showNotes        = opt('showNotes', true);
   const showExtraSec     = opt('showExtraSections', true);
   const showPoNumber     = opt('showPoNumber', true);
   const showPharmaFields = opt('showPharmaFields', true);
+
+  const qrSizeKey = options.qrSize || ps.qrSize || 'medium';
+  const qrPx = qrSizeKey === 'small' ? 56 : qrSizeKey === 'large' ? 100 : 75;
+
+  const signatureImg = profile?.signature || ps.signatureImage || '';
+  const signatoryLabel = options.signatureName || ps.signatureName || 'Authorized Signatory';
+
+  const showWatermark = options.watermarkEnabled !== undefined ? !!options.watermarkEnabled : !!ps.watermarkEnabled;
+  const wmUseCustom = options.watermarkUseCustomText !== undefined ? !!options.watermarkUseCustomText : !!ps.watermarkUseCustomText;
+  const wmText = wmUseCustom
+    ? (options.watermarkCustomText ?? ps.watermarkCustomText ?? '')
+    : (options.watermarkText ?? ps.watermarkText ?? 'DUPLICATE');
+  const wmOpacityRaw = Number(options.watermarkOpacity ?? ps.watermarkOpacity ?? 15);
+  const wmOpacity = Math.max(0.02, Math.min(0.6, (Number.isFinite(wmOpacityRaw) ? wmOpacityRaw : 15) / 100));
 
   const layoutFormat = options.layoutFormat || 'pharma';
 
@@ -227,7 +250,30 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
         .ipx-rich ul, .ipx-rich ol { margin: 0.25rem 0 0.35rem 1.25rem; padding: 0; }
       `}</style>
 
-      <div className="arthsutra-wrapper">
+      <div className="arthsutra-wrapper" style={{ position: 'relative' }}>
+        {showWatermark && String(wmText).trim() && (
+          <div
+            aria-hidden="true"
+            style={{
+              position: 'absolute',
+              top: '50%',
+              left: '50%',
+              transform: 'translate(-50%, -50%) rotate(-35deg)',
+              fontSize: '72px',
+              fontWeight: 800,
+              letterSpacing: '0.12em',
+              color: '#000',
+              opacity: wmOpacity,
+              pointerEvents: 'none',
+              userSelect: 'none',
+              whiteSpace: 'nowrap',
+              zIndex: 10,
+              textTransform: 'uppercase',
+            }}
+          >
+            {wmText}
+          </div>
+        )}
 
         <div className="text-center font-bold" style={{ fontSize: '16px', padding: '5px 0', borderBottom: '1px solid #000', letterSpacing: '0.05em' }}>
           {docTitle}
@@ -251,7 +297,7 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
                 <div>{profile?.address}</div>
                 <div>{[profile?.city, profile?.state, profile?.pin].filter(Boolean).join(', ')}</div>
                 <div>Phone : {profile?.phone}</div>
-                <div>Licence No. : {details?.sellerLicence || profile?.licenceNo || '20B/1234/27/2026'}</div>
+                <div>Licence No. : {details?.sellerLicence || profile?.licence || profile?.licenceNo || ''}</div>
                 <div>GSTIN : {profile?.gstin}</div>
                 <div>E-Mail : {profile?.email}</div>
               </td>
@@ -588,7 +634,7 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
                   <div className="font-bold">IFSC CODE {(account?.ifsc || profile?.ifsc || '')}</div>
                   {showUPI && qrDataUrl && (
                     <div style={{ textAlign: 'center', marginTop: '6px' }}>
-                      <img src={qrDataUrl} alt="UPI QR" style={{ width: '70px', height: '70px', display: 'inline-block' }} />
+                      <img src={qrDataUrl} alt="UPI QR" style={{ width: `${qrPx}px`, height: `${qrPx}px`, maxWidth: '100%', display: 'inline-block' }} />
                       <div style={{ fontSize: '8.5px', color: '#555', marginTop: '1px' }}>Scan to pay via UPI</div>
                     </div>
                   )}
@@ -597,14 +643,14 @@ const InvoicePreview = React.forwardRef(({ profile, client, details = {}, items 
               {showSignature && (
                 <td style={{ width: showBankDetails ? '30%' : '60%', padding: '4px', textAlign: 'center', verticalAlign: 'top', borderRight: 'none', borderBottom: 'none' }}>
                   <div className="font-bold" style={{ textAlign: 'right', fontSize: '10px' }}>
-                    For {profile?.businessName || 'Shree enterprises'}
+                    For {profile?.businessName || 'Business Name'}
                   </div>
-                  {profile?.signature ? (
-                    <img src={profile.signature} alt="Signature" style={{ maxHeight: '45px', maxWidth: '100%', display: 'inline-block', margin: '6px 0' }} />
+                  {signatureImg ? (
+                    <img src={signatureImg} alt="Signature" style={{ maxHeight: '45px', maxWidth: '100%', display: 'inline-block', margin: '6px 0' }} />
                   ) : (
                     <div style={{ height: '45px' }} />
                   )}
-                  <div className="font-bold" style={{ textAlign: 'right', fontSize: '10px' }}>Authorized Signatory</div>
+                  <div className="font-bold" style={{ textAlign: 'right', fontSize: '10px' }}>{signatoryLabel}</div>
                 </td>
               )}
             </tr>
